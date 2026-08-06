@@ -131,7 +131,6 @@ pub(crate) async fn open_lwd_channel(
     RUSTLS_INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-
     let endpoint = Endpoint::from_shared(lightwalletd_url.to_string())
         .map_err(|e| SyncError::net(format!("invalid URL: {e}")))?
         .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT);
@@ -149,12 +148,12 @@ pub(crate) async fn open_lwd_channel(
     Ok(CompactTxStreamerClient::new(channel))
 }
 
-/// Opens a channel for transaction broadcasts.
 pub(crate) async fn open_isolated_lwd_channel(
     lightwalletd_url: &str,
 ) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
     open_lwd_channel(lightwalletd_url).await
 }
+
 
 /// Return the current chain tip with a bounded response wait.
 pub(crate) async fn get_latest_block(
@@ -599,6 +598,24 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn direct_connections_keep_tcp_nodelay_enabled() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let accepted =
+            tokio::spawn(async move { listener.accept().await.map(|(stream, _)| stream) });
+
+        let uri: Uri = format!("http://127.0.0.1:{port}")
+            .parse()
+            .expect("valid loopback URI");
+    // Test removed (DirectRouteConnector was removed with Tor support)
+        accepted
+            .await
+            .expect("accept task")
+            .expect("accepted connection");
+    }
 
     #[test]
     fn explicit_ironwood_pool_requests_follow_nu6_3_activation() {

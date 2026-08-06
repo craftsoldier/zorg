@@ -606,7 +606,7 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
         let (address, is_hardware) = match account.ufvk() {
             Some(ufvk) => (
                 current_receive_address(&db, network, id, ufvk)?,
-                false,
+                is_keystone_style_ufvk(ufvk),
             ),
             None => (String::new(), false),
         };
@@ -714,6 +714,14 @@ pub fn delete_account(
         drop(db);
         delete_account_rows(db_path, account_id)?;
         crate::wallet::wallet_summary_cache::evict_db(db_path);
+        if let Err(error) = crate::wallet::sync::discard_keystone_migration_requests_for_account(
+            account_uuid,
+            network,
+        ) {
+            log::warn!(
+                "Failed to discard Keystone migration requests after deleting account: {error}"
+            );
+        }
         Ok(())
     })
 }

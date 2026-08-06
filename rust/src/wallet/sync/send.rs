@@ -548,7 +548,6 @@ pub(crate) struct KeystoneMigrationMessage {
     pub expected_signature_count: u32,
 }
 
-
 fn keystone_migration_message(
     id: &str,
     redacted_pczt: &[u8],
@@ -2683,7 +2682,6 @@ async fn broadcast_due_orchard_migration_transactions_inner(
     )
     .await
 }
-
 
 include!("send/ironwood_migration.rs");
 
@@ -5924,7 +5922,7 @@ pub(crate) struct ResubmitStats {
 /// wallet is doing without enabling DEBUG everywhere.
 pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
     db_path: &str,
-    _lightwalletd_url: &str,
+    lightwalletd_url: &str,
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     current_height: u32,
     excluded_txids: &HashSet<Vec<u8>>,
