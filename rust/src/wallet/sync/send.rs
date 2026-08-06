@@ -5922,7 +5922,7 @@ pub(crate) struct ResubmitStats {
 /// wallet is doing without enabling DEBUG everywhere.
 pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
     db_path: &str,
-    lightwalletd_url: &str,
+    _lightwalletd_url: &str,
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     current_height: u32,
     excluded_txids: &HashSet<Vec<u8>>,
@@ -5981,11 +5981,7 @@ where
         }
 
         let txid_hex = hex::encode(&tx.txid_bytes);
-        let first_attempt = if crate::network_privacy::is_tor_desired() {
-            broadcast_raw_transaction_isolated(lightwalletd_url, &tx.raw_tx).await
-        } else {
-            broadcast_raw_transaction(client, &tx.raw_tx).await
-        };
+        let first_attempt = broadcast_raw_transaction(client, &tx.raw_tx).await;
         match first_attempt {
             Ok(()) => {
                 log::info!(
@@ -6011,11 +6007,7 @@ where
                     stats.failed += 1;
                     break;
                 }
-                let retry = if crate::network_privacy::is_tor_desired() {
-                    broadcast_raw_transaction_isolated(lightwalletd_url, &tx.raw_tx).await
-                } else {
-                    broadcast_raw_transaction(client, &tx.raw_tx).await
-                };
+                let retry = broadcast_raw_transaction(client, &tx.raw_tx).await;
                 match retry {
                     Ok(()) => {
                         log::info!("resubmit: {txid_hex} ok on retry");

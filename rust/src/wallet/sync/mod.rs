@@ -39,6 +39,7 @@ mod transactions;
 // reachable from anywhere in the crate but not re-exported to
 // downstream consumers, which matches the pre-refactor surface
 // exactly).
+#[allow(unused_imports)]
 pub(crate) use migration::{
     configure_fast_testnet_migration, delete_account_migration_rows_with_tx,
     denomination_confirmations_required, migration_preparation_snapshot_read_only,
@@ -54,6 +55,7 @@ pub use pczt::{
 };
 pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
 pub(crate) use send::estimate_send_max;
+#[allow(unused_imports)]
 pub(crate) use send::{
     abandon_orchard_migration, advance_orchard_migration_preparation_for_run,
     complete_orchard_migration_batch_pczt, complete_orchard_migration_denominations_pczt,
@@ -74,9 +76,11 @@ pub use send::{
     estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send,
     ExecuteProposalResult, IronwoodMigrationResult,
 };
+#[allow(unused_imports)]
 pub(crate) use send::{
     create_shield_transparent_pczt, get_shield_transparent_status, shield_transparent_balance,
 };
+#[allow(unused_imports)]
 pub(crate) use send::{get_orchard_migration_immediate_plan, get_orchard_migration_private_plan};
 // Internal-only re-export for `sync_engine::run_sync_impl`'s
 // auto-resubmit pass. Not part of the `wallet::sync` public surface.
@@ -93,6 +97,7 @@ pub(crate) use send::ShieldTransparentResult;
 #[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
 pub(crate) use send::ShieldTransparentStatus;
 #[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
+#[allow(unused_imports)]
 pub(crate) use send::{KeystoneMigrationMessage, KeystoneMigrationSigningRequest};
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address,
