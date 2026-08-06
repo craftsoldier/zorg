@@ -261,7 +261,7 @@ pub fn put_ironwood_subtree_roots(
     }
 }
 
-pub(crate) struct ScanRangeInfo {
+pub struct ScanRangeInfo {
     pub start: u64,
     pub end: u64,
     pub priority: u8,
@@ -366,7 +366,7 @@ pub fn scan_blocks(
 
 // ======================== Balance & Progress ========================
 
-pub(crate) struct SyncProgress {
+pub struct SyncProgress {
     pub scanned_height: u64,
     pub chain_tip_height: u64,
     pub is_syncing: bool,

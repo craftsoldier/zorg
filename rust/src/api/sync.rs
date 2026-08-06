@@ -2,10 +2,8 @@ use std::panic;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use flutter_rust_bridge::frb;
 use zeroize::Zeroizing;
 
-use crate::frb_generated::StreamSink;
 use crate::wallet::{keys, network::WalletNetwork, secret_store, sync as wallet_sync, sync_engine};
 
 // ======================== Sync Mode ========================
@@ -14,35 +12,16 @@ pub(crate) static DESIRED_SYNC_MODE: AtomicU8 = AtomicU8::new(0);
 
 /// Set the desired sync mode. 0=none, 1=foreground, 2=background.
 /// The running sync loop checks this each batch and exits if mismatched.
-#[frb(sync)]
 pub fn set_sync_mode(mode: u8) {
     DESIRED_SYNC_MODE.store(mode, Ordering::SeqCst);
 }
 
 /// Get the current desired sync mode.
-#[frb(sync)]
 pub fn get_sync_mode() -> u8 {
     DESIRED_SYNC_MODE.load(Ordering::SeqCst)
 }
 
 // ======================== Full Sync ========================
-
-/// Progress event streamed to Dart during sync.
-pub struct ApiSyncProgressEvent {
-    pub scanned_height: u64,
-    pub chain_tip_height: u64,
-    pub percentage: f64,
-    /// UI-only smoothed progress target. Dart increments toward this
-    /// assuming one virtual block per 500ms, capped at the next batch.
-    pub display_target_percentage: f64,
-    pub display_target_blocks: u64,
-    pub is_syncing: bool,
-    pub is_complete: bool,
-    pub has_new_tx: bool,
-    /// Current sync phase: `"download"`, `"scan"`, `"enhance"`, or
-    /// `""` (completion / unspecified).
-    pub phase: String,
-}
 
 fn run_full_sync_internal<F>(
     db_path: String,
@@ -88,55 +67,8 @@ where
     result
 }
 
-/// Start a full sync. Streams progress events to Dart via StreamSink.
-/// mode: 1=foreground, 2=background. Sync exits if desired mode changes.
-pub fn start_full_sync(
-    db_path: String,
-    lightwalletd_url: String,
-    network: String,
-    mode: u8,
-    sink: StreamSink<ApiSyncProgressEvent>,
-) -> Result<(), String> {
-    let result = run_full_sync_internal(db_path, lightwalletd_url, network, mode, |progress| {
-        if sink
-            .add(ApiSyncProgressEvent {
-                scanned_height: progress.scanned_height,
-                chain_tip_height: progress.chain_tip_height,
-                percentage: progress.percentage,
-                display_target_percentage: progress.display_target_percentage,
-                display_target_blocks: progress.display_target_blocks,
-                is_syncing: progress.is_syncing,
-                is_complete: progress.is_complete,
-                has_new_tx: progress.has_new_tx,
-                phase: progress.phase.clone(),
-            })
-            .is_err()
-        {
-            log::warn!(
-                "[{}] sync: StreamSink closed, progress not delivered",
-                sync_engine::elapsed(),
-            );
-        }
-    });
-
-    // Generated Dart exposes the sink stream, while the FRB task future is
-    // detached. Forward terminal errors through the stream it actually reads.
-    if let Err(error) = result {
-        if sink.add_error(error.clone()).is_err() {
-            log::warn!(
-                "[{}] sync: StreamSink closed before error delivery: {error}",
-                sync_engine::elapsed(),
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Blocking sync entrypoint that uses the same API-layer network parsing,
-/// desired-mode globals, and running guard as `start_full_sync`, but without
-/// a StreamSink. Used by Rust integration tests that want to stay on the
-/// public API surface.
+/// Blocking sync entrypoint. Used by Rust integration tests and CLI tools
+/// that want to stay on the public API surface without streaming.
 pub fn run_full_sync_blocking(
     db_path: String,
     lightwalletd_url: String,
@@ -147,19 +79,16 @@ pub fn run_full_sync_blocking(
 }
 
 /// Cancel a running full sync.
-#[frb(sync)]
 pub fn cancel_full_sync() {
     SYNC_CANCEL.store(true, Ordering::Relaxed);
 }
 
 /// Check whether a sync cancel has been requested.
-#[frb(sync)]
 pub fn is_sync_cancel_requested() -> bool {
     SYNC_CANCEL.load(Ordering::Relaxed)
 }
 
 /// Check if a sync is currently running.
-#[frb(sync)]
 pub fn is_sync_running() -> bool {
     SYNC_RUNNING.load(Ordering::SeqCst)
 }
@@ -168,179 +97,6 @@ pub(crate) static SYNC_CANCEL: std::sync::LazyLock<Arc<AtomicBool>> =
     std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 pub(crate) static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
-
-// ======================== Mempool Observer ========================
-
-/// Event emitted by the mempool observer when a wallet-relevant
-/// transaction appears on lightwalletd's mempool stream. Mirrored
-/// one-to-one from `sync_engine::mempool::MempoolTxEvent` for FRB
-/// codegen.
-pub struct ApiMempoolTxEvent {
-    /// Lower-case hex of the tx id.
-    pub txid_hex: String,
-    /// Account UUIDs that this event is known to affect. Empty means the
-    /// tx is wallet-relevant but not account-scoped enough for Rust to
-    /// name the account, so Dart keeps the legacy behavior of refreshing
-    /// the active account.
-    pub account_uuids: Vec<String>,
-    /// `true` when the tx is wallet-relevant: either the wallet DB
-    /// already has this txid as unmined, or the observer decrypted
-    /// and stored a new inbound transaction from the mempool. Dart
-    /// uses this flag to decide whether to refresh balance + history
-    /// immediately.
-    pub matched: bool,
-}
-
-/// Shared lifecycle state for the background mempool observer.
-///
-/// The previous revision of this file used a plain
-/// `MEMPOOL_RUNNING: AtomicBool` + `MEMPOOL_CANCEL:
-/// LazyLock<Arc<AtomicBool>>` pair, which was racy: `start` would
-/// reset the shared cancel flag *after* the running-bit CAS, and a
-/// `stop` call that landed in between would set `cancel=true` only
-/// to have `start` immediately clear it back to `false`. That lost
-/// the stop signal entirely and let the observer keep talking to
-/// lightwalletd after the UI had asked for shutdown.
-///
-/// This replacement pairs each run with its own `Arc<AtomicBool>`
-/// cancel token held inside a mutex-protected state struct. `start`
-/// installs a fresh token while holding the mutex; `stop` takes
-/// the same mutex and writes `true` to whichever token is
-/// currently installed. A `stop` that lands in the middle of a
-/// `start` is serialized by the mutex and sees the new token, and
-/// a `stop` that lands after the observer exits becomes a no-op
-/// because `cancel` is `None`. There is no longer a window in
-/// which a stop can be lost.
-pub(crate) struct MempoolObserverState {
-    /// `true` while an observer coroutine is in flight. Mirrors
-    /// the old `MEMPOOL_RUNNING` atomic.
-    running: bool,
-    /// Cancel token for the current run. `Some` while `running`
-    /// is `true`; `None` otherwise. Holding a strong reference
-    /// here lets `stop` write to the same flag the observer's
-    /// sleep loop is already polling.
-    cancel: Option<Arc<AtomicBool>>,
-}
-
-pub(crate) static MEMPOOL_OBSERVER_STATE: std::sync::LazyLock<
-    std::sync::Mutex<MempoolObserverState>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(MempoolObserverState {
-        running: false,
-        cancel: None,
-    })
-});
-
-/// Start the background mempool observer.
-///
-/// Blocks until [`stop_mempool_observer`] is called or the
-/// observer returns on an unrecoverable setup error. Only parsed
-/// wallet-relevant mempool txs are pushed to `sink` as
-/// [`ApiMempoolTxEvent`]s; unrelated txs are filtered inside Rust.
-///
-/// The FRB layer runs this on the Rust isolate thread pool, so
-/// Dart can `await` the call while the observer keeps polling
-/// lightwalletd in the background. Dart is expected to fire this
-/// alongside `start_full_sync` and call `stop_mempool_observer`
-/// alongside `cancel_full_sync` — the two lifecycles are parallel
-/// but separately controlled (intentional: the same bug in one
-/// path must not silently take down the other).
-pub fn start_mempool_observer(
-    db_path: String,
-    network: String,
-    lightwalletd_url: String,
-    sink: StreamSink<ApiMempoolTxEvent>,
-) -> Result<(), String> {
-    // Install a fresh cancel token under the state mutex. The
-    // mutex serializes with `stop_mempool_observer`, so a stop
-    // that raced us cannot leak into the *next* run: it either
-    // runs first (and sees `running == false`, which is a no-op)
-    // or runs after us (and finds this new token, which the
-    // observer will then honour).
-    let cancel = {
-        let mut state = MEMPOOL_OBSERVER_STATE
-            .lock()
-            .map_err(|e| format!("mempool state mutex poisoned: {e}"))?;
-        if state.running {
-            return Err("Mempool observer already running".into());
-        }
-        let token = Arc::new(AtomicBool::new(false));
-        state.running = true;
-        state.cancel = Some(token.clone());
-        token
-    };
-
-    let result = catch(|| {
-        let network = parse_network_and_migrate(&db_path, &network)?;
-        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-        rt.block_on(async {
-            crate::wallet::sync_engine::mempool::run_mempool_observer(
-                db_path,
-                network,
-                lightwalletd_url,
-                cancel,
-                move |event| {
-                    if sink
-                        .add(ApiMempoolTxEvent {
-                            txid_hex: event.txid_hex,
-                            account_uuids: event.account_uuids,
-                            matched: event.matched,
-                        })
-                        .is_err()
-                    {
-                        log::warn!("mempool: StreamSink closed, event not delivered");
-                    }
-                },
-            )
-            .await
-        })
-    });
-
-    // Clear running + drop the cancel token so a subsequent
-    // `stop_mempool_observer` call is a no-op rather than
-    // incorrectly flipping a token the observer never consumes.
-    // A poisoned mutex here is best-effort logged; `result`
-    // still carries the actual observer outcome.
-    match MEMPOOL_OBSERVER_STATE.lock() {
-        Ok(mut state) => {
-            state.running = false;
-            state.cancel = None;
-        }
-        Err(e) => {
-            log::error!("mempool: state mutex poisoned during teardown: {e}");
-        }
-    }
-
-    result
-}
-
-/// Ask the running mempool observer to exit at the next cancel
-/// check (inside the 100ms sleep slices or between stream
-/// messages). Safe to call when no observer is running — the
-/// stored cancel token is `None` in that case and this becomes a
-/// no-op.
-#[frb(sync)]
-pub fn stop_mempool_observer() {
-    match MEMPOOL_OBSERVER_STATE.lock() {
-        Ok(state) => {
-            if let Some(token) = state.cancel.as_ref() {
-                token.store(true, Ordering::Relaxed);
-            }
-        }
-        Err(e) => {
-            log::error!("mempool: state mutex poisoned in stop: {e}");
-        }
-    }
-}
-
-/// Check whether the mempool observer task is currently running.
-#[frb(sync)]
-pub fn is_mempool_observer_running() -> bool {
-    MEMPOOL_OBSERVER_STATE
-        .lock()
-        .map(|s| s.running)
-        .unwrap_or(false)
-}
 
 // ======================== Data Structures ========================
 
@@ -2464,7 +2220,6 @@ pub fn get_transaction_detail(
 
 // ======================== Utility ========================
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn get_blocks_dir(cache_path: String) -> String {
     wallet_sync::get_blocks_dir(&cache_path)
 }

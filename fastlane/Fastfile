@@ -1,5 +1,0 @@
-import "./macos/Fastfile"
-import "./linux/Fastfile"
-import "./windows/Fastfile"
-import "./android/Fastfile"
-import "./ios/Fastfile"

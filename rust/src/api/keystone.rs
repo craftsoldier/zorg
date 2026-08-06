@@ -278,7 +278,6 @@ pub fn pczt_spend_nullifiers(pczt_bytes: Vec<u8>) -> Result<Vec<String>, String>
 /// first `onDetect` callback fires, and a fire-and-forget `Future` provides no
 /// such ordering guarantee. The Rust body is a single mutex lock + `None`
 /// assignment, so it's trivially non-blocking.
-#[flutter_rust_bridge::frb(sync)]
 pub fn reset_ur_session() {
     keystone::reset_ur_session();
 }

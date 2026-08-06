@@ -46,7 +46,6 @@ mod block_source;
 mod enhance;
 mod error;
 mod lwd;
-pub(crate) mod mempool;
 
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;

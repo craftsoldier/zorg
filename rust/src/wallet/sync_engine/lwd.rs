@@ -27,7 +27,7 @@ use zcash_client_backend::{
     data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees},
     proto::service::{
         self, compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-        Empty, GetAddressUtxosArg, GetAddressUtxosReply, GetSubtreeRootsArg, RawTransaction,
+        GetAddressUtxosArg, GetAddressUtxosReply, GetSubtreeRootsArg, RawTransaction,
         SendResponse, TransparentAddressBlockFilter, TreeState, TxFilter,
     },
 };
@@ -588,36 +588,6 @@ pub(super) async fn download_subtree_roots(
     Ok(())
 }
 
-/// Open a server-streaming `GetMempoolStream` RPC against
-/// lightwalletd and return the tonic stream of raw transactions
-/// sitting in the server's mempool.
-///
-/// The caller owns the reconnect loop. lightwalletd closes this
-/// stream every time a new block is mined (the server-side
-/// comment on `get_mempool_stream` explicitly says: "*close the
-/// returned stream when a new block is mined*"), and the
-/// [`crate::wallet::sync_engine::mempool`] observer relies on
-/// that EOF to kick off its reconnect / re-decrypt cycle. Normal
-/// termination therefore surfaces as `stream.message().await`
-/// returning `Ok(None)`, not as an `Err` — the caller should not
-/// treat that case as a failure.
-///
-/// This helper stays a thin wrapper on `client.get_mempool_stream`
-/// so that error-to-`SyncError::Network` mapping lives in the
-/// same place as every other lwd gRPC call.
-pub(crate) async fn start_mempool_stream(
-    client: &mut CompactTxStreamerClient<Channel>,
-) -> Result<tonic::Streaming<RawTransaction>, SyncError> {
-    await_tonic_stream(
-        "get_mempool_stream",
-        LIGHTWALLETD_STREAM_START_TIMEOUT,
-        client.get_mempool_stream(Request::new(Empty {})),
-    )
-    .await
-    .map_err(|e| status_to_network_error("get_mempool_stream", e))
-}
-
-/// Streams compact blocks in `[start, end]` (inclusive) from
 /// lightwalletd into an in-memory [`MemoryBlockSource`] that the scan
 /// loop can hand straight to `scan_cached_blocks`. No file I/O — the
 /// batch lives in RAM for exactly one scan call and is dropped

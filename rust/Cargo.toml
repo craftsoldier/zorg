@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-flutter_rust_bridge = "=2.11.1"
-
 zcash_script = "0.4.3"
 sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }
 uuid = "1.1"
@@ -64,7 +62,7 @@ rustls = "0.23"
 rusqlite = "0.37"
 redb = "4.1.0"
 
-# Logging (FRB forwards to Dart console via setup_default_user_utils)
+# Logging
 log = "0.4"
 
 # Hex encoding
@@ -109,11 +107,7 @@ features = [
 version = "0.22.0-rc.6"
 features = ["orchard", "transparent-inputs", "unstable", "serde"]
 
-# Voting clients need PIR lookup support and vote-commitment-tree sync.
-[dependencies.zcash_voting]
-version = "2.0.0-rc.2"
-
-# Keep Orchard aligned with the released librustzcash and zcash_voting family
+# Keep Orchard aligned with the released librustzcash family
 # to avoid type conflicts.
 [dependencies.orchard]
 version = "0.15.4"
@@ -155,17 +149,12 @@ rusqlite = "0.37"
 # Already in the dependency graph via zcash_client_backend.
 zcash_note_encryption = "0.4"
 
-[dev-dependencies.vote-commitment-tree]
-version = "0.4.0-rc.1"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)', 'cfg(ironwood_masquerade)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ironwood_masquerade)'] }
 
-# Flutter debug builds use Cargokit + Cargo's dev profile (`cargo build`
-# without `--release`). Rust crypto and voting flows are slow under the default
-# debug opt-level=0, so keep debug assertions and symbols while making local
-# Flutter/debug voting builds usable. Release builds are unaffected by this
-# profile.
+# Debug builds with high opt-level for usable crypto/voting performance.
+# Release builds are unaffected.
 [profile.dev]
 opt-level = 3
 

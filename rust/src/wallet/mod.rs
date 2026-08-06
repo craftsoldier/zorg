@@ -7,5 +7,4 @@ pub mod secret_store;
 pub mod sync;
 pub mod sync_engine;
 pub(crate) mod transparent_receive_cache;
-pub mod voting;
 pub(crate) mod wallet_summary_cache;

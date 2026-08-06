@@ -338,7 +338,7 @@ impl MigrationBroadcastPolicy<'_> {
 /// whether it has to download the Sapling proving parameters (~50MB)
 /// before the send can actually complete; `fee_zatoshi` lets the
 /// confirmation dialog show a real fee rather than an estimate.
-pub(crate) struct ProposalResult {
+pub struct ProposalResult {
     pub proposal_id: u64,
     pub needs_sapling_params: bool,
     pub fee_zatoshi: u64,

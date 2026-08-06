@@ -34,7 +34,6 @@ const PHASE_SIGNING: &str = "signing";
 const PHASE_VOTE_COMMIT_STAGE: &str = "vote_commit_stage";
 
 /// Return the shared last-moment helper-share buffer, in Unix seconds.
-#[flutter_rust_bridge::frb(sync)]
 pub fn last_moment_buffer_seconds(
     ceremony_start_seconds: u64,
     vote_end_time_seconds: u64,
@@ -46,7 +45,6 @@ pub fn last_moment_buffer_seconds(
 }
 
 /// Return true when `now_seconds` is inside the active round's last-moment window.
-#[flutter_rust_bridge::frb(sync)]
 pub fn is_last_moment(
     now_seconds: u64,
     ceremony_start_seconds: u64,

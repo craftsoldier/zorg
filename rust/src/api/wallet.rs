@@ -951,19 +951,16 @@ pub fn get_unified_address(
 }
 
 /// Generate a new 24-word BIP-39 mnemonic phrase.
-#[flutter_rust_bridge::frb(sync)]
 pub fn generate_mnemonic() -> String {
     keys::generate_mnemonic()
 }
 
 /// Get the BIP-39 English word list used for mnemonic validation.
-#[flutter_rust_bridge::frb(sync)]
 pub fn mnemonic_word_list() -> Vec<String> {
     keys::mnemonic_word_list()
 }
 
 /// Check if a wallet database exists at the given path.
-#[flutter_rust_bridge::frb(sync)]
 pub fn wallet_exists(db_path: String) -> bool {
     keys::wallet_exists(&db_path)
 }
@@ -977,7 +974,6 @@ pub fn ensure_wallet_db_migrated(db_path: String, network: String) -> Result<(),
 }
 
 /// Validate a mnemonic phrase (checks word count and validity).
-#[flutter_rust_bridge::frb(sync)]
 pub fn validate_mnemonic(mnemonic: String) -> bool {
     keys::mnemonic_to_seed(&mnemonic).is_ok()
 }

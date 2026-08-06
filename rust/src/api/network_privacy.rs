@@ -20,7 +20,6 @@ const TOR_API_RESPONSE_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Blocks new policy-aware direct requests immediately. Tor bootstrap is
 /// intentionally separate so the caller can first quiesce channels that were
 /// opened while direct mode was active.
-#[flutter_rust_bridge::frb(sync)]
 pub fn begin_network_privacy_enable() {
     crate::network_privacy::begin_tor_enable();
 }
@@ -48,12 +47,10 @@ pub async fn configure_network_privacy(
 
 /// Returns the current runtime state. `Bootstrapping` and `Failed` both mean
 /// that app network requests are blocked while Tor remains the desired route.
-#[flutter_rust_bridge::frb(sync)]
 pub fn get_network_privacy_status() -> NetworkPrivacyStatus {
     crate::network_privacy::status()
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn is_tor_enabled() -> bool {
     crate::network_privacy::is_tor_desired()
 }

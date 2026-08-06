@@ -47,14 +47,14 @@ const IRONWOOD_POOL: i64 = 4;
 // ======================== Balance ========================
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WalletBalanceAvailability {
+pub enum WalletBalanceAvailability {
     Available,
     SummaryUnavailable,
     AccountUnavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WalletBalance {
+pub struct WalletBalance {
     pub availability: WalletBalanceAvailability,
     pub transparent: u64,
     pub sapling: u64,
@@ -257,7 +257,7 @@ fn orchard_address_request() -> zcash_keys::keys::UnifiedAddressRequest {
 
 // ======================== Transaction Enhancement Requests ========================
 
-pub(crate) struct TxDataRequest {
+pub struct TxDataRequest {
     pub request_type: String, // "get_status", "enhancement", "address_txids"
     pub txid: Option<String>,
     pub address: Option<String>,
@@ -422,7 +422,7 @@ pub fn set_transaction_status(
 
 // ======================== Transaction History ========================
 
-pub(crate) struct TransactionInfo {
+pub struct TransactionInfo {
     pub txid_hex: String,
     pub mined_height: u64,
     pub expired_unmined: bool,
@@ -436,7 +436,7 @@ pub(crate) struct TransactionInfo {
     pub created_time: u64,
 }
 
-pub(crate) struct TransactionDetail {
+pub struct TransactionDetail {
     pub txid_hex: String,
     pub tx_kind: String,
     pub primary_address: Option<String>,
@@ -446,7 +446,7 @@ pub(crate) struct TransactionDetail {
     pub outputs: Vec<TransactionDetailOutput>,
 }
 
-pub(crate) struct TransactionDetailOutput {
+pub struct TransactionDetailOutput {
     pub address: Option<String>,
     pub amount_zatoshi: u64,
     pub pool: String,
