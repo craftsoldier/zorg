@@ -460,7 +460,14 @@ pub struct KeystoneMigrationSigningRequest {
 /// `KeystoneSigResult` and feeds it into the migration completion calls.
 pub struct KeystoneSignedMigrationMessage {
     pub id: String,
-    pub sigs: Vec<crate::api::keystone::KeystoneActionSig>,
+    pub sigs: Vec<KeystoneActionSig>,
+}
+
+/// One signed message in the compact "signatures-only" Keystone response.
+pub struct KeystoneActionSig {
+    pub pool: u8,
+    pub action_index: u32,
+    pub sig: Vec<u8>,
 }
 
 pub struct KeystoneMigrationProofStatus {

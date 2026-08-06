@@ -48,6 +48,7 @@ pub(crate) use migration::{
     MigrationPreparationTransactionState, MigrationScheduleEntry, MigrationStatus,
     PreparationTimingPolicy,
 };
+#[allow(unused_imports)]
 pub(crate) use pczt::extract_compact_sigs_from_pczt;
 pub use pczt::{
     add_proofs_to_pczt, create_pczt_from_proposal, discard_proposal, extract_and_broadcast_pczt,
@@ -85,6 +86,8 @@ pub(crate) use send::{get_orchard_migration_immediate_plan, get_orchard_migratio
 // Internal-only re-export for `sync_engine::run_sync_impl`'s
 // auto-resubmit pass. Not part of the `wallet::sync` public surface.
 pub(crate) use send::migration_anchor_retention_required;
+#[allow(unused_imports)]
+pub(crate) use send::{KeystoneMigrationMessage, KeystoneMigrationSigningRequest};
 pub(crate) use send::resubmit_pending_transactions;
 #[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
 pub(crate) use send::ProposalResult;
@@ -98,7 +101,6 @@ pub(crate) use send::ShieldTransparentResult;
 pub(crate) use send::ShieldTransparentStatus;
 #[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
 #[allow(unused_imports)]
-pub(crate) use send::{KeystoneMigrationMessage, KeystoneMigrationSigningRequest};
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address,
     get_previous_transaction_count_for_address, get_transaction_data_requests,

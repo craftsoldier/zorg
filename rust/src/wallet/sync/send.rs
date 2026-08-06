@@ -548,6 +548,7 @@ pub(crate) struct KeystoneMigrationMessage {
     pub expected_signature_count: u32,
 }
 
+
 fn keystone_migration_message(
     id: &str,
     redacted_pczt: &[u8],
@@ -2682,6 +2683,7 @@ async fn broadcast_due_orchard_migration_transactions_inner(
     )
     .await
 }
+
 
 include!("send/ironwood_migration.rs");
 
