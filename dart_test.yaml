@@ -1,0 +1,10 @@
+tags:
+  # Screenshot generation is an explicit tooling lane. The wrapper supplies
+  # --update-goldens, the deterministic defines, and --run-skipped.
+  figma-capture:
+    skip: "Figma capture only: scripts/figma-compare.sh widget --scenario <id>"
+  # Mobile-UI tests are opt-in: skipped in the default (desktop) lane,
+  # re-enabled by the mobile lane command in the skip reason below.
+  # See "Design Token Form Factor" in AGENTS.md.
+  mobile:
+    skip: "mobile token lane only: fvm flutter test --tags mobile --run-skipped --dart-define=VIZOR_FORM_FACTOR=mobile"

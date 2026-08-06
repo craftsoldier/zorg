@@ -1,0 +1,70 @@
+import 'package:flutter/painting.dart';
+
+import '../primitives.dart';
+
+/// Interaction-state colors from the Figma `Semantic/State` group.
+///
+/// [hover], [pressed], and [selected] are standalone neutral backgrounds.
+/// [hoverOpacity] is the matching alpha overlay token for hover states that
+/// need to preserve the underlying surface.
+/// [selectedOpacity] is the matching alpha overlay token for selected states
+/// that need to preserve the underlying surface.
+///
+/// [focusRing] + [focusGap] form the 2dp focus indicator: a ring with max
+/// contrast against the page, separated from the element by a 2dp gap so it
+/// reads cleanly on any surface.
+///
+/// [focusRingBrand] is the retained brand-crimson focus variant for one-off
+/// accent cases. The current button component uses the neutral ring for its
+/// primary variant.
+class AppStateColors {
+  const AppStateColors({
+    required this.hover,
+    required this.hoverOpacity,
+    required this.pressed,
+    required this.focus,
+    required this.selected,
+    required this.selectedOpacity,
+    required this.focusRing,
+    required this.focusGap,
+    required this.focusRingBrand,
+    required this.focusRingDestructive,
+  });
+
+  final Color hover;
+  final Color hoverOpacity;
+  final Color pressed;
+  final Color focus;
+  final Color selected;
+  final Color selectedOpacity;
+  final Color focusRing;
+  final Color focusGap;
+  final Color focusRingBrand;
+  final Color focusRingDestructive;
+
+  static const dark = AppStateColors(
+    hover: Primitives.p100Dark,
+    hoverOpacity: Primitives.p0Alpha15Dark,
+    pressed: Primitives.p150Dark,
+    focus: Primitives.p200Dark,
+    selected: Primitives.p150Dark,
+    selectedOpacity: Primitives.p0Alpha30Dark,
+    focusRing: Primitives.p800Dark,
+    focusGap: Primitives.p0Dark,
+    focusRingBrand: CrimsonPrimitives.p400Dark,
+    focusRingDestructive: PlumPrimitives.p200Dark,
+  );
+
+  static const light = AppStateColors(
+    hover: Primitives.p50Light,
+    hoverOpacity: Primitives.p900Alpha5Light,
+    pressed: Primitives.p150Light,
+    focus: Primitives.p200Light,
+    selected: Primitives.p150Light,
+    selectedOpacity: Primitives.p900Alpha5Light,
+    focusRing: Primitives.p900Light,
+    focusGap: Primitives.p0Light,
+    focusRingBrand: CrimsonPrimitives.p300Light,
+    focusRingDestructive: PlumPrimitives.p400Light,
+  );
+}

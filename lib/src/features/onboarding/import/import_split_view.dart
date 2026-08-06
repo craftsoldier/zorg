@@ -1,0 +1,225 @@
+import 'package:flutter/widgets.dart';
+
+import '../../../core/layout/app_desktop_shell.dart';
+import '../../../core/motion/onboarding_motion.dart';
+import '../../../core/theme/app_theme.dart';
+import '../../../core/widgets/app_icon.dart';
+import '../shared/onboarding_chrome.dart';
+
+export '../shared/onboarding_chrome.dart' show OnboardingBackTarget;
+
+enum ImportOnboardingStep {
+  secretPassphrase,
+  walletBirthdayHeight,
+  setPassword,
+  customiseAccount,
+}
+
+extension ImportOnboardingStepX on ImportOnboardingStep {
+  // Sidebar step labels keep their original Title Case — see the
+  // sentence-case exception in AGENTS.md (UI Copy Conventions).
+  String get label => switch (this) {
+    ImportOnboardingStep.secretPassphrase => 'Secret Passphrase',
+    ImportOnboardingStep.walletBirthdayHeight => 'Wallet Birthday Height',
+    ImportOnboardingStep.setPassword => 'Set Password',
+    ImportOnboardingStep.customiseAccount => 'Customise wallet',
+  };
+
+  String get iconName => switch (this) {
+    ImportOnboardingStep.secretPassphrase => AppIcons.key,
+    ImportOnboardingStep.walletBirthdayHeight => AppIcons.block,
+    ImportOnboardingStep.setPassword => AppIcons.lock,
+    ImportOnboardingStep.customiseAccount => AppIcons.user,
+  };
+}
+
+ImportOnboardingStep importOnboardingStepFromLocation(String location) {
+  if (location.startsWith('/import/customise-account')) {
+    return ImportOnboardingStep.customiseAccount;
+  }
+  if (location.startsWith('/import/set-password')) {
+    return ImportOnboardingStep.setPassword;
+  }
+  if (location.startsWith('/import/birthday')) {
+    return ImportOnboardingStep.walletBirthdayHeight;
+  }
+  return ImportOnboardingStep.secretPassphrase;
+}
+
+class ImportOnboardingShell extends StatelessWidget {
+  const ImportOnboardingShell({
+    required this.activeStep,
+    required this.showPasswordStep,
+    required this.child,
+    super.key,
+  });
+
+  final ImportOnboardingStep activeStep;
+  final bool showPasswordStep;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final routeAnimation =
+        ModalRoute.of(context)?.animation ??
+        const AlwaysStoppedAnimation<double>(1.0);
+    final entrance = CurvedAnimation(
+      parent: routeAnimation,
+      curve: kOnboardingForwardCurve,
+      reverseCurve: kOnboardingReverseCurve,
+    );
+
+    return AppDesktopShell(
+      sidebarWidth: 256,
+      background: _ImportOnboardingWindowBackground(activeStep: activeStep),
+      sidebar: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(-1, 0),
+          end: Offset.zero,
+        ).animate(entrance),
+        child: _Sidebar(
+          activeStep: activeStep,
+          showPasswordStep: showPasswordStep,
+        ),
+      ),
+      pane: FadeTransition(opacity: entrance, child: child),
+    );
+  }
+}
+
+class _ImportOnboardingWindowBackground extends StatelessWidget {
+  const _ImportOnboardingWindowBackground({required this.activeStep});
+
+  final ImportOnboardingStep activeStep;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = AppTheme.of(context) == AppThemeData.dark;
+    final asset = switch (activeStep) {
+      ImportOnboardingStep.secretPassphrase ||
+      ImportOnboardingStep.walletBirthdayHeight =>
+        isDark
+            ? 'assets/illustrations/onboarding_secret_passphrase_background_dark.png'
+            : 'assets/illustrations/onboarding_secret_passphrase_background_light.png',
+      // Figma uses the same castle line-art for both themes (alpha-only
+      // strokes composite against the window color), so one asset serves
+      // light and dark — same wiring as the create flow.
+      ImportOnboardingStep.setPassword =>
+        'assets/illustrations/onboarding_set_password_background_light.png',
+      ImportOnboardingStep.customiseAccount => null,
+    };
+
+    if (asset == null) {
+      return DecoratedBox(
+        decoration: BoxDecoration(color: context.colors.background.window),
+      );
+    }
+
+    return DecoratedBox(
+      decoration: BoxDecoration(color: context.colors.background.window),
+      child: Image.asset(
+        asset,
+        fit: BoxFit.cover,
+        alignment: Alignment.topCenter,
+      ),
+    );
+  }
+}
+
+class ImportOnboardingTrailingPane extends StatelessWidget {
+  const ImportOnboardingTrailingPane({
+    required this.child,
+    this.backTarget,
+    this.overlay,
+    this.bodyPadding = const EdgeInsets.fromLTRB(12, 16, 12, 16),
+    super.key,
+  });
+
+  final Widget child;
+  final OnboardingBackTarget? backTarget;
+  final Widget? overlay;
+  final EdgeInsetsGeometry bodyPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    return OnboardingPaneChrome(
+      backTarget: backTarget,
+      overlay: overlay,
+      bodyPadding: bodyPadding,
+      child: child,
+    );
+  }
+}
+
+class _Sidebar extends StatelessWidget {
+  const _Sidebar({required this.activeStep, required this.showPasswordStep});
+
+  final ImportOnboardingStep activeStep;
+  final bool showPasswordStep;
+
+  List<ImportOnboardingStep> get _steps => [
+    ImportOnboardingStep.secretPassphrase,
+    ImportOnboardingStep.walletBirthdayHeight,
+    if (showPasswordStep) ImportOnboardingStep.setPassword,
+    ImportOnboardingStep.customiseAccount,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return OnboardingSidebarChrome(
+      steps: [
+        for (final step in _steps)
+          OnboardingSidebarStepData(
+            label: step.label,
+            iconName: step.iconName,
+            active: step == activeStep,
+          ),
+      ],
+      illustration: _SidebarIllustration(activeStep: activeStep),
+    );
+  }
+}
+
+class _SidebarIllustration extends StatelessWidget {
+  const _SidebarIllustration({required this.activeStep});
+
+  final ImportOnboardingStep activeStep;
+
+  static const _frameWidth = 256.0;
+  static const _frameHeight = 405.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = AppTheme.of(context) == AppThemeData.dark;
+    final asset = switch (activeStep) {
+      ImportOnboardingStep.secretPassphrase =>
+        isDark
+            ? 'assets/illustrations/onboarding_import_secret_passphrase_sidebar_dark.png'
+            : 'assets/illustrations/onboarding_import_secret_passphrase_sidebar_light.png',
+      ImportOnboardingStep.walletBirthdayHeight =>
+        isDark
+            ? 'assets/illustrations/onboarding_wallet_birthday_sidebar_dark.png'
+            : 'assets/illustrations/onboarding_wallet_birthday_sidebar_light.png',
+      ImportOnboardingStep.setPassword =>
+        isDark
+            ? 'assets/illustrations/onboarding_set_password_sidebar_dark.png'
+            : 'assets/illustrations/onboarding_set_password_sidebar_light.png',
+      ImportOnboardingStep.customiseAccount =>
+        'assets/illustrations/onboarding_customise_account_sidebar.png',
+    };
+    return IgnorePointer(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: SizedBox(
+          width: _frameWidth,
+          height: _frameHeight,
+          child: Image.asset(
+            asset,
+            fit: BoxFit.cover,
+            alignment: Alignment.bottomCenter,
+          ),
+        ),
+      ),
+    );
+  }
+}

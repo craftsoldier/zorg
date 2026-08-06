@@ -1,0 +1,173 @@
+[package]
+name = "rust_lib_zcash_wallet"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.11.1"
+
+zcash_script = "0.4.3"
+sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }
+uuid = "1.1"
+zip32 = "0.2"
+pasta_curves = "0.5"
+ff = "0.13"
+# Required by no-op Sapling prover trait impls
+jubjub = "0.10"
+bls12_381 = "0.8"
+rand_core = "0.6"
+
+# Key generation
+bip0039 = "0.12"
+
+# Serialization
+nonempty = "0.11"
+minicbor = "0.19"
+prost = "0.14"
+incrementalmerkletree = "0.8"
+shardtree = "0.7"
+
+# Security
+secrecy = "0.8"
+zeroize = "1"
+aes = { version = "0.8", features = ["zeroize"] }
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+base64 = "0.22"
+pbkdf2 = "0.12"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+# Random number generation
+rand = "0.8"
+
+# Async runtime & gRPC
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+futures = "0.3"
+tonic = { version = "0.14", features = ["channel", "tls-webpki-roots", "tls-ring"] }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+tower-service = "0.3"
+time = "0.3"
+# rustls is in the graph transitively via tonic; make it a direct dep
+# so we can explicitly install the ring CryptoProvider in `init_app`.
+# Without an explicit provider install, rustls 0.23+ panics the first
+# TLS handshake with "no process-level CryptoProvider installed".
+rustls = "0.23"
+
+# SQLite (re-exported by zcash_client_sqlite but needed for Connection type)
+rusqlite = "0.37"
+redb = "4.1.0"
+
+# Logging (FRB forwards to Dart console via setup_default_user_utils)
+log = "0.4"
+
+# Hex encoding
+hex = "0.4"
+
+# Keystone hardware wallet
+ur = { git = "https://github.com/KeystoneHQ/ur-rs", tag = "0.3.3" }
+serde_json = "1"
+url = "2.5.8"
+
+# Zcash core
+[dependencies.zcash_primitives]
+version = "0.30.0"
+
+[dependencies.zcash_address]
+version = "0.13.0"
+
+[dependencies.zcash_keys]
+version = "0.16.0"
+features = ["orchard"]
+
+[dependencies.zcash_protocol]
+version = "0.10.1"
+
+[dependencies.transparent]
+package = "zcash_transparent"
+version = "0.10.0"
+
+[dependencies.zcash_client_backend]
+version = "0.24.0-rc.6"
+features = [
+    "orchard",
+    "transparent-inputs",
+    "lightwalletd-tonic",
+    "lightwalletd-tonic-tls-webpki-roots",
+    "tor",
+    "sync",
+    "pczt",
+]
+
+[dependencies.zcash_client_sqlite]
+version = "0.22.0-rc.6"
+features = ["orchard", "transparent-inputs", "unstable", "serde"]
+
+# Voting clients need PIR lookup support and vote-commitment-tree sync.
+[dependencies.zcash_voting]
+version = "2.0.0-rc.2"
+
+# Keep Orchard aligned with the released librustzcash and zcash_voting family
+# to avoid type conflicts.
+[dependencies.orchard]
+version = "0.15.4"
+
+# Proofs
+[dependencies.zcash_proofs]
+version = "0.30.0"
+
+[dependencies.pczt]
+version = "0.9.1"
+features = [
+    "orchard",
+    "io-finalizer",
+    "prover",
+    "signer",
+    "spend-finalizer",
+    "tx-extractor",
+    "zcp-builder",
+]
+
+[dependencies.ur-registry]
+git = "https://github.com/valargroup/keystone-sdk-rust.git"
+rev = "c2119436f5246be05b1ba877a7e6b63f51c01339"
+package = "ur-registry"
+default-features = false
+features = ["std"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+
+[dev-dependencies]
+tempfile = "3"
+hex = "0.4"
+# Integration tests inject/inspect scan_queue rows directly to exercise the
+# VZR-89 rescue path. Keep this version aligned with the [dependencies] entry.
+rusqlite = "0.37"
+# Used only by the sigs-only byte-identity test to recover the spendable note
+# from a freshly built Orchard bundle (matches pczt's own end-to-end test).
+# Already in the dependency graph via zcash_client_backend.
+zcash_note_encryption = "0.4"
+
+[dev-dependencies.vote-commitment-tree]
+version = "0.4.0-rc.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)', 'cfg(ironwood_masquerade)'] }
+
+# Flutter debug builds use Cargokit + Cargo's dev profile (`cargo build`
+# without `--release`). Rust crypto and voting flows are slow under the default
+# debug opt-level=0, so keep debug assertions and symbols while making local
+# Flutter/debug voting builds usable. Release builds are unaffected by this
+# profile.
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3

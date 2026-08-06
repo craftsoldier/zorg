@@ -1,0 +1,264 @@
+const UNIT_STEP: f64 = 1.0 / ((1u64 << 53) as f64);
+const U64_TO_MANTISSA_SHIFT: u32 = 11;
+
+fn draw_unit_left_open<R: RngCore + ?Sized>(rng: &mut R) -> f64 {
+    1.0 - ((rng.next_u64() >> U64_TO_MANTISSA_SHIFT) as f64) * UNIT_STEP
+}
+
+fn round_nonnegative_to_u32(value: f64) -> u32 {
+    (value + 0.5) as u64 as u32
+}
+
+fn random_schedule_block_offsets_with_rng<R: RngCore + CryptoRng + ?Sized>(
+    count: usize,
+    mean_delay_blocks: u32,
+    max_delay_blocks: u32,
+    rng: &mut R,
+) -> Vec<u32> {
+    assert!(mean_delay_blocks > 0);
+    assert!(max_delay_blocks > 0);
+
+    let mut offsets = Vec::with_capacity(count);
+    let mut elapsed_blocks = 0u32;
+    for _ in 0..count {
+        let delay = loop {
+            let uniform = draw_unit_left_open(rng);
+            let sampled =
+                round_nonnegative_to_u32(-uniform.ln() * f64::from(mean_delay_blocks));
+            if sampled <= max_delay_blocks {
+                break sampled;
+            }
+        };
+        elapsed_blocks = elapsed_blocks.saturating_add(delay);
+        offsets.push(elapsed_blocks);
+    }
+    offsets
+}
+
+pub(crate) fn planned_transfer_schedule<R, I>(
+    values: I,
+    network: WalletNetwork,
+    rng: &mut R,
+) -> Vec<MigrationScheduleEntry>
+where
+    R: RngCore + CryptoRng + ?Sized,
+    I: IntoIterator<Item = u64>,
+{
+    planned_transfer_schedule_for_parts_with_policy(
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(part_index, value_zatoshi)| (part_index as u32, value_zatoshi)),
+        network,
+        configured_timing_policy(network),
+        rng,
+    )
+}
+
+fn planned_transfer_schedule_with_policy<R, I>(
+    values: I,
+    network: WalletNetwork,
+    timing_policy: MigrationTimingPolicy,
+    rng: &mut R,
+) -> Vec<MigrationScheduleEntry>
+where
+    R: RngCore + CryptoRng + ?Sized,
+    I: IntoIterator<Item = u64>,
+{
+    planned_transfer_schedule_for_parts_with_policy(
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(part_index, value_zatoshi)| (part_index as u32, value_zatoshi)),
+        network,
+        timing_policy,
+        rng,
+    )
+}
+
+fn planned_transfer_schedule_for_parts_with_policy<R, I>(
+    parts: I,
+    network: WalletNetwork,
+    timing_policy: MigrationTimingPolicy,
+    rng: &mut R,
+) -> Vec<MigrationScheduleEntry>
+where
+    R: RngCore + CryptoRng + ?Sized,
+    I: IntoIterator<Item = (u32, u64)>,
+{
+    let mut parts = parts.into_iter().collect::<Vec<_>>();
+    parts.shuffle(rng);
+    let (mean_delay_blocks, max_delay_blocks) =
+        schedule_parameters_with_policy_for_part_count(network, timing_policy, parts.len());
+    let offsets = random_schedule_block_offsets_with_rng(
+        parts.len(),
+        mean_delay_blocks,
+        max_delay_blocks,
+        rng,
+    );
+    parts
+        .into_iter()
+        .zip(offsets)
+        .map(
+            |((part_index, value_zatoshi), block_offset)| MigrationScheduleEntry {
+                part_index: Some(part_index),
+                value_zatoshi,
+                block_offset,
+            },
+        )
+        .collect()
+}
+
+/// Fresh cumulative offsets for rebuilt migration parts, aligned with
+/// `recoveries` (`(part_index, value_zatoshi)`) order. The caller appends them
+/// to the run's persisted recovery ladder instead of replaying each part's
+/// original whole-run offset.
+pub(crate) fn rebuild_schedule_block_offsets<R: RngCore + CryptoRng + ?Sized>(
+    schedule: &[MigrationScheduleEntry],
+    target_values: &[u64],
+    recoveries: &[(u32, u64)],
+    network: WalletNetwork,
+    timing_policy: MigrationTimingPolicy,
+    rng: &mut R,
+) -> Result<Vec<u32>, String> {
+    for (part_index, value_zatoshi) in recoveries {
+        schedule_block_offset_for_part(schedule, target_values, *part_index, *value_zatoshi)
+            .ok_or("Approved migration schedule is missing a recovery child")?;
+    }
+
+    let (mean_delay_blocks, max_delay_blocks) =
+        schedule_parameters_with_policy(network, timing_policy);
+    let offsets = random_schedule_block_offsets_with_rng(
+        recoveries.len(),
+        mean_delay_blocks,
+        max_delay_blocks,
+        rng,
+    );
+    // Hand out the cumulative slots in a shuffled order so the rebuilt
+    // broadcast order does not reveal which original part each transfer is.
+    let mut slots = (0..recoveries.len()).collect::<Vec<_>>();
+    slots.shuffle(rng);
+    let mut assigned = vec![0u32; recoveries.len()];
+    for (slot, offset) in slots.into_iter().zip(offsets) {
+        assigned[slot] = offset;
+    }
+    Ok(assigned)
+}
+
+pub(crate) fn validate_schedule(
+    schedule: &[MigrationScheduleEntry],
+    target_values: &[u64],
+    network: WalletNetwork,
+) -> Result<(), String> {
+    validate_schedule_with_policy(
+        schedule,
+        target_values,
+        network,
+        configured_timing_policy(network),
+    )
+}
+
+pub(crate) fn target_values_from_schedule(
+    schedule: &[MigrationScheduleEntry],
+) -> Result<Vec<u64>, String> {
+    if schedule.is_empty() {
+        return Ok(Vec::new());
+    }
+    if schedule.iter().all(|entry| entry.part_index.is_none()) {
+        return Err("Approved migration schedule does not identify migration parts".to_string());
+    }
+    if schedule.iter().any(|entry| entry.part_index.is_none()) {
+        return Err("Approved migration schedule part indexes are incomplete".to_string());
+    }
+
+    let mut target_values = vec![None; schedule.len()];
+    for entry in schedule {
+        let part_index = usize::try_from(
+            entry
+                .part_index
+                .expect("all schedule entries were checked above"),
+        )
+        .map_err(|_| "Approved migration schedule part index is outside the plan".to_string())?;
+        let slot = target_values
+            .get_mut(part_index)
+            .ok_or("Approved migration schedule part index is outside the plan")?;
+        if slot.replace(entry.value_zatoshi).is_some() {
+            return Err("Approved migration schedule part index is duplicated".to_string());
+        }
+    }
+
+    target_values
+        .into_iter()
+        .map(|value| {
+            value.ok_or_else(|| {
+                "Approved migration schedule part indexes are incomplete".to_string()
+            })
+        })
+        .collect()
+}
+
+fn validate_schedule_with_policy(
+    schedule: &[MigrationScheduleEntry],
+    target_values: &[u64],
+    network: WalletNetwork,
+    timing_policy: MigrationTimingPolicy,
+) -> Result<(), String> {
+    if schedule.len() != target_values.len() {
+        return Err("Approved migration schedule count changed".to_string());
+    }
+    let target_values_by_part = target_values.to_vec();
+    let mut scheduled_values = schedule
+        .iter()
+        .map(|entry| entry.value_zatoshi)
+        .collect::<Vec<_>>();
+    let mut target_values = target_values_by_part.clone();
+    scheduled_values.sort_unstable();
+    target_values.sort_unstable();
+    if scheduled_values != target_values {
+        return Err("Approved migration schedule values changed".to_string());
+    }
+    validate_schedule_part_indexes(schedule, &target_values_by_part)?;
+
+    let (_, max_delay_blocks) = schedule_parameters_with_policy(network, timing_policy);
+    let mut previous_offset = 0;
+    for entry in schedule {
+        let gap = entry
+            .block_offset
+            .checked_sub(previous_offset)
+            .ok_or("Approved migration schedule is not ordered")?;
+        if gap > max_delay_blocks {
+            return Err("Approved migration schedule delay is outside policy".to_string());
+        }
+        previous_offset = entry.block_offset;
+    }
+    Ok(())
+}
+
+fn validate_schedule_part_indexes(
+    schedule: &[MigrationScheduleEntry],
+    target_values: &[u64],
+) -> Result<(), String> {
+    if schedule.iter().all(|entry| entry.part_index.is_none()) {
+        return Ok(());
+    }
+    if schedule.iter().any(|entry| entry.part_index.is_none()) {
+        return Err("Approved migration schedule part indexes are incomplete".to_string());
+    }
+
+    let mut seen = BTreeSet::new();
+    for entry in schedule {
+        let part_index = entry
+            .part_index
+            .ok_or("Approved migration schedule part indexes are incomplete")?;
+        let value = target_values
+            .get(part_index as usize)
+            .ok_or("Approved migration schedule part index is outside the plan")?;
+        if !seen.insert(part_index) {
+            return Err("Approved migration schedule part index is duplicated".to_string());
+        }
+        if *value != entry.value_zatoshi {
+            return Err("Approved migration schedule part value changed".to_string());
+        }
+    }
+    Ok(())
+}

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zcash Wallet — Developer Onboarding</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Zcash Wallet — Developer Onboarding</h1>
+<p class="subtitle">Zcash shielded 모바일 월렛의 Flutter + Rust FFI 아키텍처 문서</p>
+
+<div class="toc">
+  <strong>목차</strong>
+  <ol>
+    <li><a href="architecture.html">아키텍처 개요</a>
+      <ol>
+        <li>레이어 분리: Rust Core / FFI Bridge / Dart UI</li>
+        <li>데이터 흐름 다이어그램</li>
+        <li>왜 Rust + Flutter인가 (네이티브 SDK 대신)</li>
+      </ol>
+    </li>
+    <li><a href="ffi.html">Flutter Rust Bridge (FRB) 통신</a>
+      <ol>
+        <li>FRB 작동 방식</li>
+        <li>타입 매핑: Rust ↔ Dart</li>
+        <li>Codegen 워크플로우</li>
+        <li>설계 제약</li>
+      </ol>
+    </li>
+    <li><a href="rust-core.html">Rust 핵심 로직</a>
+      <ol>
+        <li>모듈 구조</li>
+        <li>Wallet API — 키 유도 &amp; 계정 관리</li>
+        <li>Sync API — 블록 스캐닝 &amp; 잔액</li>
+        <li>Zcash Crate 의존성 그래프</li>
+        <li>보안 모델: Spending Key 분리</li>
+      </ol>
+    </li>
+    <li><a href="dart-layer.html">Dart / Flutter 레이어</a>
+      <ol>
+        <li>Riverpod Providers</li>
+        <li>Sync 실행</li>
+        <li>gRPC 클라이언트</li>
+        <li>네비게이션 &amp; 라우팅</li>
+        <li>UI 화면</li>
+      </ol>
+    </li>
+    <li><a href="sync-engine.html">Sync 엔진 상세</a>
+      <ol>
+        <li>전체 Sync 흐름 (단계별)</li>
+        <li>Compact Block이란</li>
+        <li>In-Memory Block Source</li>
+        <li>Trial Decryption &amp; 노트 발견</li>
+        <li>진행률 보고</li>
+      </ol>
+    </li>
+    <li><a href="api-reference.html">API 레퍼런스</a>
+      <ol>
+        <li>Wallet 함수 (software + hardware import)</li>
+        <li>Sync &amp; Enhancement 함수</li>
+        <li>Send 함수 (software 3단계 + hardware PCZT 파이프라인)</li>
+        <li>데이터 구조체</li>
+      </ol>
+    </li>
+    <li><a href="address.html">주소 체계</a>
+      <ol>
+        <li>Unified Address (Sapling + Orchard)</li>
+        <li>Transparent Address (별도)</li>
+        <li>zodl/Zashi 호환성</li>
+      </ol>
+    </li>
+    <li><a href="testing.html">테스트</a>
+      <ol>
+        <li>Rust 단위 테스트</li>
+        <li>Dart 테스트</li>
+      </ol>
+    </li>
+    <li><a href="background-sync.html">Ironwood 백그라운드 작업</a>
+      <ol>
+        <li>iOS migration preparation (iOS 26+)</li>
+        <li>Account mutation fence</li>
+      </ol>
+    </li>
+    <li><a href="keystone.html">Keystone 하드웨어 지갑</a>
+      <ol>
+        <li>키 보관 모델 (software vs hardware)</li>
+        <li>UFVK import (ZcashAccounts UR)</li>
+        <li>Hardware-first 부트스트랩 제약</li>
+        <li>Three-PCZT 파이프라인</li>
+        <li>Critical invariants (broadcast/persist, Sapling params, PROPOSAL_STORE)</li>
+        <li>UR 스캐너 구현 노트</li>
+      </ol>
+    </li>
+    <li><a href="gotchas.html">알려진 주의사항</a></li>
+    <li><a href="dev-commands.html">개발 명령어</a></li>
+  </ol>
+</div>
+
+</body>
+</html>

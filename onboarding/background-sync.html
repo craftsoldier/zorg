@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>9. Ironwood 백그라운드 작업 — Zcash Wallet Onboarding</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<p><a href="index.html">&larr; 목차로 돌아가기</a></p>
+
+<h2 id="background-migration">9. Ironwood 백그라운드 작업</h2>
+
+<p>일반 지갑 sync는 Dart &rarr; FRB &rarr; Rust foreground 경로 하나만 사용한다. 예전에 존재하던 iOS 일반 background sync와 Android notification delegate는 제거되었다. iOS native background task는 Ironwood migration 준비와 예약 전송에만 사용한다.</p>
+
+<h3 id="preparation">9.1 Denomination preparation (iOS 26+)</h3>
+
+<p><code>BackgroundMigrationPreparationManager</code>는 <code>com.keplr.vizor.ironwood-preparation</code> <code>BGContinuedProcessingTask</code>를 관리한다. Swift는 Dart isolate 없이도 동작해야 하므로 <code>rust/src/ffi.rs</code>의 migration 전용 C FFI를 호출한다.</p>
+
+<div class="diagram">
+BGContinuedProcessingTask
+  → migration preparation operation begin
+  → foreground sync가 SYNC_RUNNING을 놓을 때까지 대기
+  → preparation-only sync (gRPC + scan + enhancement)
+  → preparation 상태 inspect
+  → denomination transaction advance
+  → operation end
+</div>
+
+<ul>
+  <li>operation은 sync와 advance 전체에서 전용 cancel token과 desired mode를 공유한다.</li>
+  <li>foreground <code>cancelFullSync()</code>는 migration preparation을 취소하지 않는다.</li>
+  <li>foreground와 native 경로는 실제 sync 실행 동안의 <code>SYNC_RUNNING</code>만 공유한다.</li>
+  <li>expiration, foreground handoff, account mutation quiesce는 같은 preparation operation을 취소한다.</li>
+  <li>일반 status 조회는 task를 제출하지 않는다. startup, unlock, foreground 복귀, mutation 복구 같은 명시적 lifecycle 지점에서만 scheduling을 복구한다.</li>
+</ul>
+
+<h3 id="mutation-fence">9.2 Account mutation fence</h3>
+
+<p>기존 DB에 계정을 추가하거나 import할 때는 다음 순서를 지킨다.</p>
+
+<ol>
+  <li>native migration 작업을 quiesce하고 serial queue가 완전히 비워질 때까지 기다린다.</li>
+  <li>foreground sync와 mempool observer를 중지한다.</li>
+  <li>account DB mutation을 실행한다.</li>
+  <li>foreground sync를 재개한다.</li>
+  <li>실제로 resumable manifest가 있을 때만 native preparation task를 다시 제출한다.</li>
+</ol>
+
+<p>마지막 resume는 best-effort recovery다. 이미 commit된 account mutation이나 원래 mutation error를 resume 실패로 덮어쓰면 안 된다.</p>
+
+<h3 id="outbox">9.3 Scheduled migration outbox</h3>
+
+<p><code>BackgroundMigrationManager</code>는 <code>com.keplr.vizor.ironwood-migration</code> <code>BGProcessingTask</code>를 관리한다. 준비 task가 proof-ready 상태에 도달한 뒤 생성된 migration outbox만 처리하며 일반 wallet sync를 소유하지 않는다.</p>
+
+<h3 id="legacy-tombstones">9.4 Removed task identifiers</h3>
+
+<p>이전 빌드가 제출한 요청이 새 빌드를 깨우지 않도록 앱 시작 시 아래 identifier를 취소한다. handler는 등록하지 않는다.</p>
+
+<ul>
+  <li><code>com.keplr.vizor.sync</code> — 제거된 일반 iOS background sync</li>
+  <li><code>com.keplr.vizor.txtrack</code> — 제거된 legacy transaction tracker</li>
+</ul>
+
+<p><strong>주요 파일:</strong></p>
+<table>
+  <tr><th>파일</th><th>역할</th></tr>
+  <tr><td><code>ios/Runner/BackgroundMigrationPreparationManager.swift</code></td><td>native preparation task lifecycle과 progress</td></tr>
+  <tr><td><code>ios/Runner/BackgroundMigrationManager.swift</code></td><td>migration outbox 실행</td></tr>
+  <tr><td><code>rust/src/ffi.rs</code></td><td>migration-preparation-only C FFI와 operation ownership</td></tr>
+  <tr><td><code>ios/Runner/zcash_sync.h</code></td><td>Swift가 사용하는 C header</td></tr>
+  <tr><td><code>lib/src/providers/wallet_mutation_guard.dart</code></td><td>account mutation 순서 보장</td></tr>
+  <tr><td><code>lib/src/features/migration/services/ironwood_migration_service.dart</code></td><td>명시적 preparation recovery와 scheduling</td></tr>
+</table>
+
+<div class="nav">
+  <a href="testing.html">&larr; 이전: 테스트</a>
+  <a href="keystone.html">다음: Keystone 하드웨어 지갑 &rarr;</a>
+</div>
+
+</body>
+</html>
