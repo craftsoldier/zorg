@@ -125,7 +125,7 @@ zcash_note_encryption = "0.4"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ironwood_masquerade)'] }
 
-# Debug builds with high opt-level for usable crypto/voting performance.
+# Debug builds with high opt-level for usable crypto performance.
 # Release builds are unaffected.
 [profile.dev]
 opt-level = 3
