@@ -11,8 +11,6 @@ zcash_script = "0.4.3"
 sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }
 uuid = "1.1"
 zip32 = "0.2"
-pasta_curves = "0.5"
-ff = "0.13"
 # Required by no-op Sapling prover trait impls
 jubjub = "0.10"
 bls12_381 = "0.8"
@@ -23,7 +21,6 @@ bip0039 = "0.12"
 
 # Serialization
 nonempty = "0.11"
-minicbor = "0.19"
 prost = "0.14"
 incrementalmerkletree = "0.8"
 shardtree = "0.7"
@@ -64,7 +61,6 @@ log = "0.4"
 hex = "0.4"
 
 serde_json = "1"
-url = "2.5.8"
 
 # Zcash core
 [dependencies.zcash_primitives]
@@ -103,9 +99,6 @@ features = ["orchard", "transparent-inputs", "unstable", "serde"]
 [dependencies.orchard]
 version = "0.15.4"
 
-# Proofs
-[dependencies.zcash_proofs]
-version = "0.30.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
@@ -116,10 +109,6 @@ hex = "0.4"
 # Integration tests inject/inspect scan_queue rows directly to exercise the
 # VZR-89 rescue path. Keep this version aligned with the [dependencies] entry.
 rusqlite = "0.37"
-# Used only by the sigs-only byte-identity test to recover the spendable note
-# from a freshly built Orchard bundle (matches pczt's own end-to-end test).
-# Already in the dependency graph via zcash_client_backend.
-zcash_note_encryption = "0.4"
 
 
 [lints.rust]
