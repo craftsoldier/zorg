@@ -104,7 +104,7 @@ rusqlite = "0.37"
 
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ironwood_masquerade)', 'cfg(feature, values("transparent-inputs"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("transparent-inputs"))'] }
 
 # Debug builds with high opt-level for usable crypto performance.
 # Release builds are unaffected.

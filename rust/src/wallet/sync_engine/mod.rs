@@ -1117,22 +1117,13 @@ async fn repair_anchor_root_mismatch_if_needed(
     )))
 }
 
-fn transparent_utxo_query_network(network: WalletNetwork) -> WalletNetwork {
-    #[cfg(ironwood_masquerade)]
-    if network == WalletNetwork::Main {
-        return WalletNetwork::Test;
-    }
-
-    network
-}
-
 async fn refresh_utxos(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
     network: WalletNetwork,
     should_exit: &impl Fn() -> bool,
 ) -> Result<(), SyncError> {
-    let query_network = transparent_utxo_query_network(network);
+    let query_network = network;
     for account_id in db
         .get_account_ids()
         .map_err(|e| SyncError::db(format!("get_account_ids: {e}")))?

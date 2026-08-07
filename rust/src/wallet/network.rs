@@ -1,40 +1,4 @@
-#[cfg(test)]
-use std::cell::Cell;
-#[cfg(not(test))]
-use std::sync::atomic::{AtomicU32, Ordering};
 use zcash_protocol::consensus::{BlockHeight, Network, NetworkType, NetworkUpgrade, Parameters};
-
-// Keep ordinary regtest builds Orchard-only unless an Ironwood E2E explicitly
-// configures a controlled activation height.
-const DEFAULT_REGTEST_NU6_3_ACTIVATION_HEIGHT: u32 = u32::MAX;
-#[cfg(not(test))]
-static REGTEST_NU6_3_ACTIVATION_HEIGHT: AtomicU32 =
-    AtomicU32::new(DEFAULT_REGTEST_NU6_3_ACTIVATION_HEIGHT);
-
-#[cfg(test)]
-thread_local! {
-    static REGTEST_NU6_3_ACTIVATION_HEIGHT: Cell<u32> =
-        const { Cell::new(DEFAULT_REGTEST_NU6_3_ACTIVATION_HEIGHT) };
-}
-
-pub fn configure_regtest_nu6_3_activation_height(height: u32) -> Result<(), String> {
-    if height < 2 {
-        return Err("Regtest NU6.3 activation height must be at least 2".to_string());
-    }
-    #[cfg(not(test))]
-    REGTEST_NU6_3_ACTIVATION_HEIGHT.store(height, Ordering::SeqCst);
-    #[cfg(test)]
-    REGTEST_NU6_3_ACTIVATION_HEIGHT.set(height);
-    Ok(())
-}
-
-fn regtest_nu6_3_activation_height() -> BlockHeight {
-    #[cfg(not(test))]
-    let height = REGTEST_NU6_3_ACTIVATION_HEIGHT.load(Ordering::SeqCst);
-    #[cfg(test)]
-    let height = REGTEST_NU6_3_ACTIVATION_HEIGHT.get();
-    BlockHeight::from_u32(height)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WalletNetwork {
@@ -54,23 +18,6 @@ impl WalletNetwork {
     }
 }
 
-#[cfg(ironwood_masquerade)]
-fn ironwood_masquerade_activation_height(nu: NetworkUpgrade) -> Option<BlockHeight> {
-    let height = match nu {
-        NetworkUpgrade::Overwinter
-        | NetworkUpgrade::Sapling
-        | NetworkUpgrade::Blossom
-        | NetworkUpgrade::Heartwood
-        | NetworkUpgrade::Canopy => 1,
-        NetworkUpgrade::Nu5 => 2,
-        NetworkUpgrade::Nu6 => 3,
-        NetworkUpgrade::Nu6_1 => 4,
-        NetworkUpgrade::Nu6_2 => 5,
-        NetworkUpgrade::Nu6_3 => 5000,
-    };
-    Some(BlockHeight::from_u32(height))
-}
-
 impl Parameters for WalletNetwork {
     fn network_type(&self) -> NetworkType {
         match self {
@@ -82,9 +29,6 @@ impl Parameters for WalletNetwork {
 
     fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
         match self {
-            #[cfg(ironwood_masquerade)]
-            Self::Main => ironwood_masquerade_activation_height(nu),
-            #[cfg(not(ironwood_masquerade))]
             Self::Main => Network::MainNetwork.activation_height(nu),
             Self::Test => Network::TestNetwork.activation_height(nu),
             Self::Regtest => match nu {
@@ -97,68 +41,8 @@ impl Parameters for WalletNetwork {
                 | NetworkUpgrade::Nu6
                 | NetworkUpgrade::Nu6_1
                 | NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(1)),
-                NetworkUpgrade::Nu6_3 => Some(regtest_nu6_3_activation_height()),
+                NetworkUpgrade::Nu6_3 => None,
             },
         }
-    }
-}
-
-#[cfg(all(test, ironwood_masquerade))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn masquerade_main_keeps_mainnet_identity_with_test_chain_activation_heights() {
-        let network = WalletNetwork::Main;
-
-        assert_eq!(network.network_type(), NetworkType::Main);
-        assert_eq!(
-            network.activation_height(NetworkUpgrade::Nu6_3),
-            Some(BlockHeight::from_u32(5000))
-        );
-    }
-}
-
-// ======================== Chain Upgrade Status ========================
-
-pub struct ChainUpgradeStatus {
-    pub network: String,
-    pub current_height: u64,
-    pub activation_height: Option<u64>,
-    pub is_activated: bool,
-    pub upgrade_name: String,
-    pub upcoming_upgrades: Vec<ChainUpgradeActivationStatus>,
-}
-
-pub struct ChainUpgradeActivationStatus {
-    pub activation_height: u64,
-    pub upgrade_name: String,
-    pub is_activated: bool,
-}
-
-/// Get chain upgrade status for a given network and current height.
-pub fn get_chain_upgrade_status(
-    network: WalletNetwork,
-    current_height: u64,
-) -> ChainUpgradeStatus {
-    let nu6_3_height = match network {
-        WalletNetwork::Main => Some(2_750_000u64),
-        WalletNetwork::Test => Some(2_970_000u64),
-        WalletNetwork::Regtest => Some(u32::from(regtest_nu6_3_activation_height()) as u64),
-    };
-
-    let is_activated = nu6_3_height.is_some_and(|h| current_height >= h);
-
-    ChainUpgradeStatus {
-        network: match network {
-            WalletNetwork::Main => "main".to_string(),
-            WalletNetwork::Test => "test".to_string(),
-            WalletNetwork::Regtest => "regtest".to_string(),
-        },
-        current_height,
-        activation_height: nu6_3_height,
-        is_activated,
-        upgrade_name: "NU6.3 Ironwood".to_string(),
-        upcoming_upgrades: vec![],
     }
 }
