@@ -2742,3 +2742,105 @@ mod tests {
         );
     }
 }
+
+// ======================== Public API Structs ========================
+
+pub struct WalletCreationResult {
+    pub mnemonic: String,
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+pub struct WalletImportResult {
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+pub struct AccountCreationResult {
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+pub struct SoftwareWalletImportWithDiscoveryResult {
+    pub accounts: Vec<SoftwareWalletImportAccount>,
+}
+
+pub struct SoftwareWalletDiscoveredAccount {
+    pub zip32_index: u32,
+    pub has_funds: bool,
+    pub unified_address: String,
+}
+
+pub struct SoftwareWalletImportDiscoveryResult {
+    pub discovered_accounts: Vec<SoftwareWalletDiscoveredAccount>,
+}
+
+pub struct SoftwareWalletImportAccount {
+    pub account_name: String,
+    pub zip32_index: u32,
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+// ======================== Convenience Functions ========================
+
+/// Create a new wallet: generate mnemonic, derive seed, create first account.
+pub fn create_wallet(
+    network_str: &str,
+    db_path: &str,
+    birthday_height: Option<u64>,
+    account_name: Option<&str>,
+) -> Result<WalletCreationResult, String> {
+    let network = parse_network(network_str)?;
+    let mnemonic = generate_mnemonic();
+    let seed = mnemonic_to_seed(&mnemonic)?;
+    let name = account_name.unwrap_or("Account 1");
+    let (account_uuid, unified_address) =
+        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    Ok(WalletCreationResult {
+        mnemonic,
+        unified_address,
+        account_uuid,
+    })
+}
+
+/// Import a wallet from a mnemonic phrase.
+pub fn import_wallet(
+    mnemonic: &str,
+    bip39_passphrase: &str,
+    birthday_height: Option<u64>,
+    network_str: &str,
+    db_path: &str,
+    account_name: Option<&str>,
+) -> Result<WalletImportResult, String> {
+    let network = parse_network(network_str)?;
+    let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
+    let name = account_name.unwrap_or("Account 1");
+    let (account_uuid, unified_address) =
+        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    Ok(WalletImportResult {
+        unified_address,
+        account_uuid,
+    })
+}
+
+/// Get the unified address for an account.
+pub fn get_unified_address(
+    db_path: &str,
+    network_str: &str,
+    account_uuid: &str,
+) -> Result<String, String> {
+    let network = parse_network(network_str)?;
+    let accounts = list_accounts(db_path, network)?;
+    accounts
+        .into_iter()
+        .find(|a| a.uuid == account_uuid)
+        .map(|a| a.unified_address)
+        .ok_or_else(|| format!("Account {account_uuid} not found"))
+}
+
+
+/// Validate a mnemonic phrase.
+pub fn validate_mnemonic(mnemonic: &str) -> bool {
+    mnemonic_to_seed(mnemonic).is_ok()
+}

@@ -118,3 +118,47 @@ mod tests {
         );
     }
 }
+
+// ======================== Chain Upgrade Status ========================
+
+pub struct ChainUpgradeStatus {
+    pub network: String,
+    pub current_height: u64,
+    pub activation_height: Option<u64>,
+    pub is_activated: bool,
+    pub upgrade_name: String,
+    pub upcoming_upgrades: Vec<ChainUpgradeActivationStatus>,
+}
+
+pub struct ChainUpgradeActivationStatus {
+    pub activation_height: u64,
+    pub upgrade_name: String,
+    pub is_activated: bool,
+}
+
+/// Get chain upgrade status for a given network and current height.
+pub fn get_chain_upgrade_status(
+    network: WalletNetwork,
+    current_height: u64,
+) -> ChainUpgradeStatus {
+    let nu6_3_height = match network {
+        WalletNetwork::Main => Some(2_750_000u64),
+        WalletNetwork::Test => Some(2_970_000u64),
+        WalletNetwork::Regtest => Some(u32::from(regtest_nu6_3_activation_height()) as u64),
+    };
+
+    let is_activated = nu6_3_height.is_some_and(|h| current_height >= h);
+
+    ChainUpgradeStatus {
+        network: match network {
+            WalletNetwork::Main => "main".to_string(),
+            WalletNetwork::Test => "test".to_string(),
+            WalletNetwork::Regtest => "regtest".to_string(),
+        },
+        current_height,
+        activation_height: nu6_3_height,
+        is_activated,
+        upgrade_name: "NU6.3 Ironwood".to_string(),
+        upcoming_upgrades: vec![],
+    }
+}

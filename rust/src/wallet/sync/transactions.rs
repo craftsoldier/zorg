@@ -71,6 +71,12 @@ pub struct WalletBalance {
     pub change_pending_confirmation: u64,
     pub value_pending_spendability: u64,
     pub uneconomic_value: u64,
+    /// Sum of spendable shielded balances. Use this for "available to send".
+    pub spendable: u64,
+    /// Sum of owner-locked balances across all pools.
+    pub locked: u64,
+    /// Sum of spendable + locked + pending balances across all pools.
+    pub total: u64,
 }
 
 impl WalletBalance {
@@ -93,6 +99,9 @@ impl WalletBalance {
             change_pending_confirmation: 0,
             value_pending_spendability: 0,
             uneconomic_value: 0,
+            spendable: 0,
+            locked: 0,
+            total: 0,
         }
     }
 }
@@ -187,6 +196,29 @@ pub fn get_wallet_balances(
                             + u64::from(b.sapling_balance().uneconomic_value())
                             + u64::from(b.orchard_balance().uneconomic_value())
                             + u64::from(b.ironwood_balance().uneconomic_value()),
+                        spendable: u64::from(b.sapling_balance().spendable_value())
+                            + u64::from(b.orchard_balance().spendable_value())
+                            + u64::from(b.ironwood_balance().spendable_value()),
+                        locked: u64::from(b.unshielded_balance().locked_value())
+                            + u64::from(b.sapling_balance().locked_value())
+                            + u64::from(b.orchard_balance().locked_value())
+                            + u64::from(b.ironwood_balance().locked_value()),
+                        total: u64::from(b.unshielded_balance().spendable_value())
+                            + u64::from(b.sapling_balance().spendable_value())
+                            + u64::from(b.orchard_balance().spendable_value())
+                            + u64::from(b.ironwood_balance().spendable_value())
+                            + u64::from(b.unshielded_balance().locked_value())
+                            + u64::from(b.sapling_balance().locked_value())
+                            + u64::from(b.orchard_balance().locked_value())
+                            + u64::from(b.ironwood_balance().locked_value())
+                            + transparent_change
+                            + transparent_pending
+                            + sapling_change
+                            + sapling_pending
+                            + orchard_change
+                            + orchard_pending
+                            + ironwood_change
+                            + ironwood_pending,
                     }
                 }
                 None => WalletBalance::unavailable(WalletBalanceAvailability::AccountUnavailable),

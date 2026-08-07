@@ -51,7 +51,7 @@ pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
 use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
 pub(crate) use lwd::{
-    get_latest_block, get_taddress_txids, next_stream_message,
+    get_latest_block, next_stream_message,
     open_isolated_lwd_channel, open_lwd_channel, send_transaction,
 };
 
@@ -3192,4 +3192,39 @@ mod tests {
         assert_eq!(ironwood_positions, vec![None, Some(1)]);
         assert_eq!(clear_unmined_note_commitment_positions(db_path).unwrap(), 0);
     }
+}
+
+// ======================== Public Lightwalletd Helpers ========================
+
+/// Get the latest block height from a lightwalletd endpoint.
+pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        let mut client = crate::wallet::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let tip = crate::wallet::sync_engine::lwd::get_latest_block(&mut client)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(tip.height)
+    })
+}
+
+/// Get the chain name from a lightwalletd endpoint.
+pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        use zcash_client_backend::proto::service::Empty;
+        let mut client = crate::wallet::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get_lightd_info(Empty {}),
+        )
+        .await
+        .map_err(|_| "get_lightd_info: timed out".to_string())?
+        .map_err(|e| format!("get_lightd_info: {e}"))?;
+        Ok(info.into_inner().chain_name)
+    })
 }

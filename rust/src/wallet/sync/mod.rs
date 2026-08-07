@@ -668,15 +668,126 @@ pub(crate) fn configure_fast_testnet_migration(_enabled: bool) {}
 pub(crate) fn delete_account_migration_rows_with_tx(_tx: &rusqlite::Transaction, _account_uuid: &str) -> Result<(), String> { Ok(()) }
 
 // Re-export aliases for API layer
-pub(crate) use discard_stored_proposal as discard_proposal;
 pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
 
 // ======================== Re-exports from send.rs ========================
-pub(crate) use send::estimate_send_max;
 pub use send::{estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult};
-pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance};
 pub(crate) use send::resubmit_pending_transactions;
 #[allow(unused_imports)] pub(crate) use send::ProposalResult;
 #[allow(unused_imports)] pub(crate) use send::SendMaxEstimateResult;
 #[allow(unused_imports)] pub(crate) use send::ShieldTransparentResult;
 #[allow(unused_imports)] pub(crate) use send::ShieldTransparentStatus;
+
+// ======================== Sync State & Orchestration ========================
+
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::Arc;
+
+pub static DESIRED_SYNC_MODE: AtomicU8 = AtomicU8::new(0);
+pub static SYNC_CANCEL: std::sync::LazyLock<Arc<AtomicBool>> =
+    std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+pub static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_sync_mode(mode: u8) {
+    DESIRED_SYNC_MODE.store(mode, AtomicOrdering::SeqCst);
+}
+
+pub fn get_sync_mode() -> u8 {
+    DESIRED_SYNC_MODE.load(AtomicOrdering::SeqCst)
+}
+
+pub fn cancel_full_sync() {
+    SYNC_CANCEL.store(true, AtomicOrdering::Relaxed);
+}
+
+pub fn is_sync_cancel_requested() -> bool {
+    SYNC_CANCEL.load(AtomicOrdering::Relaxed)
+}
+
+pub fn is_sync_running() -> bool {
+    SYNC_RUNNING.load(AtomicOrdering::SeqCst)
+}
+
+/// Blocking sync entrypoint.
+pub fn run_full_sync_blocking(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: &str,
+    mode: u8,
+) -> Result<(), String> {
+    if SYNC_RUNNING
+        .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+        .is_err()
+    {
+        return Err("Sync already running".into());
+    }
+
+    DESIRED_SYNC_MODE.store(mode, AtomicOrdering::SeqCst);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let network = crate::wallet::keys::parse_network(network)?;
+        crate::wallet::keys::ensure_db_migrated_once(db_path, network)?;
+        let cancel = SYNC_CANCEL.clone();
+        cancel.store(false, AtomicOrdering::Relaxed);
+
+        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+        rt.block_on(async {
+            crate::wallet::sync_engine::run_sync_inner(
+                db_path,
+                lightwalletd_url,
+                network,
+                cancel,
+                mode,
+                &DESIRED_SYNC_MODE,
+                true,
+                |_| {},
+            )
+            .await
+        })
+    }));
+
+    SYNC_RUNNING.store(false, AtomicOrdering::SeqCst);
+
+    match result {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            Err(format!("Sync panic: {msg}"))
+        }
+    }
+}
+
+// ======================== API-only Structs ========================
+
+pub struct ScanResult {
+    pub blocks_scanned: u64,
+}
+
+pub struct SubtreeRoot {
+    pub completing_block_height: u64,
+    pub root_hash: Vec<u8>,
+}
+
+pub struct BlockMetaInfo {
+    pub height: u64,
+    pub hash: Vec<u8>,
+    pub time: u32,
+    pub sapling_outputs_count: u32,
+    pub orchard_actions_count: u32,
+}
+
+pub struct AddressValidationResult {
+    pub is_valid: bool,
+    pub address_type: String,
+}
+
+pub struct SubtreeIndices {
+    pub sapling_start_index: u64,
+    pub orchard_start_index: u64,
+}

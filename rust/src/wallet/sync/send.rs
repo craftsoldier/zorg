@@ -62,13 +62,13 @@ pub struct ExecuteProposalResult {
     pub message: Option<String>,
 }
 
-pub(crate) struct SendMaxEstimateResult {
+pub struct SendMaxEstimateResult {
     pub amount_zatoshi: u64,
     pub fee_zatoshi: u64,
     pub needs_sapling_params: bool,
 }
 
-pub(crate) struct ShieldTransparentResult {
+pub struct ShieldTransparentResult {
     pub txids: String,
     pub status: String,
     pub broadcasted_count: u32,
@@ -78,7 +78,7 @@ pub(crate) struct ShieldTransparentResult {
     pub shielded_zatoshi: u64,
 }
 
-pub(crate) struct ShieldTransparentStatus {
+pub struct ShieldTransparentStatus {
     pub can_shield: bool,
     pub fee_zatoshi: u64,
     pub shielded_zatoshi: u64,
