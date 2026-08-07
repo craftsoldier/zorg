@@ -2103,7 +2103,6 @@ dependencies = [
  "zcash_keys",
  "zcash_primitives",
  "zcash_protocol",
- "zcash_script",
  "zcash_transparent",
  "zeroize",
  "zip32",

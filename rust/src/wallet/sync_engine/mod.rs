@@ -39,7 +39,6 @@ use {
     },
     zcash_keys::encoding::AddressCodec as _,
     zcash_protocol::value::Zatoshis,
-    zcash_script::script,
 };
 
 mod block_source;
@@ -1384,9 +1383,11 @@ async fn refresh_transparent_addresses(
             ))
         })?;
 
-        let output = WalletTransparentOutput::from_parts(
-            OutPoint::new(txid, index),
-            TxOut::new(value, Script(script::Code(reply.script))),
+        let mut script = Script::default();
+            script.0.0 = reply.script;
+            let output = WalletTransparentOutput::from_parts(
+                OutPoint::new(txid, index),
+                TxOut::new(value, script),
             Some(BlockHeight::from_u32(height)),
             None,
             None,

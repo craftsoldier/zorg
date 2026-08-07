@@ -7,7 +7,6 @@ edition = "2021"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-zcash_script = "0.4.3"
 sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }
 uuid = "1.1"
 zip32 = "0.2"
