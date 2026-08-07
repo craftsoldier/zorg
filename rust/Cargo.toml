@@ -63,8 +63,6 @@ log = "0.4"
 # Hex encoding
 hex = "0.4"
 
-# Keystone hardware wallet
-ur = { git = "https://github.com/KeystoneHQ/ur-rs", tag = "0.3.3" }
 serde_json = "1"
 url = "2.5.8"
 
@@ -94,7 +92,6 @@ features = [
     "lightwalletd-tonic",
     "lightwalletd-tonic-tls-webpki-roots",
     "sync",
-    "pczt",
 ]
 
 [dependencies.zcash_client_sqlite]
@@ -109,25 +106,6 @@ version = "0.15.4"
 # Proofs
 [dependencies.zcash_proofs]
 version = "0.30.0"
-
-[dependencies.pczt]
-version = "0.9.1"
-features = [
-    "orchard",
-    "io-finalizer",
-    "prover",
-    "signer",
-    "spend-finalizer",
-    "tx-extractor",
-    "zcp-builder",
-]
-
-[dependencies.ur-registry]
-git = "https://github.com/valargroup/keystone-sdk-rust.git"
-rev = "c2119436f5246be05b1ba877a7e6b63f51c01339"
-package = "ur-registry"
-default-features = false
-features = ["std"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", features = ["OSX_10_15"] }

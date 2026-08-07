@@ -23,9 +23,6 @@ use crate::wallet::{
 };
 
 mod broadcast;
-mod migration;
-mod migration_wallet_ops;
-mod pczt;
 mod proposal_locks;
 mod send;
 mod transactions;
@@ -39,61 +36,6 @@ mod transactions;
 // reachable from anywhere in the crate but not re-exported to
 // downstream consumers, which matches the pre-refactor surface
 // exactly).
-pub(crate) use migration::{
-    configure_fast_testnet_migration, delete_account_migration_rows_with_tx,
-    denomination_confirmations_required, migration_preparation_snapshot_read_only,
-    migration_status, observable_denomination_transaction_ids, proof_retry_height,
-    reconcile_wallet_locks_after_sync, MigrationPartState, MigrationPreparationOutputKind,
-    MigrationPreparationTransactionState, MigrationScheduleEntry, MigrationStatus,
-    PreparationTimingPolicy,
-};
-pub(crate) use pczt::extract_compact_sigs_from_pczt;
-pub use pczt::{
-    add_proofs_to_pczt, create_pczt_from_proposal, discard_proposal, extract_and_broadcast_pczt,
-    redact_pczt_for_signer, retain_proposal_lock_until_expiry, ExtractAndBroadcastPcztResult,
-};
-pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
-pub(crate) use send::estimate_send_max;
-pub(crate) use send::{
-    abandon_orchard_migration, advance_orchard_migration_preparation_for_run,
-    complete_orchard_migration_batch_pczt, complete_orchard_migration_denominations_pczt,
-    complete_orchard_migration_immediate_pczt, complete_orchard_migration_single_qr_pczt,
-    create_or_resume_private_migration_draft, discard_all_keystone_migration_requests,
-    discard_keystone_migration_request, discard_keystone_migration_requests_for_account,
-    keystone_migration_proof_status, migrate_orchard_to_ironwood,
-    migrate_orchard_to_ironwood_immediately, orchard_migration_proof_readiness,
-    orchard_migration_proof_readiness_at_scanned_height,
-    orchard_migration_proof_readiness_read_only, prepare_orchard_migration_batch_pczt,
-    prepare_orchard_migration_denominations_pczt, prepare_orchard_migration_immediate_pczt,
-    prepare_orchard_migration_single_qr_pczt, retain_migration_anchor_checkpoints_before_scan,
-    retain_prepared_note_anchor_checkpoints_after_scan, retire_unbroadcast_orchard_migration,
-    KeystoneSignedMigrationMessage, OrchardMigrationImmediatePlan,
-};
-pub use send::{
-    broadcast_due_orchard_migration_transactions, broadcast_one_due_orchard_migration_transaction,
-    estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send,
-    ExecuteProposalResult, IronwoodMigrationResult,
-};
-pub(crate) use send::{
-    create_shield_transparent_pczt, get_shield_transparent_status, shield_transparent_balance,
-};
-pub(crate) use send::{get_orchard_migration_immediate_plan, get_orchard_migration_private_plan};
-// Internal-only re-export for `sync_engine::run_sync_impl`'s
-// auto-resubmit pass. Not part of the `wallet::sync` public surface.
-pub(crate) use send::migration_anchor_retention_required;
-pub(crate) use send::resubmit_pending_transactions;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::ProposalResult;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::SendMaxEstimateResult;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::ShieldTransparentPcztResult;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::ShieldTransparentResult;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::ShieldTransparentStatus;
-#[allow(unused_imports)] // names reachable via `crate::wallet::sync::*`; pre-refactor surface
-pub(crate) use send::{KeystoneMigrationMessage, KeystoneMigrationSigningRequest};
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address,
     get_previous_transaction_count_for_address, get_transaction_data_requests,
@@ -635,7 +577,7 @@ pub(super) fn finish_stored_proposal(
     unlock_stored_proposal(proposal_id, send_flow_id, lock)
 }
 
-pub(super) fn discard_stored_proposal(proposal_id: u64, send_flow_id: &str) -> Result<(), String> {
+pub(crate) fn discard_stored_proposal(proposal_id: u64, send_flow_id: &str) -> Result<(), String> {
     let should_release = {
         let mut store = PROPOSAL_STORE
             .lock()
@@ -903,3 +845,26 @@ mod tests {
         discard_proposal(id, "missing-flow").unwrap(); // cleanup must not panic
     }
 }
+
+// ======================== Clean Re-exports ========================
+pub(crate) use send::estimate_send_max;
+pub use send::{estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult};
+pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance, broadcast_raw_transaction};
+pub(crate) use send::resubmit_pending_transactions;
+#[allow(unused_imports)] pub(crate) use send::ProposalResult;
+#[allow(unused_imports)] pub(crate) use send::SendMaxEstimateResult;
+#[allow(unused_imports)] pub(crate) use send::ShieldTransparentResult;
+#[allow(unused_imports)] pub(crate) use send::ShieldTransparentStatus;
+
+// Stubs for removed migration functions (sync_engine calls these)
+pub(crate) fn migration_anchor_retention_required(_db_path: &str, _network: WalletNetwork) -> Result<bool, String> { Ok(false) }
+pub(crate) fn retain_prepared_note_anchor_checkpoints_after_scan(_db_path: &str, _network: WalletNetwork, _db: &mut WalletDatabase) -> Result<usize, String> { Ok(0) }
+pub(crate) fn retain_migration_anchor_checkpoints_before_scan(_db_path: &str, _network: WalletNetwork, _db: &mut WalletDatabase, _frontier_height: u32, _end: u32, _checkpoints: &std::collections::BTreeSet<u32>) -> Result<usize, String> { Ok(0) }
+pub(crate) fn reconcile_wallet_locks_after_sync(_db_path: &str, _network: WalletNetwork) -> Result<(), String> { Ok(()) }
+pub(crate) fn configure_fast_testnet_migration(_enabled: bool) {}
+pub(crate) fn delete_account_migration_rows_with_tx(_tx: &rusqlite::Transaction, _account_uuid: &str) -> Result<(), String> { Ok(()) }
+
+// Re-export aliases for API layer
+pub(crate) use discard_stored_proposal as discard_proposal;
+pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
+
