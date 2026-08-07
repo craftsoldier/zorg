@@ -2064,49 +2064,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_lib_zcash_wallet"
-version = "0.1.0"
-dependencies = [
- "aes",
- "aes-gcm",
- "base64",
- "bip0039",
- "bls12_381",
- "hex",
- "incrementalmerkletree",
- "jubjub",
- "log",
- "nonempty",
- "orchard",
- "pbkdf2",
- "rand",
- "rand_core",
- "redb",
- "rusqlite",
- "rustls",
- "sapling-crypto",
- "secrecy",
- "security-framework",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shardtree",
- "tempfile",
- "tokio",
- "tonic",
- "uuid",
- "zcash_address",
- "zcash_client_backend",
- "zcash_client_sqlite",
- "zcash_keys",
- "zcash_primitives",
- "zcash_protocol",
- "zcash_transparent",
- "zeroize",
- "zip32",
-]
-
-[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3573,3 +3530,46 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zorg"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "base64",
+ "bip0039",
+ "bls12_381",
+ "hex",
+ "incrementalmerkletree",
+ "jubjub",
+ "log",
+ "nonempty",
+ "orchard",
+ "pbkdf2",
+ "rand",
+ "rand_core",
+ "redb",
+ "rusqlite",
+ "rustls",
+ "sapling-crypto",
+ "secrecy",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shardtree",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "uuid",
+ "zcash_address",
+ "zcash_client_backend",
+ "zcash_client_sqlite",
+ "zcash_keys",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zcash_transparent",
+ "zeroize",
+ "zip32",
+]
