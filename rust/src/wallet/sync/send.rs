@@ -7,20 +7,18 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use rand::rngs::OsRng;
-use rand::Rng;
 use secrecy::{ExposeSecret, SecretVec};
 
 use zcash_client_backend::data_api::wallet::input_selection::{
-    GreedyInputSelector, InputSelector, LockedInputPolicy, SpendPolicy,
+    GreedyInputSelector, LockedInputPolicy, SpendPolicy,
 };
 use zcash_client_backend::{
     data_api::{
-        self,
         wallet::{
             self, create_proposed_transactions, propose_send_max_transfer,
             ConfirmationsPolicy, SpendingKeys,
         },
-        Account as _, InputSource, MaxSpendMode, OutputLockStore, WalletCommitmentTrees, WalletRead,
+        Account as _, MaxSpendMode, OutputLockStore, WalletRead,
     },
     fees::{zip317::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule},
     wallet::{LockOwner, OvkPolicy},
@@ -28,9 +26,9 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
 use zcash_keys::keys::UnifiedSpendingKey;
-use zcash_primitives::transaction::{fees::FeeRule, TxId};
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
-    consensus::{self, BlockHeight, Parameters},
+    consensus::BlockHeight,
     memo::{Memo, MemoBytes},
     value::Zatoshis,
     PoolType, ShieldedPool,
@@ -400,8 +398,8 @@ pub(crate) fn get_shield_transparent_status(
     db_path: &str, network: WalletNetwork, account_uuid: &str,
 ) -> Result<ShieldTransparentStatus, String> {
     let db = open_wallet_db(db_path, network)?;
-    let account_id = parse_account_uuid(account_uuid)?;
-    let chain_height = db.chain_height().map_err(|e| format!("Chain height: {e}"))?.ok_or("Wallet must sync")?;
+    let _account_id = parse_account_uuid(account_uuid)?;
+    let _chain_height = db.chain_height().map_err(|e| format!("Chain height: {e}"))?.ok_or("Wallet must sync")?;
     #[cfg(feature = "transparent-inputs")]
     {
         let balances = db.get_transparent_balances(account_id, (chain_height + 1).into(), ConfirmationsPolicy::MIN)

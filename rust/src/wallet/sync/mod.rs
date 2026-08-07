@@ -849,7 +849,7 @@ mod tests {
 // ======================== Clean Re-exports ========================
 pub(crate) use send::estimate_send_max;
 pub use send::{estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult};
-pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance, broadcast_raw_transaction};
+pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance};
 pub(crate) use send::resubmit_pending_transactions;
 #[allow(unused_imports)] pub(crate) use send::ProposalResult;
 #[allow(unused_imports)] pub(crate) use send::SendMaxEstimateResult;
