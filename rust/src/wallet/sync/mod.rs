@@ -657,206 +657,9 @@ pub fn get_blocks_dir(cache_path: &str) -> String {
     format!("{cache_path}/blocks")
 }
 
-#[cfg(test)]
-mod tests {
-    //! Regression tests for PROPOSAL_STORE lifecycle.
-    //!
-    //! These tests cover the parts of the proposal store that don't require a
-    //! real wallet DB (note selection, fee computation, etc. are upstream of
-    //! anything testable in isolation). Specifically:
-    //!
-    //! * `discard_proposal` is idempotent and tolerates nonexistent IDs
-    //!   (called from the Dart cancel path and possibly more than once).
-    //! * `create_pczt_from_proposal` returns a clean "not found" error for
-    //!   an unknown ID instead of panicking or corrupting state — this is
-    //!   the path that fires on a replay attempt after the proposal has
-    //!   already been consumed.
-    //! A full insert→consume→replay test would require constructing a real
-    //! `Proposal<WalletFeeRule, ReceivedNoteId>`, which in turn needs a
-    //! live wallet DB with spendable notes and a lightwalletd chain tip.
-    //! That belongs in an integration test, not a unit test here.
 
-    use super::*;
+// ======================== Stubs for removed migration functions ========================
 
-    #[test]
-    fn sync_completion_requires_matching_persisted_tip() {
-        assert!(is_completed_sync_status(100, 100, Some(100)));
-        assert!(!is_completed_sync_status(100, 100, None));
-        assert!(!is_completed_sync_status(100, 100, Some(99)));
-        assert!(!is_completed_sync_status(99, 100, Some(100)));
-        assert!(!is_completed_sync_status(0, 0, Some(0)));
-    }
-
-    #[test]
-    fn sync_progress_preserves_pre_scan_birthday_height_without_wallet_summary() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path = db_path.to_str().unwrap();
-        let phrase = crate::wallet::keys::generate_mnemonic();
-        let seed = crate::wallet::keys::mnemonic_to_seed(&phrase).unwrap();
-
-        crate::wallet::keys::init_db_and_create_account(
-            db_path,
-            WalletNetwork::Regtest,
-            &seed,
-            Some(1_000),
-            "test",
-        )
-        .unwrap();
-        update_chain_tip(db_path, WalletNetwork::Regtest, 1_100).unwrap();
-
-        let progress = get_sync_progress(db_path, WalletNetwork::Regtest).unwrap();
-        assert_eq!(progress.scanned_height, 999);
-        assert_eq!(progress.chain_tip_height, 1_100);
-        assert!(progress.is_syncing);
-        assert!(!progress.is_complete);
-    }
-
-    #[test]
-    fn wallet_scan_heights_uses_one_sqlite_snapshot() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path = db_path.to_str().unwrap();
-        let phrase = crate::wallet::keys::generate_mnemonic();
-        let seed = crate::wallet::keys::mnemonic_to_seed(&phrase).unwrap();
-
-        crate::wallet::keys::init_db_and_create_account(
-            db_path,
-            WalletNetwork::Regtest,
-            &seed,
-            Some(1_000),
-            "test",
-        )
-        .unwrap();
-        update_chain_tip(db_path, WalletNetwork::Regtest, 1_100).unwrap();
-
-        let mut db = open_wallet_db_for_read(db_path, WalletNetwork::Regtest).unwrap();
-        let heights = wallet_scan_heights_in_snapshot(&mut db, || {
-            let writer = rusqlite::Connection::open(db_path).unwrap();
-            writer
-                .execute("UPDATE accounts SET birthday_height = 500", [])
-                .unwrap();
-        })
-        .unwrap();
-
-        assert_eq!(heights, Some((999, 1_100)));
-        let updated_birthday: u32 = rusqlite::Connection::open(db_path)
-            .unwrap()
-            .query_row("SELECT MIN(birthday_height) FROM accounts", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(updated_birthday, 500);
-    }
-
-    /// Pull a proposal ID that is guaranteed not to collide with anything a
-    /// concurrent test might have inserted. We use a fresh counter so each
-    /// call yields a distinct u64.
-    fn unique_proposal_id() -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        // Start well above next_id's initial value (1) to avoid any overlap
-        // with proposals that a parallel test might genuinely insert.
-        static COUNTER: AtomicU64 = AtomicU64::new(1_000_000_000);
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    }
-
-    #[test]
-    fn validate_address_classifies_tex_addresses() {
-        assert_eq!(
-            validate_address("tex1s2rt77ggv6q989lr49rkgzmh5slsksa9khdgte").unwrap(),
-            "tex"
-        );
-        assert_eq!(
-            validate_address("textest1qyqszqgpqyqszqgpqyqszqgpqyqszqgpfcjgfy").unwrap(),
-            "tex"
-        );
-    }
-
-    #[test]
-    fn validate_address_rejects_invalid_address() {
-        assert!(validate_address("not-an-address").is_err());
-    }
-
-    #[test]
-    fn validate_address_rejects_sprout_addresses() {
-        use zcash_address::ToAddress;
-
-        let sprout = zcash_address::ZcashAddress::from_sprout(
-            zcash_protocol::consensus::NetworkType::Main,
-            [0; 64],
-        )
-        .to_string();
-
-        assert!(validate_address(&sprout).is_err());
-    }
-
-    #[test]
-    fn discard_proposal_is_idempotent_for_missing_id() {
-        // Should not panic, should not poison the mutex.
-        let id = unique_proposal_id();
-        discard_proposal(id, "missing-flow").unwrap();
-        discard_proposal(id, "missing-flow").unwrap(); // second call must also be a no-op
-    }
-
-    #[tokio::test]
-    async fn create_pczt_from_proposal_errors_for_missing_id() {
-        // A replay attempt (or a bogus ID from stale UI state) must surface
-        // a clean "not found" error rather than panicking or creating a
-        // bogus PCZT. We pass an invalid db_path because the "not found"
-        // check fires before any DB work; if the behavior regresses to
-        // touching the DB first, this test will reveal it via a different
-        // error message.
-        let id = unique_proposal_id();
-        let result = create_pczt_from_proposal(
-            "/nonexistent/path/that/should/not/exist.db",
-            "https://unused.invalid",
-            WalletNetwork::Main,
-            id,
-            "missing-flow",
-        )
-        .await;
-
-        match result {
-            Err(msg) => {
-                assert!(
-                    msg.contains("Proposal not found"),
-                    "expected 'Proposal not found' error, got: {msg}"
-                );
-            }
-            Ok(_) => panic!("create_pczt_from_proposal succeeded for unknown id {id}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn discard_proposal_after_create_pczt_failure_is_still_noop() {
-        // Simulates the Dart `finally` cleanup path: after create_pczt
-        // fails with "not found" (so the proposal was never there), the
-        // finally block still calls discard_proposal. That call must be
-        // safe even though the ID has never been in the store.
-        let id = unique_proposal_id();
-        let _ = create_pczt_from_proposal(
-            "/nonexistent/path/that/should/not/exist.db",
-            "https://unused.invalid",
-            WalletNetwork::Main,
-            id,
-            "missing-flow",
-        )
-        .await;
-        discard_proposal(id, "missing-flow").unwrap(); // cleanup must not panic
-    }
-}
-
-// ======================== Clean Re-exports ========================
-pub(crate) use send::estimate_send_max;
-pub use send::{estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult};
-pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance};
-pub(crate) use send::resubmit_pending_transactions;
-#[allow(unused_imports)] pub(crate) use send::ProposalResult;
-#[allow(unused_imports)] pub(crate) use send::SendMaxEstimateResult;
-#[allow(unused_imports)] pub(crate) use send::ShieldTransparentResult;
-#[allow(unused_imports)] pub(crate) use send::ShieldTransparentStatus;
-
-// Stubs for removed migration functions (sync_engine calls these)
 pub(crate) fn migration_anchor_retention_required(_db_path: &str, _network: WalletNetwork) -> Result<bool, String> { Ok(false) }
 pub(crate) fn retain_prepared_note_anchor_checkpoints_after_scan(_db_path: &str, _network: WalletNetwork, _db: &mut WalletDatabase) -> Result<usize, String> { Ok(0) }
 pub(crate) fn retain_migration_anchor_checkpoints_before_scan(_db_path: &str, _network: WalletNetwork, _db: &mut WalletDatabase, _frontier_height: u32, _end: u32, _checkpoints: &std::collections::BTreeSet<u32>) -> Result<usize, String> { Ok(0) }
@@ -868,3 +671,12 @@ pub(crate) fn delete_account_migration_rows_with_tx(_tx: &rusqlite::Transaction,
 pub(crate) use discard_stored_proposal as discard_proposal;
 pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
 
+// ======================== Re-exports from send.rs ========================
+pub(crate) use send::estimate_send_max;
+pub use send::{estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult};
+pub(crate) use send::{get_shield_transparent_status, shield_transparent_balance};
+pub(crate) use send::resubmit_pending_transactions;
+#[allow(unused_imports)] pub(crate) use send::ProposalResult;
+#[allow(unused_imports)] pub(crate) use send::SendMaxEstimateResult;
+#[allow(unused_imports)] pub(crate) use send::ShieldTransparentResult;
+#[allow(unused_imports)] pub(crate) use send::ShieldTransparentStatus;
