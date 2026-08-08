@@ -716,21 +716,14 @@ pub use send::{
 
 // ======================== Sync State & Orchestration ========================
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-pub static DESIRED_SYNC_MODE: AtomicU8 = AtomicU8::new(0);
 pub static SYNC_CANCEL: std::sync::LazyLock<Arc<AtomicBool>> =
     std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 pub static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
-pub fn set_sync_mode(mode: u8) {
-    DESIRED_SYNC_MODE.store(mode, AtomicOrdering::SeqCst);
-}
 
-pub fn get_sync_mode() -> u8 {
-    DESIRED_SYNC_MODE.load(AtomicOrdering::SeqCst)
-}
 
 pub fn cancel_full_sync() {
     SYNC_CANCEL.store(true, AtomicOrdering::Relaxed);
@@ -749,7 +742,6 @@ pub fn run_full_sync_blocking(
     db_path: &str,
     lightwalletd_url: &str,
     network: &str,
-    mode: u8,
 ) -> Result<(), String> {
     if SYNC_RUNNING
         .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
@@ -758,7 +750,6 @@ pub fn run_full_sync_blocking(
         return Err("Sync already running".into());
     }
 
-    DESIRED_SYNC_MODE.store(mode, AtomicOrdering::SeqCst);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let network = crate::wallet::keys::parse_network(network)?;
@@ -773,8 +764,6 @@ pub fn run_full_sync_blocking(
                 lightwalletd_url,
                 network,
                 cancel,
-                mode,
-                &DESIRED_SYNC_MODE,
                 true,
                 |_| {},
             )

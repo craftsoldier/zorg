@@ -6,7 +6,7 @@
 //! (`FsBlockDb`). We deliberately skip the file-cache step and keep a
 //! single batch of compact blocks in memory:
 //!
-//!   1. Batches are bounded (≤300 blocks on desktop, ≤100 on mobile),
+//!   1. Batches are bounded (≤2000 blocks),
 //!      so the memory footprint is small and predictable.
 //!   2. Avoiding the cache DB means one less file format to keep in
 //!      sync with librustzcash migrations and one less thing to clear

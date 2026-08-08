@@ -1,8 +1,8 @@
 //! Read-only transaction / balance / pending-tx query surface.
 //!
 //! Everything in this module is an "ask the wallet a question"
-//! helper that the FRB layer in `api/sync.rs` or the C FFI layer in
-//! `ffi.rs` calls per user action:
+//! helper that the caller
+//! calls per user action:
 //!
 //!   - Balance / address queries (`get_wallet_balance`,
 //!     `get_next_available_address`).

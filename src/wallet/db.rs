@@ -109,8 +109,8 @@ pub(crate) fn with_wallet_db_write_lock<T>(
     operation: &'static str,
     write: impl FnOnce() -> T,
 ) -> T {
-    // Serializes wallet-DB writes across FRB foreground calls, C-FFI
-    // background sync calls, and Rust sync tasks inside this process. This
+    // Serializes wallet-DB writes across foreground
+    // calls and Rust sync tasks inside this process. This
     // does not coordinate with a separate OS process that opens the same DB.
     //
     // Also drives a seqlock-style epoch so the process-wide wallet-summary

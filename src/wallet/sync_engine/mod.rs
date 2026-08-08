@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use nonempty::NonEmpty;
@@ -54,7 +54,7 @@ pub(crate) use lwd::{
     send_transaction,
 };
 
-/// Progress event sent to caller (Dart or Swift).
+/// Progress event sent to caller.
 #[derive(Clone, Debug)]
 pub struct SyncProgressEvent {
     pub scanned_height: u64,
@@ -73,11 +73,7 @@ pub struct SyncProgressEvent {
     pub phase: String,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-const BATCH_SIZE_FOREGROUND: u32 = 2000;
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-const BATCH_SIZE_FOREGROUND: u32 = 1000;
-const BATCH_SIZE_BACKGROUND: u32 = 300;
+const BATCH_SIZE: u32 = 2000;
 
 /// Sandblasting attack range (Zcash mainnet). Blocks in this range
 /// contain a very large number of outputs from a sustained spam
@@ -1247,14 +1243,11 @@ async fn watch_for_exit(should_exit: &impl Fn() -> bool) {
 
 /// Run the full sync loop with automatic retry on failure.
 /// Retries up to 3 times with exponential backoff (2s, 4s, 8s).
-/// This is the unified entry point called by both Dart (FRB) and Swift (C FFI).
 pub async fn run_sync_inner(
     db_data_path: &str,
     lightwalletd_url: &str,
     network: WalletNetwork,
     cancel: Arc<AtomicBool>,
-    running_mode: u8,
-    desired_mode: &AtomicU8,
     allow_resubmit: bool,
     progress_fn: impl Fn(SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
@@ -1275,11 +1268,9 @@ pub async fn run_sync_inner(
             );
             for _ in 0..delay_secs {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if cancel.load(Ordering::Relaxed)
-                    || desired_mode.load(Ordering::SeqCst) != running_mode
-                {
+                if cancel.load(Ordering::Relaxed) {
                     log::warn!(
-                        "[{}] sync: cancelled/mode changed during retry wait (pending error: {})",
+                        "[{}] sync: cancelled during retry wait (pending error: {})",
                         elapsed(),
                         last_err
                     );
@@ -1293,8 +1284,6 @@ pub async fn run_sync_inner(
             lightwalletd_url,
             network,
             cancel.clone(),
-            running_mode,
-            desired_mode,
             allow_resubmit,
             &progress_fn,
         )
@@ -1350,24 +1339,17 @@ async fn run_sync_impl(
     lightwalletd_url: &str,
     network: WalletNetwork,
     cancel: Arc<AtomicBool>,
-    running_mode: u8,
-    desired_mode: &AtomicU8,
     allow_resubmit: bool,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
     let mut migration_anchor_retention_required =
         crate::wallet::sync::migration_anchor_retention_required(db_data_path, network)
             .map_err(SyncError::db)?;
-    let default_batch_size = if running_mode == 2 {
-        BATCH_SIZE_BACKGROUND
-    } else {
-        BATCH_SIZE_FOREGROUND
-    };
+    let default_batch_size = BATCH_SIZE;
     let base_batch_size = effective_base_batch_size(default_batch_size);
     log::info!(
-        "[{}] sync: starting (mode={}, base_batch={}, migration_anchor_retention={})",
+        "[{}] sync: starting (base_batch={}, migration_anchor_retention={})",
         elapsed(),
-        running_mode,
         base_batch_size,
         migration_anchor_retention_required,
     );
@@ -1414,7 +1396,7 @@ async fn run_sync_impl(
     crate::wallet::sync::recover_orphaned_send_locks(db_data_path, network)
         .map_err(SyncError::db)?;
 
-    if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode {
+    if cancel.load(Ordering::Relaxed) {
         log::info!(
             "[{}] sync: cancel/mode observed before transparent UTXO refresh, skipping",
             elapsed(),
@@ -1423,7 +1405,7 @@ async fn run_sync_impl(
     }
 
     let should_exit =
-        || cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode;
+        || cancel.load(Ordering::Relaxed);
     refresh_utxos(&mut client, &mut db, network, &should_exit).await?;
 
     if should_exit() {
@@ -1449,7 +1431,7 @@ async fn run_sync_impl(
     // one more round of broadcasts after the UI asked us to quit.
     if !allow_resubmit {
         log::info!("[{}] sync: startup resubmit disabled", elapsed());
-    } else if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode
+    } else if cancel.load(Ordering::Relaxed)
     {
         log::info!(
             "[{}] sync: cancel/mode observed before startup resubmit, skipping",
@@ -1469,7 +1451,6 @@ async fn run_sync_impl(
             &startup_resubmit_exclusions,
             || {
                 cancel.load(Ordering::Relaxed)
-                    || desired_mode.load(Ordering::SeqCst) != running_mode
             },
         )
         .await;
@@ -1608,10 +1589,6 @@ async fn run_sync_impl(
     loop {
         if cancel.load(Ordering::Relaxed) {
             log::info!("[{}] sync: cancelled", elapsed());
-            return Ok(());
-        }
-        if desired_mode.load(Ordering::SeqCst) != running_mode {
-            log::info!("[{}] sync: mode changed, exiting", elapsed());
             return Ok(());
         }
 
@@ -1830,7 +1807,7 @@ async fn run_sync_impl(
             download_blocks(&mut client, start, end - 1).await?
         };
 
-        if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode {
+        if cancel.load(Ordering::Relaxed) {
             log::info!("[{}] sync: exiting after download", elapsed());
             return Ok(());
         }
@@ -2153,7 +2130,7 @@ async fn run_sync_impl(
             }
         }
 
-        if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode {
+        if cancel.load(Ordering::Relaxed) {
             log::info!("[{}] sync: exiting after scan", elapsed());
             return Ok(());
         }
@@ -2201,7 +2178,7 @@ async fn run_sync_impl(
         // log and skip the pass rather than falling back to the
         // stale height (the whole point of the refresh is to avoid
         // rebroadcasting against a stale expiry window).
-        if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode {
+        if cancel.load(Ordering::Relaxed) {
             log::info!(
                 "[{}] sync: cancel/mode observed before post-batch resubmit, exiting",
                 elapsed(),
@@ -2255,7 +2232,6 @@ async fn run_sync_impl(
                         &resubmit_exclusions,
                         || {
                             cancel.load(Ordering::Relaxed)
-                                || desired_mode.load(Ordering::SeqCst) != running_mode
                         },
                     )
                     .await;
@@ -2268,7 +2244,7 @@ async fn run_sync_impl(
                 );
             }
         }
-        if cancel.load(Ordering::Relaxed) || desired_mode.load(Ordering::SeqCst) != running_mode {
+        if cancel.load(Ordering::Relaxed) {
             log::info!("[{}] sync: exiting after resubmit pass", elapsed());
             return Ok(());
         }

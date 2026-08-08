@@ -9,8 +9,8 @@
 //! state, and the wallet would land in a permanent error state.
 //!
 //! `SyncError` is the typed replacement. Every call-site inside `sync_engine`
-//! and its peers returns `Result<_, SyncError>`; the public FRB / C-FFI
-//! surface still collapses it to `String` for ABI compatibility in
+//! and its peers returns `Result<_, SyncError>`; the public
+//! surface still collapses it to `String` for compatibility in
 //! `run_sync_inner`.
 
 use std::fmt;
@@ -77,8 +77,8 @@ pub(crate) const COMMITMENT_TREE_REWIND_DISTANCES: [u64; 3] = [10, 100, 1000];
 /// Maximum number of reorg-triggered rewinds allowed inside a single
 /// `run_sync_impl` invocation. Caps runaway rewind loops: if the chain is
 /// flapping fast enough to blow through this budget, `run_sync_impl` bails
-/// out so the outer `run_sync_inner` retry wrapper (and eventually the Dart
-/// polling loop) can try again with a fresh budget. Without this the same
+/// out so the outer `run_sync_inner` retry wrapper (and eventually the
+/// caller) can try again with a fresh budget. Without this the same
 /// sync run could keep rewinding backward indefinitely.
 pub(crate) const MAX_REWINDS_PER_RUN: u32 = 3;
 

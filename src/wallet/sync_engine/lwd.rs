@@ -112,7 +112,7 @@ where
 ///
 /// Ensures the process-wide rustls `CryptoProvider` is installed
 /// before any TLS work. This is normally done by `init_app()` on
-/// the Flutter/FRB path, but Android background preparation JNI can reach this
+/// path, but a cold start can reach this
 /// function on a cold background wake *before* `init_app()` ever ran. Without
 /// the `Once` guard here, rustls 0.23+ panics with "no
 /// process-level CryptoProvider installed" on the first handshake.
