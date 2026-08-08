@@ -62,29 +62,6 @@ pub struct ExecuteProposalResult {
     pub message: Option<String>,
 }
 
-pub struct SendMaxEstimateResult {
-    pub amount_zatoshi: u64,
-    pub fee_zatoshi: u64,
-    pub needs_sapling_params: bool,
-}
-
-pub struct ShieldTransparentResult {
-    pub txids: String,
-    pub status: String,
-    pub broadcasted_count: u32,
-    pub total_count: u32,
-    pub message: Option<String>,
-    pub fee_zatoshi: u64,
-    pub shielded_zatoshi: u64,
-}
-
-pub struct ShieldTransparentStatus {
-    pub can_shield: bool,
-    pub fee_zatoshi: u64,
-    pub shielded_zatoshi: u64,
-    pub reason: String,
-}
-
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ResubmitStats {
     pub attempted: usize,
@@ -337,7 +314,6 @@ pub fn propose_send(
             StoredProposal {
                 proposal_id: id,
                 proposal,
-                proposed_tx_version: None,
                 network,
                 account_id,
                 send_flow_id: send_flow_id.to_string(),
@@ -390,70 +366,6 @@ pub fn estimate_fee(
         .sum())
 }
 
-pub(crate) fn estimate_send_max(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-    to_address: &str,
-    memo_str: Option<&str>,
-) -> Result<SendMaxEstimateResult, String> {
-    let mut db = open_wallet_db(db_path, network)?;
-    let account_id = parse_account_uuid(account_uuid)?;
-    let to: zcash_address::ZcashAddress = to_address
-        .parse()
-        .map_err(|e| format!("Bad address: {e}"))?;
-    let memo_bytes = match memo_str {
-        Some(m) => Some(MemoBytes::from(
-            Memo::from_bytes(m.as_bytes()).map_err(|e| format!("Memo: {e}"))?,
-        )),
-        None => None,
-    };
-    let proposal = propose_send_max_transfer::<
-        _,
-        _,
-        _,
-        shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
-    >(
-        &mut db,
-        &network,
-        account_id,
-        &[
-            ShieldedPool::Sapling,
-            ShieldedPool::Orchard,
-            ShieldedPool::Ironwood,
-        ],
-        &StandardFeeRule::Zip317,
-        to,
-        memo_bytes,
-        MaxSpendMode::MaxSpendable,
-        ConfirmationsPolicy::default(),
-        &LockedInputPolicy::Exclude,
-        None,
-    )
-    .map_err(|e| format!("Send max: {e}"))?;
-    let fee: u64 = proposal
-        .steps()
-        .iter()
-        .map(|s| u64::from(s.balance().fee_required()))
-        .sum();
-    let total_out: u64 = proposal
-        .steps()
-        .iter()
-        .map(|s| {
-            s.balance()
-                .proposed_change()
-                .iter()
-                .map(|c| u64::from(c.value()))
-                .sum::<u64>()
-                + fee
-        })
-        .sum();
-    Ok(SendMaxEstimateResult {
-        amount_zatoshi: total_out - fee,
-        fee_zatoshi: fee,
-        needs_sapling_params: false,
-    })
-}
 
 // ======================== Execute ========================
 
@@ -660,61 +572,7 @@ async fn execute_stored(
 
 // ======================== Shield ========================
 
-pub(crate) fn get_shield_transparent_status(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<ShieldTransparentStatus, String> {
-    let db = open_wallet_db(db_path, network)?;
-    let _account_id = parse_account_uuid(account_uuid)?;
-    let _chain_height = db
-        .chain_height()
-        .map_err(|e| format!("Chain height: {e}"))?
-        .ok_or("Wallet must sync")?;
-    #[cfg(feature = "transparent-inputs")]
-    {
-        let balances = db
-            .get_transparent_balances(
-                account_id,
-                (chain_height + 1).into(),
-                ConfirmationsPolicy::MIN,
-            )
-            .map_err(|e| format!("Transparent balances: {e}"))?;
-        let total: u64 = balances.values().map(|b| u64::from(*b)).sum();
-        if total == 0 {
-            return Ok(ShieldTransparentStatus {
-                can_shield: false,
-                fee_zatoshi: 0,
-                shielded_zatoshi: 0,
-                reason: "No transparent balance".into(),
-            });
-        }
-        let fee = 10_000;
-        Ok(ShieldTransparentStatus {
-            can_shield: total > fee,
-            fee_zatoshi: fee,
-            shielded_zatoshi: total.saturating_sub(fee),
-            reason: String::new(),
-        })
-    }
-    #[cfg(not(feature = "transparent-inputs"))]
-    Ok(ShieldTransparentStatus {
-        can_shield: false,
-        fee_zatoshi: 0,
-        shielded_zatoshi: 0,
-        reason: "Transparent inputs not enabled".into(),
-    })
-}
 
-pub(crate) async fn shield_transparent_balance(
-    _db_path: &str,
-    _lightwalletd_url: &str,
-    _network: WalletNetwork,
-    _account_uuid: &str,
-    _seed: secrecy::SecretVec<u8>,
-) -> Result<ShieldTransparentResult, String> {
-    Err("Shield not yet implemented in clean send.rs".into())
-}
 
 // ======================== Resubmit ========================
 
@@ -759,15 +617,3 @@ where
 
 // ======================== Public broadcast (for API layer) ========================
 
-pub(crate) async fn broadcast_raw_transaction(
-    client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
-    raw_tx: &[u8],
-) -> Result<(), String> {
-    let resp = crate::sync_engine::send_transaction(client, raw_tx)
-        .await
-        .map_err(|e| format!("SendTransaction: {e}"))?;
-    if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
-        return Err(err);
-    }
-    Ok(())
-}

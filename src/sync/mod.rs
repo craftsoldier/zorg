@@ -43,10 +43,8 @@ pub use transactions::{
     parse_address_request_kind, set_transaction_status, AddressRequestKind,
     WalletBalance,
 };
-#[allow(unused_imports)] // ditto
 pub(crate) use transactions::{
-    get_export_birthday_anchor, get_oldest_mined_transaction_anchor,
-    get_unmined_txids_with_mined_output_evidence, ExportBirthdayAnchor, TransactionDetail,
+    get_unmined_txids_with_mined_output_evidence, TransactionDetail,
     TransactionDetailOutput, TransactionInfo, TxDataRequest,
     WalletBalanceAvailability,
 };
@@ -69,26 +67,12 @@ pub(crate) fn open_readonly_conn(db_path: &str) -> Result<rusqlite::Connection, 
     open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))
 }
 
-pub(crate) fn open_readonly_conn_fail_fast(db_path: &str) -> Result<rusqlite::Connection, String> {
-    open_readonly_conn_with_timeout(db_path, None)
-}
-
 fn open_block_cache(cache_path: &str) -> Result<FsBlockDb, String> {
     std::fs::create_dir_all(cache_path).map_err(|e| format!("Failed to create cache dir: {e}"))?;
     let mut db_cache = FsBlockDb::for_path(cache_path)
         .map_err(|e| format!("Failed to open block cache: {e:?}"))?;
     init_blockmeta_db(&mut db_cache).map_err(|e| format!("Failed to init block cache: {e}"))?;
     Ok(db_cache)
-}
-
-fn get_first_account_id(db: &WalletDatabase) -> Result<zcash_client_sqlite::AccountUuid, String> {
-    let accounts = db
-        .get_account_ids()
-        .map_err(|e| format!("Failed to list accounts: {e}"))?;
-    accounts
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No accounts found in wallet".to_string())
 }
 
 // ======================== Sync ========================
@@ -445,7 +429,6 @@ pub(super) struct StoredProposal {
         send::WalletFeeRule,
         zcash_client_sqlite::ReceivedNoteId,
     >,
-    pub proposed_tx_version: Option<zcash_primitives::transaction::TxVersion>,
     pub network: WalletNetwork,
     pub account_id: AccountUuid,
     pub send_flow_id: String,
@@ -578,80 +561,6 @@ pub(super) fn finish_stored_proposal(
     unlock_stored_proposal(proposal_id, send_flow_id, lock)
 }
 
-pub(crate) fn discard_stored_proposal(proposal_id: u64, send_flow_id: &str) -> Result<(), String> {
-    let should_release = {
-        let mut store = PROPOSAL_STORE
-            .lock()
-            .map_err(|e| format!("Lock proposal store for discard: {e}"))?;
-        match store.proposals.get(&proposal_id) {
-            Some(stored) if stored.send_flow_id == send_flow_id => {
-                store.proposals.remove(&proposal_id);
-                true
-            }
-            Some(_) => return Err("Send flow mismatch".to_string()),
-            None => match store.locks.get(&proposal_id) {
-                Some(lock) if lock.send_flow_id == send_flow_id => true,
-                Some(_) => return Err("Send flow mismatch".to_string()),
-                None => false,
-            },
-        }
-    };
-    if should_release {
-        finish_stored_proposal(proposal_id, send_flow_id, true)?;
-    }
-    Ok(())
-}
-
-/// Removes all in-memory capability to reuse or explicitly unlock a proposal,
-/// while leaving its wallet-level input lock to expire at its original height.
-///
-/// This is used when a broadcast may have reached the network but local
-/// transaction storage did not complete. Releasing the DB lock in that state
-/// could allow an immediate conflicting send.
-pub(super) fn retain_stored_proposal_lock_until_expiry(
-    proposal_id: u64,
-    send_flow_id: &str,
-) -> Result<(), String> {
-    let lock = {
-        let store = PROPOSAL_STORE
-            .lock()
-            .map_err(|e| format!("Lock proposal store to inspect retained DB lock: {e}"))?;
-        match store.locks.get(&proposal_id) {
-            Some(lock) if lock.send_flow_id == send_flow_id => Some(lock.clone()),
-            Some(_) => return Err("Send flow mismatch".to_string()),
-            None => None,
-        }
-    };
-    let Some(lock) = lock else {
-        return Ok(());
-    };
-
-    with_wallet_db_write_lock("sync.retain_stored_proposal_lock", || {
-        let mut store = PROPOSAL_STORE
-            .lock()
-            .map_err(|e| format!("Lock proposal store to retain DB lock: {e}"))?;
-        let Some(current) = store.locks.get(&proposal_id) else {
-            return Ok(());
-        };
-        if current.send_flow_id != send_flow_id || current.owner != lock.owner {
-            return Err("Send flow changed before retaining DB lock".to_string());
-        }
-        proposal_locks::mark_retain_until_expiry(&lock.db_path, lock.owner)?;
-        if let Some(proposal) = store.proposals.get(&proposal_id) {
-            if proposal.send_flow_id != send_flow_id {
-                return Err("Send flow mismatch".to_string());
-            }
-            store.proposals.remove(&proposal_id);
-        }
-        // Remove the unlock capability in the same critical section as the
-        // replayable proposal. A concurrent discard can therefore observe
-        // either the complete pre-retain state or the complete retained state,
-        // never the gap between them.
-        store.locks.remove(&proposal_id);
-        Ok(())
-    })
-}
-
 // ======================== Helpers ========================
 
 pub fn get_blocks_dir(cache_path: &str) -> String {
@@ -665,14 +574,6 @@ pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send
 
 // ======================== Re-exports from send.rs ========================
 pub(crate) use send::resubmit_pending_transactions;
-#[allow(unused_imports)]
-pub(crate) use send::ProposalResult;
-#[allow(unused_imports)]
-pub(crate) use send::SendMaxEstimateResult;
-#[allow(unused_imports)]
-pub(crate) use send::ShieldTransparentResult;
-#[allow(unused_imports)]
-pub(crate) use send::ShieldTransparentStatus;
 pub use send::{
     estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send,
     ExecuteProposalResult,

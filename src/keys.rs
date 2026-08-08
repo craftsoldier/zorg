@@ -7,19 +7,18 @@ use std::{
 use bip0039::{Count, English, Language, Mnemonic};
 use rusqlite::{named_params, OptionalExtension};
 use secrecy::{ExposeSecret, SecretVec};
-use transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex};
+
 use zcash_client_backend::data_api::{
     chain::ChainState, Account as _, AccountBirthday, AccountPurpose, AccountSource, WalletRead,
     WalletWrite, Zip32Derivation,
 };
 use zcash_client_sqlite::{error::SqliteClientError, wallet::init::init_wallet_db, AccountUuid};
 use zcash_keys::{
-    encoding::encode_transparent_address,
     keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, NetworkConstants, NetworkUpgrade, Parameters};
-use zeroize::{Zeroize, Zeroizing};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zeroize::Zeroizing;
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
@@ -433,7 +432,6 @@ fn delete_account_rows(db_path: &str, account_id: AccountUuid) -> Result<(), Str
         .transaction()
         .map_err(|e| format!("Failed to begin account delete transaction: {e}"))?;
     let account_uuid = account_id.expose_uuid();
-    let account_uuid_text = account_uuid.to_string();
     let account_uuid_bytes = account_uuid.as_bytes().as_slice();
 
     {
@@ -669,27 +667,6 @@ fn resolve_account_id(
                 .next()
                 .ok_or_else(|| "No accounts found in wallet".to_string())
         }
-    }
-}
-
-fn resolve_account_uuid_bytes_for_read(
-    conn: &rusqlite::Connection,
-    account_uuid: Option<&str>,
-) -> Result<Vec<u8>, String> {
-    match account_uuid {
-        Some(uuid_str) => {
-            let account_id = parse_account_uuid(uuid_str)?;
-            Ok(account_id.expose_uuid().as_bytes().to_vec())
-        }
-        None => conn
-            .query_row(
-                "SELECT uuid FROM accounts ORDER BY id ASC LIMIT 1",
-                [],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|e| format!("Failed to resolve first account: {e}"))?
-            .ok_or_else(|| "No accounts found in wallet".to_string()),
     }
 }
 

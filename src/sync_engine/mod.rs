@@ -12,7 +12,7 @@ use zcash_client_backend::data_api::{
     wallet::ConfirmationsPolicy,
     WalletCommitmentTrees, WalletRead, WalletWrite,
 };
-use zcash_client_sqlite::{error::SqliteClientError, AccountUuid};
+use zcash_client_sqlite::error::SqliteClientError;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
@@ -22,14 +22,13 @@ use crate::{
         open_wallet_raw_conn_with_timeout, with_wallet_db_write_lock, WalletDatabase,
         SYNC_DB_BUSY_TIMEOUT,
     },
-    keys,
     network::WalletNetwork,
     sync,
 };
 
 use {
     ::transparent::{
-        address::{Script, TransparentAddress},
+        address::Script,
         bundle::{OutPoint, TxOut},
     },
     zcash_client_backend::{
