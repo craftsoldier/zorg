@@ -1,7 +1,7 @@
 //! Software-wallet send, shield, and resubmit flows.
 //!
 //! Uses `zcash_client_backend`'s `propose_transfer` + `create_proposed_transactions`
-//! pipeline. No PCZT, no migration, no hardware wallet.
+//! pipeline.
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;

@@ -24,7 +24,7 @@ use crate::{
 
 use super::open_wallet_db;
 
-const TABLE: &str = "vizor_send_proposal_locks";
+const TABLE: &str = "zorg_send_proposal_locks";
 
 static PROCESS_SESSION_ID: LazyLock<[u8; 16]> = LazyLock::new(|| {
     let mut bytes = [0; 16];
@@ -63,7 +63,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
             retain_until_expiry INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (owner, txid, pool, output_index)
         );
-        CREATE INDEX IF NOT EXISTS idx_vizor_send_proposal_locks_session
+        CREATE INDEX IF NOT EXISTS idx_zorg_send_proposal_locks_session
             ON {TABLE}(session_id, retain_until_expiry);"
     ))
     .map_err(|e| format!("Initialize send proposal lock recovery schema: {e}"))

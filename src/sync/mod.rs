@@ -27,9 +27,9 @@ mod proposal_locks;
 mod send;
 mod transactions;
 
-// Re-export the split submodules at the `wallet::sync` path so every
+// Re-export the split submodules so every
 // `crate::sync::propose_send` / `::get_wallet_balance` /
-// `::extract_and_broadcast_pczt` etc. call path keeps resolving with
+// etc. call paths keep resolving with
 // the same visibility the monolithic `sync.rs` had before the refactor.
 // Functions were `pub fn` in the old file → `pub use`. Return-value
 // structs were `pub(crate) struct` → `pub(crate) use` (they're
@@ -434,7 +434,7 @@ pub fn validate_address(address: &str) -> Result<String, String> {
 // In-memory proposal store (proposals are short-lived, between
 // propose and execute). Kept in `sync/mod.rs` because it is shared
 // between the software send flow (`send::execute_proposal`) and the
-// hardware PCZT pipeline (`pczt::create_pczt_from_proposal`); placing
+// software send flow (`send::execute_proposal`); placing
 // it in either submodule would create a cross-submodule dependency.
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -658,44 +658,7 @@ pub fn get_blocks_dir(cache_path: &str) -> String {
     format!("{cache_path}/blocks")
 }
 
-// ======================== Stubs for removed migration functions ========================
 
-pub(crate) fn migration_anchor_retention_required(
-    _db_path: &str,
-    _network: WalletNetwork,
-) -> Result<bool, String> {
-    Ok(false)
-}
-pub(crate) fn retain_prepared_note_anchor_checkpoints_after_scan(
-    _db_path: &str,
-    _network: WalletNetwork,
-    _db: &mut WalletDatabase,
-) -> Result<usize, String> {
-    Ok(0)
-}
-pub(crate) fn retain_migration_anchor_checkpoints_before_scan(
-    _db_path: &str,
-    _network: WalletNetwork,
-    _db: &mut WalletDatabase,
-    _frontier_height: u32,
-    _end: u32,
-    _checkpoints: &std::collections::BTreeSet<u32>,
-) -> Result<usize, String> {
-    Ok(0)
-}
-pub(crate) fn reconcile_wallet_locks_after_sync(
-    _db_path: &str,
-    _network: WalletNetwork,
-) -> Result<(), String> {
-    Ok(())
-}
-pub(crate) fn configure_fast_testnet_migration(_enabled: bool) {}
-pub(crate) fn delete_account_migration_rows_with_tx(
-    _tx: &rusqlite::Transaction,
-    _account_uuid: &str,
-) -> Result<(), String> {
-    Ok(())
-}
 
 // Re-export aliases for API layer
 pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;

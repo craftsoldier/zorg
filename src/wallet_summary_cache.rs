@@ -167,7 +167,7 @@ mod tests {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!(
-            "/tmp/vizor-summary-cache-test-{}-{}-{label}",
+            "/tmp/zorg-summary-cache-test-{}-{}-{label}",
             std::process::id(),
             n,
         )

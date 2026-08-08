@@ -519,8 +519,6 @@ fn delete_account_rows(db_path: &str, account_id: AccountUuid) -> Result<(), Str
     )
     .map_err(|e| format!("Failed to delete account-only transactions: {e}"))?;
 
-    crate::sync::delete_account_migration_rows_with_tx(&tx, &account_uuid_text)?;
-
     tx.execute(
         "DELETE FROM accounts WHERE uuid = :account_uuid",
         named_params![":account_uuid": account_uuid_bytes],

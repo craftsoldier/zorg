@@ -14,7 +14,7 @@
 //! directly, so extracting them into their own submodule keeps
 //! `sync/mod.rs` focused on per-wallet infrastructure (DB open,
 //! chain-tip update, scan range management) and the shared
-//! PROPOSAL_STORE used by both the software and PCZT send paths.
+//! PROPOSAL_STORE used by the software send path.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -122,7 +122,7 @@ pub fn get_wallet_balance(
 /// `get_wallet_summary` computes every account's balance regardless of
 /// which one the caller wants, so asking it once per account is
 /// quadratic in account count. Callers that need more than one account
-/// — the Ironwood migration coordinator sweeps all of them every poll —
+/// — a caller wanting several accounts pays for one get_wallet_summary instead of one per account —
 /// must use this instead of looping over `get_wallet_balance`.
 ///
 /// Returns one entry per requested uuid, in the order given. An account
@@ -3296,14 +3296,14 @@ mod tests {
     /// Needs a real wallet DB, same as the history equivalence check:
     ///
     /// ```text
-    /// VIZOR_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
+    /// ZORG_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
     ///   cargo test --lib wallet_balances_batch_matches_single -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "requires a librustzcash-built wallet DB via VIZOR_HISTORY_EQUIV_DB"]
+    #[ignore = "requires a librustzcash-built wallet DB via ZORG_HISTORY_EQUIV_DB"]
     fn wallet_balances_batch_matches_single() {
-        let db_path = std::env::var("VIZOR_HISTORY_EQUIV_DB")
-            .expect("set VIZOR_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
+        let db_path = std::env::var("ZORG_HISTORY_EQUIV_DB")
+            .expect("set ZORG_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
         let conn = open_readonly_conn(&db_path).unwrap();
         let uuids: Vec<String> = conn
             .prepare("SELECT uuid FROM accounts ORDER BY id")
@@ -3364,14 +3364,14 @@ mod tests {
     /// or any real wallet DB:
     ///
     /// ```text
-    /// VIZOR_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
+    /// ZORG_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
     ///   cargo test --lib history_bases_match_v_transactions -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "requires a librustzcash-built wallet DB via VIZOR_HISTORY_EQUIV_DB"]
+    #[ignore = "requires a librustzcash-built wallet DB via ZORG_HISTORY_EQUIV_DB"]
     fn history_bases_match_v_transactions() {
-        let db_path = std::env::var("VIZOR_HISTORY_EQUIV_DB")
-            .expect("set VIZOR_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
+        let db_path = std::env::var("ZORG_HISTORY_EQUIV_DB")
+            .expect("set ZORG_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
         let conn = open_readonly_conn(&db_path).unwrap();
 
         let accounts: Vec<Vec<u8>> = conn

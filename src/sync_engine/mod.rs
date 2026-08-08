@@ -91,7 +91,7 @@ const BATCH_SIZE_SANDBLASTING: u32 = 100;
 const MAX_WITNESS_REPAIR_PASSES_PER_RUN: u32 = 3;
 const WITNESS_CHECK_POLICY_VERSION: u32 = 1;
 const WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS: u64 = 10_000;
-const SYNC_META_TABLE: &str = "ext_vizor_sync_meta";
+const SYNC_META_TABLE: &str = "ext_zorg_sync_meta";
 const SYNC_COMPLETION_POLICY_VERSION: u32 = 1;
 const SYNC_COMPLETION_POLICY_VERSION_KEY: &str = "sync_completion_policy_version";
 const LAST_COMPLETED_SYNC_HEIGHT_KEY: &str = "last_completed_sync_height";
@@ -508,7 +508,7 @@ fn sync_meta_table_exists(conn: &rusqlite::Connection) -> Result<bool, String> {
 
 fn read_sync_meta_value(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, String> {
     conn.query_row(
-        "SELECT value FROM ext_vizor_sync_meta WHERE key = ?1",
+        "SELECT value FROM ext_zorg_sync_meta WHERE key = ?1",
         params![key],
         |row| row.get::<_, String>(0),
     )
@@ -600,7 +600,7 @@ fn witness_check_decision(
 
 fn ensure_sync_meta_table(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS ext_vizor_sync_meta (
+        "CREATE TABLE IF NOT EXISTS ext_zorg_sync_meta (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
         )",
@@ -618,7 +618,7 @@ fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Resu
         .transaction()
         .map_err(|e| format!("begin sync metadata transaction: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
             WITNESS_CHECK_POLICY_VERSION_KEY,
@@ -627,7 +627,7 @@ fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Resu
     )
     .map_err(|e| format!("write witness check policy version: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
             WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
@@ -650,7 +650,7 @@ fn initialize_sync_completion_policy(
         .map_err(|e| format!("begin sync completion metadata transaction: {e}"))?;
     let inserted = tx
         .execute(
-            "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+            "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO NOTHING",
             params![
                 SYNC_COMPLETION_POLICY_VERSION_KEY,
@@ -660,14 +660,14 @@ fn initialize_sync_completion_policy(
         .map_err(|e| format!("initialize sync completion policy version: {e}"))?;
     if inserted > 0 {
         tx.execute(
-            "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, '0')
+            "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '0')
              ON CONFLICT(key) DO NOTHING",
             params![SYNC_IN_PROGRESS_KEY],
         )
         .map_err(|e| format!("initialize sync in-progress marker: {e}"))?;
         if let Some(height) = legacy_completed_height {
             tx.execute(
-                "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+                "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![LAST_COMPLETED_SYNC_HEIGHT_KEY, height.to_string()],
             )
@@ -713,7 +713,7 @@ fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
         .transaction()
         .map_err(|e| format!("begin sync-start metadata transaction: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
             SYNC_COMPLETION_POLICY_VERSION_KEY,
@@ -722,7 +722,7 @@ fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("write sync-start policy version: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, '1')
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![SYNC_IN_PROGRESS_KEY],
     )
@@ -738,7 +738,7 @@ fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<
         .transaction()
         .map_err(|e| format!("begin completed sync transaction: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
             SYNC_COMPLETION_POLICY_VERSION_KEY,
@@ -747,7 +747,7 @@ fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<
     )
     .map_err(|e| format!("write sync completion policy version: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, ?2)
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
             LAST_COMPLETED_SYNC_HEIGHT_KEY,
@@ -756,7 +756,7 @@ fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<
     )
     .map_err(|e| format!("write completed sync height: {e}"))?;
     tx.execute(
-        "INSERT INTO ext_vizor_sync_meta(key, value) VALUES (?1, '0')
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '0')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![SYNC_IN_PROGRESS_KEY],
     )
@@ -1342,16 +1342,12 @@ async fn run_sync_impl(
     allow_resubmit: bool,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
-    let mut migration_anchor_retention_required =
-        crate::sync::migration_anchor_retention_required(db_data_path, network)
-            .map_err(SyncError::db)?;
     let default_batch_size = BATCH_SIZE;
     let base_batch_size = effective_base_batch_size(default_batch_size);
     log::info!(
-        "[{}] sync: starting (base_batch={}, migration_anchor_retention={})",
+        "[{}] sync: starting (base_batch={})",
         elapsed(),
         base_batch_size,
-        migration_anchor_retention_required,
     );
 
     // Persist the active session before any new sync work begins. A crash or
@@ -1458,24 +1454,6 @@ async fn run_sync_impl(
 
     // 3. Download subtree roots (incremental)
     download_subtree_roots(&mut client, &mut db, db_data_path, network).await?;
-
-    if migration_anchor_retention_required {
-        with_wallet_db_write_lock(
-            "sync_engine.reconcile_migration_anchor_checkpoints.initial",
-            || {
-                crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
-                    db_data_path,
-                    network,
-                    &mut db,
-                )
-            },
-        )
-        .map_err(|error| {
-            SyncError::other(format!(
-                "reconcile migration anchor checkpoints before scan: {error}"
-            ))
-        })?;
-    }
 
     // Rescue pass (VZR-89): demote orphaned scan ranges left below the surviving
     // accounts' birthday by a pre-fix account deletion, so a wallet bricked by
@@ -1837,9 +1815,6 @@ async fn run_sync_impl(
             )));
         }
 
-        let incoming_orchard_checkpoint_heights =
-            migration_anchor_retention_required.then(|| block_source.orchard_checkpoint_heights());
-
         // Scan from memory. There are three reorg-adjacent signals from
         // librustzcash that all need to land on `SyncError::Continuity`
         // so the rewind recovery below fires:
@@ -1861,28 +1836,6 @@ async fn run_sync_impl(
         // non-wallet — e.g. block-source errors, unrecognised scan
         // variants) becomes `SyncError::Other` (retry-with-backoff).
         let scan_result = with_wallet_db_write_lock("sync_engine.retain_and_scan_blocks", || {
-            if let Some(incoming_checkpoint_heights) = &incoming_orchard_checkpoint_heights {
-                let retained =
-                    crate::sync::retain_migration_anchor_checkpoints_before_scan(
-                        db_data_path,
-                        network,
-                        &mut db,
-                        frontier_height,
-                        u32::from(end),
-                        incoming_checkpoint_heights,
-                    )
-                    .map_err(|error| {
-                        SyncError::other(format!(
-                            "retain migration anchor checkpoints before scan: {error}"
-                        ))
-                    })?;
-                if retained > 0 {
-                    log::info!(
-                        "[{}] sync: ensured {retained} migration anchor checkpoint(s) retained",
-                        elapsed(),
-                    );
-                }
-            }
             scan_cached_blocks(
                 &network,
                 &block_source,
@@ -2090,45 +2043,6 @@ async fn run_sync_impl(
                 }
             },
         };
-
-        if migration_anchor_retention_required {
-            let retained = with_wallet_db_write_lock(
-                "sync_engine.retain_migration_anchor_checkpoints",
-                || {
-                    crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
-                        db_data_path,
-                        network,
-                        &mut db,
-                    )
-                },
-            )
-            .map_err(|error| {
-                SyncError::other(format!(
-                    "retain migration anchor checkpoints after scan: {error}"
-                ))
-            })?;
-            if retained > 0 {
-                log::info!(
-                    "[{}] sync: retained {retained} migration anchor checkpoint(s)",
-                    elapsed(),
-                );
-            }
-            // Re-check so a run that finished, was abandoned, or released its
-            // last reference mid-sync stops paying for pre-scan inspection and
-            // post-scan reconciliation. A sync without a migration never enters
-            // either path.
-            let still_required =
-                crate::sync::migration_anchor_retention_required(db_data_path, network)
-                    .map_err(SyncError::db)?;
-            if !still_required {
-                migration_anchor_retention_required = false;
-                log::info!(
-                    "[{}] sync: migration anchor retention released (base_batch={})",
-                    elapsed(),
-                    base_batch_size,
-                );
-            }
-        }
 
         if cancel.load(Ordering::Relaxed) {
             log::info!("[{}] sync: exiting after scan", elapsed());
@@ -2384,30 +2298,6 @@ async fn run_sync_impl(
 
     let (final_scanned_height, final_tip_height) =
         ensure_complete_scan_state(&mut db, current_tip_height)?;
-    // Reconcile migration chain state only after the scan queue is fully
-    // drained, then update generic wallet locks for denomination outputs that
-    // became visible in this run. This is intentionally repeated after every
-    // completed sync because a later block may mine an output that was
-    // unresolved in an earlier run.
-    crate::sync::reconcile_wallet_locks_after_sync(db_data_path, network)
-        .map_err(SyncError::db)?;
-    if migration_anchor_retention_required {
-        with_wallet_db_write_lock(
-            "sync_engine.retain_migration_anchor_checkpoints.final",
-            || {
-                crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
-                    db_data_path,
-                    network,
-                    &mut db,
-                )
-            },
-        )
-        .map_err(|error| {
-            SyncError::other(format!(
-                "retain migration anchor checkpoints after sync: {error}"
-            ))
-        })?;
-    }
     log::info!(
         "[{}] sync: completed (fully_scanned={}, chain_tip={})",
         elapsed(),
