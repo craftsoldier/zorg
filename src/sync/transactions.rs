@@ -1882,7 +1882,7 @@ impl TxBase {
 pub(crate) struct ResubmittableTx {
     pub txid_bytes: Vec<u8>,
     pub raw_tx: Vec<u8>,
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub expiry_height: u32,
 }
 

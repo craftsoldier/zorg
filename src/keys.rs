@@ -1642,6 +1642,7 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
     fn test_create_testnet_wallet() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
@@ -1704,12 +1705,6 @@ mod tests {
         let (_, address) =
             init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "test")
                 .unwrap();
-        let listed_account = list_accounts(db_path_str, WalletNetwork::Main)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-
         // Decode and verify receiver types
         let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();
         let debug = format!("{:?}", za);
