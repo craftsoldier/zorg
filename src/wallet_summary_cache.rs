@@ -60,6 +60,7 @@ fn slot_for(key: CacheKey) -> Arc<Mutex<EntrySlot>> {
 /// would otherwise keep its last account balances alive until process exit.
 /// Account deletion also uses path-wide eviction so the next read rebuilds a
 /// summary containing only the remaining accounts.
+#[cfg(test)]
 pub(crate) fn evict_db(db_path: &str) {
     let mut map = match entry_map().lock() {
         Ok(guard) => guard,

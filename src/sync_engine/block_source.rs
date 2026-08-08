@@ -20,6 +20,7 @@
 //! [`MemoryBlockSource::new`] and hand it straight to
 //! `scan_cached_blocks`.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::fmt;
 

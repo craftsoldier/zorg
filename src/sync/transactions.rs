@@ -484,6 +484,7 @@ pub struct TransactionDetailOutput {
     pub pool: String,
 }
 
+#[cfg(test)]
 pub(crate) struct ExportBirthdayAnchor {
     pub block_height: u64,
 }
@@ -780,6 +781,7 @@ pub fn get_previous_transaction_count_for_address(
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
+#[cfg(test)]
 pub(crate) fn get_oldest_mined_transaction_anchor(
     db_path: &str,
     account_uuid: &str,
@@ -813,6 +815,7 @@ pub(crate) fn get_oldest_mined_transaction_anchor(
     .map_err(|e| format!("Query error: {e}"))
 }
 
+#[cfg(test)]
 pub(crate) fn get_export_birthday_anchor(
     db_path: &str,
     account_uuid: &str,
@@ -826,6 +829,7 @@ pub(crate) fn get_export_birthday_anchor(
         .ok_or_else(|| "Account birthday not found".to_string())
 }
 
+#[cfg(test)]
 fn get_account_birthday_height(db_path: &str, account_uuid: &str) -> Result<Option<u64>, String> {
     let account_id = parse_account_uuid(account_uuid)?;
     let conn = open_readonly_conn(db_path)?;
@@ -1878,6 +1882,7 @@ impl TxBase {
 pub(crate) struct ResubmittableTx {
     pub txid_bytes: Vec<u8>,
     pub raw_tx: Vec<u8>,
+    #[cfg(test)]
     pub expiry_height: u32,
 }
 
@@ -1949,6 +1954,7 @@ pub(crate) fn get_resubmittable_txs(
 
 /// Returns resubmittable transactions after filtering `excluded_txids` before
 /// loading raw transaction bytes.
+#[cfg(test)]
 pub(crate) fn get_resubmittable_txs_excluding(
     db_path: &str,
     current_height: u32,

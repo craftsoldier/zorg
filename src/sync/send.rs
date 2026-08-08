@@ -18,7 +18,7 @@ use zcash_client_backend::{
             self, create_proposed_transactions, ConfirmationsPolicy,
             SpendingKeys,
         },
-        Account as _, MaxSpendMode, OutputLockStore, WalletRead,
+        Account as _, OutputLockStore, WalletRead,
     },
     fees::{zip317::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule},
     wallet::{LockOwner, OvkPolicy},
