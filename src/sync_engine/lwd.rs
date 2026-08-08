@@ -330,9 +330,8 @@ pub(super) async fn download_subtree_roots(
     network: WalletNetwork,
 ) -> Result<(), SyncError> {
     let (sap_start, orch_start, ironwood_start) = {
-        let summary =
-            crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)
-                .map_err(SyncError::db)?;
+        let summary = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)
+            .map_err(SyncError::db)?;
         match summary {
             Some(s) => (
                 s.next_sapling_subtree_index(),
@@ -450,8 +449,7 @@ pub(super) async fn download_subtree_roots(
     .map_err(|e| status_to_network_error("ironwood subtree roots", e))?;
 
     let mut roots = Vec::new();
-    while let Some(root) =
-        next_stream_message(&mut stream, "ironwood subtree roots stream").await?
+    while let Some(root) = next_stream_message(&mut stream, "ironwood subtree roots stream").await?
     {
         let bytes: [u8; 32] = root.root_hash.as_slice().try_into().map_err(|_| {
             SyncError::parse(format!(
@@ -460,9 +458,7 @@ pub(super) async fn download_subtree_roots(
             ))
         })?;
         let node = Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&bytes))
-            .ok_or_else(|| {
-                SyncError::parse("ironwood subtree root: bad node bytes".to_string())
-            })?;
+            .ok_or_else(|| SyncError::parse("ironwood subtree root: bad node bytes".to_string()))?;
         roots.push(CommitmentTreeRoot::from_parts(
             BlockHeight::from_u32(root.completing_block_height as u32),
             node,

@@ -10,7 +10,7 @@ pub fn seed_from_macos_stored_mnemonic(
     account_uuid: &str,
 ) -> Result<SecretVec<u8>, String> {
     let account_key = account_mnemonic_key(account_uuid);
-    
+
     // The payload is now the raw utf-8 mnemonic string stored in the keychain
     let mnemonic_bytes =
         macos_read_secure_store_value(&mnemonic_store_service_for_network(network), &account_key)?
@@ -90,13 +90,9 @@ fn macos_read_secure_store_value(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_write_secure_store_value(
-    service: &str,
-    key: &str,
-    value: &[u8],
-) -> Result<(), String> {
+fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Result<(), String> {
     use security_framework::passwords::set_generic_password;
-    
+
     set_generic_password(service, key, value)
         .map_err(|e| format!("Failed to write to keychain for service={service} key={key}: {e}"))
 }
@@ -110,10 +106,6 @@ fn macos_read_secure_store_value(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn macos_write_secure_store_value(
-    _service: &str,
-    _key: &str,
-    _value: &[u8],
-) -> Result<(), String> {
+fn macos_write_secure_store_value(_service: &str, _key: &str, _value: &[u8]) -> Result<(), String> {
     Err("macOS stored mnemonic path is unsupported on this platform".to_string())
 }
