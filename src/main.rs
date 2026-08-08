@@ -72,11 +72,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             "--lwd" => {
                 i += 1;
-                lwd = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or("--lwd requires a URL")?,
-                );
+                lwd = Some(args.get(i).cloned().ok_or("--lwd requires a URL")?);
             }
             _ => command_args.push(args[i].clone()),
         }
@@ -101,7 +97,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "create" => cmd_create(&db, net, opts),
         "import" => cmd_import(&db, net, opts),
         "accounts" => {
-            for a in keys::list_accounts(&db, net)? {
+            for a in zorg::account::list_accounts(&db, net)? {
                 println!("  {}  {:<20}  {}", a.uuid, a.name, a.unified_address);
             }
             Ok(())
@@ -109,7 +105,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "balance" => cmd_balance(&db, net, opts),
         "address" => {
             let account = flag_str(opts, "--account");
-            let addr = keys::get_address_from_db(&db, net, account.as_deref())?;
+            let addr = zorg::account::get_address_from_db(&db, net, account.as_deref())?;
             println!("{addr}");
             Ok(())
         }
@@ -136,16 +132,14 @@ fn run(args: &[String]) -> Result<(), String> {
         "send" => cmd_send(&db, net, &lwd_url, opts),
         "history" => cmd_history(&db, net, opts),
         "validate" => {
-            let addr = opts
-                .first()
-                .ok_or("Usage: zorg validate <address>")?;
+            let addr = opts.first().ok_or("Usage: zorg validate <address>")?;
             let t = sync::validate_address(addr)?;
             println!("Valid: {t}");
             Ok(())
         }
         "delete" => {
             let uuid = opts.first().ok_or("Usage: zorg delete <uuid>")?;
-            keys::delete_account(&db, net, uuid)?;
+            zorg::account::delete_account(&db, net, uuid)?;
             println!("Account deleted.");
             Ok(())
         }
@@ -159,12 +153,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn cmd_create(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
     let name = flag_str(opts, "--name").unwrap_or("Account 1".into());
     let birthday = flag_u64(opts, "--birthday");
-    let result = keys::create_wallet(
-        &net.as_str(),
-        db,
-        birthday,
-        Some(&name),
-    )?;
+    let result = keys::create_wallet(&net.as_str(), db, birthday, Some(&name))?;
     println!("Mnemonic (save this!): {}", result.mnemonic);
     println!("Account UUID: {}", result.account_uuid);
     println!("Address: {}", result.unified_address);
@@ -222,10 +211,8 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
     let amount_str = positional
         .get(1)
         .ok_or("Usage: zorg send <to> <zec> [--memo <text>]")?;
-    let amount_zat = (amount_str
-        .parse::<f64>()
-        .map_err(|_| "Invalid amount")?
-        * 100_000_000.0) as u64;
+    let amount_zat =
+        (amount_str.parse::<f64>().map_err(|_| "Invalid amount")? * 100_000_000.0) as u64;
     let memo = flag_str(opts, "--memo");
     let uuid = match flag_str(opts, "--account") {
         Some(u) => u,
@@ -306,7 +293,7 @@ fn flag_u64(opts: &[String], flag: &str) -> Option<u64> {
 }
 
 fn first_account_uuid(db: &str, net: WalletNetwork) -> Result<String, String> {
-    keys::list_accounts(db, net)?
+    zorg::account::list_accounts(db, net)?
         .first()
         .map(|a| a.uuid.clone())
         .ok_or_else(|| "No accounts found. Run `zorg create`.".into())

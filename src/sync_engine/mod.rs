@@ -951,9 +951,9 @@ async fn repair_anchor_root_mismatch_if_needed(
     let local_orchard = db
         .with_orchard_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
         .map_err(|e| SyncError::db(format!("orchard root at {anchor_height}: {e}")))?;
-    let local_ironwood =
-        db.with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
-            .map_err(|e| SyncError::db(format!("ironwood root at {anchor_height}: {e}")))?;
+    let local_ironwood = db
+        .with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
+        .map_err(|e| SyncError::db(format!("ironwood root at {anchor_height}: {e}")))?;
 
     let anchor_chain_state = get_tree_state(client, u32::from(anchor_height) as u64)
         .await?
@@ -1388,8 +1388,7 @@ async fn run_sync_impl(
     })?;
 
     // Retained send-lock expiry requires a usable target height.
-    crate::sync::recover_orphaned_send_locks(db_data_path, network)
-        .map_err(SyncError::db)?;
+    crate::sync::recover_orphaned_send_locks(db_data_path, network).map_err(SyncError::db)?;
 
     if cancel.load(Ordering::Relaxed) {
         log::info!(
@@ -1399,8 +1398,7 @@ async fn run_sync_impl(
         return Ok(());
     }
 
-    let should_exit =
-        || cancel.load(Ordering::Relaxed);
+    let should_exit = || cancel.load(Ordering::Relaxed);
     refresh_utxos(&mut client, &mut db, network, &should_exit).await?;
 
     if should_exit() {
@@ -1426,8 +1424,7 @@ async fn run_sync_impl(
     // one more round of broadcasts after the UI asked us to quit.
     if !allow_resubmit {
         log::info!("[{}] sync: startup resubmit disabled", elapsed());
-    } else if cancel.load(Ordering::Relaxed)
-    {
+    } else if cancel.load(Ordering::Relaxed) {
         log::info!(
             "[{}] sync: cancel/mode observed before startup resubmit, skipping",
             elapsed(),
@@ -1444,9 +1441,7 @@ async fn run_sync_impl(
             &mut client,
             tip.height as u32,
             &startup_resubmit_exclusions,
-            || {
-                cancel.load(Ordering::Relaxed)
-            },
+            || cancel.load(Ordering::Relaxed),
         )
         .await;
     }
@@ -1470,7 +1465,7 @@ async fn run_sync_impl(
     // the original orphan and any such re-created range, so the orphaned history
     // is never scanned. No-op for healthy wallets; best-effort (a failure must
     // not block sync).
-    match crate::keys::prune_orphaned_scan_ranges(db_data_path) {
+    match crate::account::prune_orphaned_scan_ranges(db_data_path) {
         Ok(demoted) if demoted > 0 => log::info!(
             "[{}] sync: pruned {demoted} orphaned scan range(s) below the wallet birthday",
             elapsed(),
@@ -1541,8 +1536,7 @@ async fn run_sync_impl(
     // `None` on the first iteration and whenever the previous batch
     // was the last in its range (so there's nothing to prefetch until
     // `suggest_scan_ranges` runs again).
-    type PrefetchResult =
-        Result<crate::sync_engine::block_source::MemoryBlockSource, SyncError>;
+    type PrefetchResult = Result<crate::sync_engine::block_source::MemoryBlockSource, SyncError>;
     /// Prefetched block download state. Implements `Drop` to
     /// abort the spawned tokio task when the loop exits for any
     /// reason (cancel, mode change, error, break, reorg
@@ -2143,9 +2137,7 @@ async fn run_sync_impl(
                         &mut client,
                         fresh_tip_height,
                         &resubmit_exclusions,
-                        || {
-                            cancel.load(Ordering::Relaxed)
-                        },
+                        || cancel.load(Ordering::Relaxed),
                     )
                     .await;
                 }

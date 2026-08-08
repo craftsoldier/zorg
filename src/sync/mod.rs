@@ -36,14 +36,13 @@ mod transactions;
 // reachable from anywhere in the crate but not re-exported to
 // downstream consumers, which matches the pre-refactor surface
 // exactly).
+pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address,
     get_previous_transaction_count_for_address, get_transaction_data_requests,
     get_transaction_detail, get_transaction_history, get_wallet_balance, get_wallet_balances,
-    parse_address_request_kind, set_transaction_status, AddressRequestKind,
-    WalletBalance,
+    parse_address_request_kind, set_transaction_status, AddressRequestKind, WalletBalance,
 };
-pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 
 pub(super) fn open_wallet_db(
     db_path: &str,
@@ -563,8 +562,6 @@ pub fn get_blocks_dir(cache_path: &str) -> String {
     format!("{cache_path}/blocks")
 }
 
-
-
 // Re-export aliases for API layer
 pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
 
@@ -583,8 +580,6 @@ use std::sync::Arc;
 pub static SYNC_CANCEL: std::sync::LazyLock<Arc<AtomicBool>> =
     std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 pub static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
-
-
 
 pub fn cancel_full_sync() {
     SYNC_CANCEL.store(true, AtomicOrdering::Relaxed);
@@ -611,10 +606,9 @@ pub fn run_full_sync_blocking(
         return Err("Sync already running".into());
     }
 
-
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let network = crate::keys::parse_network(network)?;
-        crate::keys::ensure_db_migrated_once(db_path, network)?;
+        crate::account::ensure_db_migrated_once(db_path, network)?;
         let cancel = SYNC_CANCEL.clone();
         cancel.store(false, AtomicOrdering::Relaxed);
 

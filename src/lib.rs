@@ -1,10 +1,11 @@
+pub mod account;
 pub(crate) mod db;
 pub mod keys;
 pub mod network;
+pub mod secret_store;
 pub mod sync;
 pub mod sync_engine;
 pub(crate) mod wallet_summary_cache;
-pub mod secret_store;
 
 /// Install the rustls crypto provider and set log level.
 /// Call once before any TLS connection (lightwalletd sync).

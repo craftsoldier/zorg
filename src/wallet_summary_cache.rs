@@ -550,7 +550,7 @@ mod tests {
         let phrase = crate::keys::generate_mnemonic();
         let seed = crate::keys::mnemonic_to_seed(&phrase).unwrap();
 
-        crate::keys::init_db_and_create_account(
+        crate::account::init_db_and_create_account(
             db_path,
             WalletNetwork::Regtest,
             &seed,

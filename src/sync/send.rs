@@ -9,15 +9,10 @@ use std::num::NonZeroUsize;
 use rand::rngs::OsRng;
 use secrecy::{ExposeSecret, SecretVec};
 
-use zcash_client_backend::data_api::wallet::input_selection::{
-    GreedyInputSelector, SpendPolicy,
-};
+use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
 use zcash_client_backend::{
     data_api::{
-        wallet::{
-            self, create_proposed_transactions, ConfirmationsPolicy,
-            SpendingKeys,
-        },
+        wallet::{self, create_proposed_transactions, ConfirmationsPolicy, SpendingKeys},
         Account as _, OutputLockStore, WalletRead,
     },
     fees::{zip317::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule},
@@ -70,8 +65,8 @@ pub(crate) struct ResubmitStats {
 }
 
 fn check_hash(path: &str, expected: &str) -> bool {
-    use std::io::Read;
     use blake2b_simd::Params;
+    use std::io::Read;
 
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -123,7 +118,6 @@ fn ensure_param(home: &str, filename: &str, expected_hash: &str) -> Result<Strin
         filename
     ))
 }
-
 
 // ======================== Helpers ========================
 
@@ -283,12 +277,7 @@ pub fn propose_send(
         let lock_expiry =
             send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        crate::sync::proposal_locks::persist(
-            db_path,
-            lock_owner,
-            &input_refs,
-            lock_expiry,
-        )?;
+        crate::sync::proposal_locks::persist(db_path, lock_owner, &input_refs, lock_expiry)?;
         if let Err(e) = db.lock_outputs(&input_refs, lock_owner, lock_expiry) {
             let _ = crate::sync::proposal_locks::remove(db_path, lock_owner);
             return Err(format!("Lock inputs: {e:?}"));
@@ -365,7 +354,6 @@ pub fn estimate_fee(
         .map(|s| u64::from(s.balance().fee_required()))
         .sum())
 }
-
 
 // ======================== Execute ========================
 
@@ -457,11 +445,7 @@ async fn execute_stored(
             live_expiry,
         )
         .map_err(|e| format!("Relock: {e:?}"))?;
-        crate::sync::proposal_locks::update_expiry(
-            db_path,
-            proposal_lock.owner,
-            live_expiry,
-        )?;
+        crate::sync::proposal_locks::update_expiry(db_path, proposal_lock.owner, live_expiry)?;
 
         let account = db
             .get_account(stored.account_id)
@@ -481,7 +465,8 @@ async fn execute_stored(
                 (sp.to_string(), op.to_string())
             }
             _ => {
-                let home = std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
+                let home =
+                    std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
                 let sp = ensure_param(
                     &home,
                     "sapling-spend.params",
@@ -496,8 +481,18 @@ async fn execute_stored(
             }
         };
 
-        let spend_file = std::fs::File::open(&spend_path).map_err(|e| format!("Sapling spend params missing! Please place them at {}: {}", spend_path, e))?;
-        let output_file = std::fs::File::open(&output_path).map_err(|e| format!("Sapling output params missing! Please place them at {}: {}", output_path, e))?;
+        let spend_file = std::fs::File::open(&spend_path).map_err(|e| {
+            format!(
+                "Sapling spend params missing! Please place them at {}: {}",
+                spend_path, e
+            )
+        })?;
+        let output_file = std::fs::File::open(&output_path).map_err(|e| {
+            format!(
+                "Sapling output params missing! Please place them at {}: {}",
+                output_path, e
+            )
+        })?;
 
         let spend_prover = sapling_crypto::circuit::SpendParameters::read(spend_file, false)
             .map_err(|e| format!("Failed to read sapling-spend.params: {}", e))?;
@@ -572,8 +567,6 @@ async fn execute_stored(
 
 // ======================== Shield ========================
 
-
-
 // ======================== Resubmit ========================
 
 pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
@@ -597,9 +590,7 @@ where
         let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {
             Ok(resp) => {
-                if let Some(err) =
-                    crate::sync::broadcast::send_response_rejection_error(&resp)
-                {
+                if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
                     log::warn!("resubmit: {} rejected: {err}", hex::encode(&tx.txid_bytes));
                     stats.failed += 1;
                 } else {
@@ -616,4 +607,3 @@ where
 }
 
 // ======================== Public broadcast (for API layer) ========================
-
