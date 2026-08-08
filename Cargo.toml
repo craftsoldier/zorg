@@ -92,12 +92,7 @@ security-framework = { version = "3.7", features = ["OSX_10_15"] }
 tempfile = "3"
 incrementalmerkletree = "0.8"
 hex = "0.4"
-# Integration tests inject/inspect scan_queue rows directly to exercise the
-# VZR-89 rescue path. Keep this version aligned with the [dependencies] entry.
 rusqlite = "0.37"
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("transparent-inputs"))'] }
 
 # Debug builds with high opt-level for usable crypto performance.
 # Release builds are unaffected.

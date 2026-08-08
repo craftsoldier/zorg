@@ -1756,6 +1756,14 @@ pub fn create_wallet(
     let name = account_name.unwrap_or("Account 1");
     let (account_uuid, unified_address) =
         init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) = crate::secret_store::store_mnemonic_in_macos_keychain(
+        network,
+        &account_uuid,
+        &mnemonic,
+    ) {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
     Ok(WalletCreationResult {
         mnemonic,
         unified_address,
@@ -1777,6 +1785,14 @@ pub fn import_wallet(
     let name = account_name.unwrap_or("Account 1");
     let (account_uuid, unified_address) =
         init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) = crate::secret_store::store_mnemonic_in_macos_keychain(
+        network,
+        &account_uuid,
+        mnemonic,
+    ) {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
     Ok(WalletImportResult {
         unified_address,
         account_uuid,
