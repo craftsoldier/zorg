@@ -93,15 +93,15 @@ pub(crate) struct ResubmitStats {
 }
 
 fn check_hash(path: &str, expected: &str) -> bool {
-    use sha2::{Digest, Sha256};
     use std::io::Read;
+    use blake2b_simd::Params;
 
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
 
-    let mut hasher = Sha256::new();
+    let mut state = Params::new().hash_length(64).to_state();
     let mut buffer = [0; 8192];
     loop {
         let n = match file.read(&mut buffer) {
@@ -109,11 +109,11 @@ fn check_hash(path: &str, expected: &str) -> bool {
             Ok(n) => n,
             Err(_) => return false,
         };
-        hasher.update(&buffer[..n]);
+        state.update(&buffer[..n]);
     }
 
-    let result = hasher.finalize();
-    hex::encode(result) == expected
+    let result = state.finalize();
+    hex::encode(result.as_bytes()) == expected
 }
 
 fn ensure_param(home: &str, filename: &str, expected_hash: &str) -> Result<String, String> {
@@ -573,12 +573,12 @@ async fn execute_stored(
                 let sp = ensure_param(
                     &home,
                     "sapling-spend.params",
-                    "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13",
+                    "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c",
                 )?;
                 let op = ensure_param(
                     &home,
                     "sapling-output.params",
-                    "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4",
+                    "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
                 )?;
                 (sp, op)
             }

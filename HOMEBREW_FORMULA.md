@@ -39,6 +39,6 @@ end
 ```
 
 ### How the Integration Works
-1. **The `resource` blocks**: Homebrew uses these to fetch the files using its built-in downloader (with native progress bars) safely outside the build sandbox.
+1. **The `resource` blocks**: Homebrew uses these to fetch the files using its built-in downloader (with native progress bars) safely outside the build sandbox. Note that Homebrew uses SHA-256 for its `sha256` declarations because it natively enforces SHA-256 for all downloads.
 2. **The `pkgshare/"params"` destination**: In Homebrew, `pkgshare` translates to `/opt/homebrew/share/zorg/` (on Apple Silicon). This perfectly matches the `brew_paths` fallback list hardcoded into `send.rs`.
-3. **The Runtime Hand-off**: When the user installs `zorg`, Homebrew puts the files in `pkgshare`. The very first time the user runs a transaction, your Rust code finds them there, verifies their SHA-256 hashes, and securely copies them to `~/Library/Application Support/ZcashParams` for global Zcash ecosystem use.
+3. **The Runtime Hand-off (BLAKE2b)**: When the user installs `zorg`, Homebrew puts the files in `pkgshare`. The very first time the user runs a transaction, your Rust code finds them there, verifies their authentic **BLAKE2b** hashes (using the lightning-fast `blake2b_simd` crate), and securely copies them to `~/Library/Application Support/ZcashParams` for global Zcash ecosystem use.
