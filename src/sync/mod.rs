@@ -43,11 +43,7 @@ pub use transactions::{
     parse_address_request_kind, set_transaction_status, AddressRequestKind,
     WalletBalance,
 };
-pub(crate) use transactions::{
-    get_unmined_txids_with_mined_output_evidence, TransactionDetail,
-    TransactionDetailOutput, TransactionInfo, TxDataRequest,
-    WalletBalanceAvailability,
-};
+pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 
 pub(super) fn open_wallet_db(
     db_path: &str,

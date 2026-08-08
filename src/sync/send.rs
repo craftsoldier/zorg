@@ -10,12 +10,12 @@ use rand::rngs::OsRng;
 use secrecy::{ExposeSecret, SecretVec};
 
 use zcash_client_backend::data_api::wallet::input_selection::{
-    GreedyInputSelector, LockedInputPolicy, SpendPolicy,
+    GreedyInputSelector, SpendPolicy,
 };
 use zcash_client_backend::{
     data_api::{
         wallet::{
-            self, create_proposed_transactions, propose_send_max_transfer, ConfirmationsPolicy,
+            self, create_proposed_transactions, ConfirmationsPolicy,
             SpendingKeys,
         },
         Account as _, MaxSpendMode, OutputLockStore, WalletRead,

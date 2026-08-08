@@ -54,6 +54,7 @@ impl MemoryBlockSource {
 
     /// Returns the block heights that scanning will add as Orchard subtree
     /// checkpoints before Orchard checkpoint pruning runs.
+    #[cfg(test)]
     pub(super) fn orchard_checkpoint_heights(&self) -> BTreeSet<u32> {
         self.blocks
             .iter()

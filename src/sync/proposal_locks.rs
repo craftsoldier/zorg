@@ -114,6 +114,7 @@ pub(super) fn remove(db_path: &str, owner: LockOwner) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn mark_retain_until_expiry(db_path: &str, owner: LockOwner) -> Result<(), String> {
     let conn = open_wallet_raw_conn_with_timeout(db_path, READ_DB_BUSY_TIMEOUT)?;
     ensure_schema(&conn)?;
