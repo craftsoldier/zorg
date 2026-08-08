@@ -36,6 +36,7 @@ copy-review.json
 copy-review-viewer.html
 
 # Rust
+/target/
 rust/target/
 rust/build/
 
