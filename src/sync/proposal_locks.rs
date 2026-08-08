@@ -17,7 +17,7 @@ use zcash_client_backend::{
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, PoolType, ShieldedPool};
 
-use crate::wallet::{
+use crate::{
     db::{open_wallet_raw_conn_with_timeout, with_wallet_db_write_lock, READ_DB_BUSY_TIMEOUT},
     network::WalletNetwork,
 };

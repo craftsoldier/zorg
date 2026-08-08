@@ -16,6 +16,14 @@ impl WalletNetwork {
             _ => None,
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Test => "test",
+            Self::Regtest => "regtest",
+        }
+    }
 }
 
 impl Parameters for WalletNetwork {

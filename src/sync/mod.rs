@@ -13,7 +13,7 @@ use zcash_client_sqlite::{
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::wallet::{
+use crate::{
     db::{
         open_readonly_conn_with_timeout, open_wallet_db_for_read_with_timeout,
         open_wallet_db_with_timeout, with_wallet_db_write_lock, WalletDatabase,
@@ -28,7 +28,7 @@ mod send;
 mod transactions;
 
 // Re-export the split submodules at the `wallet::sync` path so every
-// `crate::wallet::sync::propose_send` / `::get_wallet_balance` /
+// `crate::sync::propose_send` / `::get_wallet_balance` /
 // `::extract_and_broadcast_pczt` etc. call path keeps resolving with
 // the same visibility the monolithic `sync.rs` had before the refactor.
 // Functions were `pub fn` in the old file → `pub use`. Return-value
@@ -41,12 +41,13 @@ pub use transactions::{
     get_previous_transaction_count_for_address, get_transaction_data_requests,
     get_transaction_detail, get_transaction_history, get_wallet_balance, get_wallet_balances,
     parse_address_request_kind, set_transaction_status, AddressRequestKind,
+    WalletBalance,
 };
 #[allow(unused_imports)] // ditto
 pub(crate) use transactions::{
     get_export_birthday_anchor, get_oldest_mined_transaction_anchor,
     get_unmined_txids_with_mined_output_evidence, ExportBirthdayAnchor, TransactionDetail,
-    TransactionDetailOutput, TransactionInfo, TxDataRequest, WalletBalance,
+    TransactionDetailOutput, TransactionInfo, TxDataRequest,
     WalletBalanceAvailability,
 };
 
@@ -105,7 +106,7 @@ pub fn get_next_subtree_indices(
     db_path: &str,
     network: WalletNetwork,
 ) -> Result<(u64, u64, u64), String> {
-    let summary = crate::wallet::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
+    let summary = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
     match summary {
         Some(s) => Ok((
             s.next_sapling_subtree_index(),
@@ -752,14 +753,14 @@ pub fn run_full_sync_blocking(
 
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let network = crate::wallet::keys::parse_network(network)?;
-        crate::wallet::keys::ensure_db_migrated_once(db_path, network)?;
+        let network = crate::keys::parse_network(network)?;
+        crate::keys::ensure_db_migrated_once(db_path, network)?;
         let cancel = SYNC_CANCEL.clone();
         cancel.store(false, AtomicOrdering::Relaxed);
 
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
         rt.block_on(async {
-            crate::wallet::sync_engine::run_sync_inner(
+            crate::sync_engine::run_sync_inner(
                 db_path,
                 lightwalletd_url,
                 network,

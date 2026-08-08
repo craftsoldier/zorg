@@ -16,7 +16,7 @@ use zcash_client_sqlite::{error::SqliteClientError, AccountUuid};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-use crate::wallet::{
+use crate::{
     db::{
         open_readonly_conn_with_timeout, open_wallet_db_with_timeout,
         open_wallet_raw_conn_with_timeout, with_wallet_db_write_lock, WalletDatabase,
@@ -373,7 +373,7 @@ fn recovery_resubmit_exclusions(
         .filter(|range| is_pending_scan_range(range))
         .map(|range| range.block_range().clone())
         .collect::<Vec<_>>();
-    crate::wallet::sync::get_unmined_txids_with_mined_output_evidence(db_path, &pending_ranges)
+    crate::sync::get_unmined_txids_with_mined_output_evidence(db_path, &pending_ranges)
         .map_err(SyncError::db)
 }
 
@@ -1343,7 +1343,7 @@ async fn run_sync_impl(
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
     let mut migration_anchor_retention_required =
-        crate::wallet::sync::migration_anchor_retention_required(db_data_path, network)
+        crate::sync::migration_anchor_retention_required(db_data_path, network)
             .map_err(SyncError::db)?;
     let default_batch_size = BATCH_SIZE;
     let base_batch_size = effective_base_batch_size(default_batch_size);
@@ -1393,7 +1393,7 @@ async fn run_sync_impl(
     })?;
 
     // Retained send-lock expiry requires a usable target height.
-    crate::wallet::sync::recover_orphaned_send_locks(db_data_path, network)
+    crate::sync::recover_orphaned_send_locks(db_data_path, network)
         .map_err(SyncError::db)?;
 
     if cancel.load(Ordering::Relaxed) {
@@ -1443,7 +1443,7 @@ async fn run_sync_impl(
             .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
         let startup_resubmit_exclusions =
             recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
-        let _ = crate::wallet::sync::resubmit_pending_transactions(
+        let _ = crate::sync::resubmit_pending_transactions(
             db_data_path,
             lightwalletd_url,
             &mut client,
@@ -1463,7 +1463,7 @@ async fn run_sync_impl(
         with_wallet_db_write_lock(
             "sync_engine.reconcile_migration_anchor_checkpoints.initial",
             || {
-                crate::wallet::sync::retain_prepared_note_anchor_checkpoints_after_scan(
+                crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
                     db_data_path,
                     network,
                     &mut db,
@@ -1493,7 +1493,7 @@ async fn run_sync_impl(
     // the original orphan and any such re-created range, so the orphaned history
     // is never scanned. No-op for healthy wallets; best-effort (a failure must
     // not block sync).
-    match crate::wallet::keys::prune_orphaned_scan_ranges(db_data_path) {
+    match crate::keys::prune_orphaned_scan_ranges(db_data_path) {
         Ok(demoted) if demoted > 0 => log::info!(
             "[{}] sync: pruned {demoted} orphaned scan range(s) below the wallet birthday",
             elapsed(),
@@ -1565,7 +1565,7 @@ async fn run_sync_impl(
     // was the last in its range (so there's nothing to prefetch until
     // `suggest_scan_ranges` runs again).
     type PrefetchResult =
-        Result<crate::wallet::sync_engine::block_source::MemoryBlockSource, SyncError>;
+        Result<crate::sync_engine::block_source::MemoryBlockSource, SyncError>;
     /// Prefetched block download state. Implements `Drop` to
     /// abort the spawned tokio task when the loop exits for any
     /// reason (cancel, mode change, error, break, reorg
@@ -1863,7 +1863,7 @@ async fn run_sync_impl(
         let scan_result = with_wallet_db_write_lock("sync_engine.retain_and_scan_blocks", || {
             if let Some(incoming_checkpoint_heights) = &incoming_orchard_checkpoint_heights {
                 let retained =
-                    crate::wallet::sync::retain_migration_anchor_checkpoints_before_scan(
+                    crate::sync::retain_migration_anchor_checkpoints_before_scan(
                         db_data_path,
                         network,
                         &mut db,
@@ -2095,7 +2095,7 @@ async fn run_sync_impl(
             let retained = with_wallet_db_write_lock(
                 "sync_engine.retain_migration_anchor_checkpoints",
                 || {
-                    crate::wallet::sync::retain_prepared_note_anchor_checkpoints_after_scan(
+                    crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
                         db_data_path,
                         network,
                         &mut db,
@@ -2118,7 +2118,7 @@ async fn run_sync_impl(
             // post-scan reconciliation. A sync without a migration never enters
             // either path.
             let still_required =
-                crate::wallet::sync::migration_anchor_retention_required(db_data_path, network)
+                crate::sync::migration_anchor_retention_required(db_data_path, network)
                     .map_err(SyncError::db)?;
             if !still_required {
                 migration_anchor_retention_required = false;
@@ -2224,7 +2224,7 @@ async fn run_sync_impl(
                     }
                 }
                 if allow_resubmit {
-                    let _ = crate::wallet::sync::resubmit_pending_transactions(
+                    let _ = crate::sync::resubmit_pending_transactions(
                         db_data_path,
                         lightwalletd_url,
                         &mut client,
@@ -2389,13 +2389,13 @@ async fn run_sync_impl(
     // became visible in this run. This is intentionally repeated after every
     // completed sync because a later block may mine an output that was
     // unresolved in an earlier run.
-    crate::wallet::sync::reconcile_wallet_locks_after_sync(db_data_path, network)
+    crate::sync::reconcile_wallet_locks_after_sync(db_data_path, network)
         .map_err(SyncError::db)?;
     if migration_anchor_retention_required {
         with_wallet_db_write_lock(
             "sync_engine.retain_migration_anchor_checkpoints.final",
             || {
-                crate::wallet::sync::retain_prepared_note_anchor_checkpoints_after_scan(
+                crate::sync::retain_prepared_note_anchor_checkpoints_after_scan(
                     db_data_path,
                     network,
                     &mut db,
@@ -2978,10 +2978,10 @@ mod tests {
 pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
-        let mut client = crate::wallet::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
             .await
             .map_err(|e| e.to_string())?;
-        let tip = crate::wallet::sync_engine::lwd::get_latest_block(&mut client)
+        let tip = crate::sync_engine::lwd::get_latest_block(&mut client)
             .await
             .map_err(|e| e.to_string())?;
         Ok(tip.height)
@@ -2993,7 +2993,7 @@ pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, Str
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
         use zcash_client_backend::proto::service::Empty;
-        let mut client = crate::wallet::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
             .await
             .map_err(|e| e.to_string())?;
         let info = tokio::time::timeout(

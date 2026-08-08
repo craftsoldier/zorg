@@ -3,7 +3,7 @@
 //! Concurrent callers for the same `(db_path, network)` share one load by
 //! holding a per-key mutex through the SQLite computation. Successful
 //! results (including `None`) are retained until a wallet-DB write advances
-//! the seqlock epoch in [`crate::wallet::db::with_wallet_db_write_lock`].
+//! the seqlock epoch in [`crate::db::with_wallet_db_write_lock`].
 //! Errors are never cached.
 
 use std::{
@@ -15,7 +15,7 @@ use std::{
 use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, WalletRead, WalletSummary};
 use zcash_client_sqlite::AccountUuid;
 
-use crate::wallet::{
+use crate::{
     db::{open_wallet_db_for_read_with_timeout, wallet_db_write_epoch, READ_DB_BUSY_TIMEOUT},
     network::WalletNetwork,
 };
@@ -161,7 +161,7 @@ mod tests {
     use zcash_client_backend::data_api::{Progress, Ratio, WalletSummary};
     use zcash_protocol::consensus::BlockHeight;
 
-    use crate::wallet::db::with_wallet_db_write_lock;
+    use crate::db::with_wallet_db_write_lock;
 
     fn unique_path(label: &str) -> String {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -546,10 +546,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
         let db_path = db_path.to_str().unwrap();
-        let phrase = crate::wallet::keys::generate_mnemonic();
-        let seed = crate::wallet::keys::mnemonic_to_seed(&phrase).unwrap();
+        let phrase = crate::keys::generate_mnemonic();
+        let seed = crate::keys::mnemonic_to_seed(&phrase).unwrap();
 
-        crate::wallet::keys::init_db_and_create_account(
+        crate::keys::init_db_and_create_account(
             db_path,
             WalletNetwork::Regtest,
             &seed,
@@ -557,7 +557,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path, WalletNetwork::Regtest, 1_100).unwrap();
+        crate::sync::update_chain_tip(db_path, WalletNetwork::Regtest, 1_100).unwrap();
 
         let loads = AtomicUsize::new(0);
         let epoch_before = wallet_db_write_epoch();
@@ -596,7 +596,7 @@ mod tests {
             assert_eq!(loads.load(Ordering::SeqCst), 1);
         }
 
-        crate::wallet::sync::update_chain_tip(db_path, WalletNetwork::Regtest, 1_200).unwrap();
+        crate::sync::update_chain_tip(db_path, WalletNetwork::Regtest, 1_200).unwrap();
 
         let third = get_or_load_with(db_path, WalletNetwork::Regtest, || {
             loads.fetch_add(1, Ordering::SeqCst);

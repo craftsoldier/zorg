@@ -1,7 +1,7 @@
 use secrecy::SecretVec;
 use zeroize::Zeroizing;
 
-use crate::wallet::{keys, network::WalletNetwork};
+use crate::{keys, network::WalletNetwork};
 
 const ACCOUNT_MNEMONIC_KEY_PREFIX: &str = "zorg_wallet_";
 

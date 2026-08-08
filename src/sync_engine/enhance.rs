@@ -38,8 +38,8 @@ use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::{BalanceError, Zatoshis};
 
-use crate::wallet::db::{with_wallet_db_write_lock, SYNC_DB_BUSY_TIMEOUT};
-use crate::wallet::network::WalletNetwork;
+use crate::db::{with_wallet_db_write_lock, SYNC_DB_BUSY_TIMEOUT};
+use crate::network::WalletNetwork;
 
 use super::{lwd, SyncError, WalletDatabase};
 
@@ -501,7 +501,7 @@ mod tests {
         let txid = tx.txid();
         let file = tempfile::NamedTempFile::new().unwrap();
         let db_path = file.path().to_str().unwrap();
-        let mut db = crate::wallet::db::open_wallet_db_with_timeout(
+        let mut db = crate::db::open_wallet_db_with_timeout(
             db_path,
             WalletNetwork::Regtest,
             SYNC_DB_BUSY_TIMEOUT,
@@ -543,7 +543,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let db = crate::wallet::db::open_wallet_db_with_timeout(
+        let db = crate::db::open_wallet_db_with_timeout(
             db_path,
             WalletNetwork::Regtest,
             SYNC_DB_BUSY_TIMEOUT,

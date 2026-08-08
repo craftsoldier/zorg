@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
+name = "zorg"
+
+[[bin]]
+name = "zorg"
+path = "src/main.rs"
 
 [dependencies]
 sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }

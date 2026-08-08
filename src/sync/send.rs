@@ -34,10 +34,10 @@ use zcash_protocol::{
     PoolType, ShieldedPool,
 };
 
-use crate::wallet::db::{with_wallet_db_write_lock, WalletDatabase};
-use crate::wallet::keys::parse_account_uuid;
-use crate::wallet::network::WalletNetwork;
-use crate::wallet::sync::{
+use crate::db::{with_wallet_db_write_lock, WalletDatabase};
+use crate::keys::parse_account_uuid;
+use crate::network::WalletNetwork;
+use crate::sync::{
     consume_stored_proposal, finish_stored_proposal, open_readonly_conn, open_wallet_db,
     stored_proposal_lock, StoredProposal, StoredProposalLock, PROPOSAL_STORE,
 };
@@ -199,10 +199,10 @@ pub(super) async fn live_send_expiry_height(
     lwd_url: &str,
     min_target: BlockHeight,
 ) -> Result<BlockHeight, String> {
-    let mut client = crate::wallet::sync_engine::open_lwd_channel(lwd_url)
+    let mut client = crate::sync_engine::open_lwd_channel(lwd_url)
         .await
         .map_err(|e| format!("Connect: {e}"))?;
-    let tip = crate::wallet::sync_engine::get_latest_block(&mut client)
+    let tip = crate::sync_engine::get_latest_block(&mut client)
         .await
         .map_err(|e| format!("Get tip: {e}"))?;
     let tip_h = BlockHeight::from_u32(u32::try_from(tip.height).unwrap_or(0));
@@ -306,14 +306,14 @@ pub fn propose_send(
         let lock_expiry =
             send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        crate::wallet::sync::proposal_locks::persist(
+        crate::sync::proposal_locks::persist(
             db_path,
             lock_owner,
             &input_refs,
             lock_expiry,
         )?;
         if let Err(e) = db.lock_outputs(&input_refs, lock_owner, lock_expiry) {
-            let _ = crate::wallet::sync::proposal_locks::remove(db_path, lock_owner);
+            let _ = crate::sync::proposal_locks::remove(db_path, lock_owner);
             return Err(format!("Lock inputs: {e:?}"));
         }
 
@@ -545,7 +545,7 @@ async fn execute_stored(
             live_expiry,
         )
         .map_err(|e| format!("Relock: {e:?}"))?;
-        crate::wallet::sync::proposal_locks::update_expiry(
+        crate::sync::proposal_locks::update_expiry(
             db_path,
             proposal_lock.owner,
             live_expiry,
@@ -636,13 +636,13 @@ async fn execute_stored(
                 |r| r.get(0),
             )
             .map_err(|e| format!("Get raw tx: {e}"))?;
-        let mut client = crate::wallet::sync_engine::open_isolated_lwd_channel(lightwalletd_url)
+        let mut client = crate::sync_engine::open_isolated_lwd_channel(lightwalletd_url)
             .await
             .map_err(|e| format!("Connect: {e}"))?;
-        let resp = crate::wallet::sync_engine::send_transaction(&mut client, &raw_tx)
+        let resp = crate::sync_engine::send_transaction(&mut client, &raw_tx)
             .await
             .map_err(|e| format!("Broadcast: {e}"))?;
-        if let Some(err) = crate::wallet::sync::broadcast::send_response_rejection_error(&resp) {
+        if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
             return Err(err);
         }
         broadcast_ok.push(*txid);
@@ -729,18 +729,18 @@ pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
 where
     ShouldExit: Fn() -> bool,
 {
-    let txs = crate::wallet::sync::transactions::get_resubmittable_txs(db_path, _current_height)?;
+    let txs = crate::sync::transactions::get_resubmittable_txs(db_path, _current_height)?;
     let mut stats = ResubmitStats::default();
     for tx in txs {
         if should_exit() {
             break;
         }
         stats.attempted += 1;
-        let resp = crate::wallet::sync_engine::send_transaction(client, &tx.raw_tx).await;
+        let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {
             Ok(resp) => {
                 if let Some(err) =
-                    crate::wallet::sync::broadcast::send_response_rejection_error(&resp)
+                    crate::sync::broadcast::send_response_rejection_error(&resp)
                 {
                     log::warn!("resubmit: {} rejected: {err}", hex::encode(&tx.txid_bytes));
                     stats.failed += 1;
@@ -763,10 +763,10 @@ pub(crate) async fn broadcast_raw_transaction(
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     raw_tx: &[u8],
 ) -> Result<(), String> {
-    let resp = crate::wallet::sync_engine::send_transaction(client, raw_tx)
+    let resp = crate::sync_engine::send_transaction(client, raw_tx)
         .await
         .map_err(|e| format!("SendTransaction: {e}"))?;
-    if let Some(err) = crate::wallet::sync::broadcast::send_response_rejection_error(&resp) {
+    if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
         return Err(err);
     }
     Ok(())

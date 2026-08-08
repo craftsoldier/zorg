@@ -22,7 +22,7 @@ use zcash_protocol::consensus::{BlockHeight, NetworkConstants, NetworkUpgrade, P
 use zeroize::{Zeroize, Zeroizing};
 use zip32::fingerprint::SeedFingerprint;
 
-use crate::wallet::{
+use crate::{
     db::{
         open_readonly_conn_with_timeout, open_wallet_db_for_read_with_timeout,
         open_wallet_db_with_timeout, with_wallet_db_write_lock, WalletDatabase,
@@ -519,7 +519,7 @@ fn delete_account_rows(db_path: &str, account_id: AccountUuid) -> Result<(), Str
     )
     .map_err(|e| format!("Failed to delete account-only transactions: {e}"))?;
 
-    crate::wallet::sync::delete_account_migration_rows_with_tx(&tx, &account_uuid_text)?;
+    crate::sync::delete_account_migration_rows_with_tx(&tx, &account_uuid_text)?;
 
     tx.execute(
         "DELETE FROM accounts WHERE uuid = :account_uuid",
@@ -991,12 +991,12 @@ mod tests {
             init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "test")
                 .unwrap();
 
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
-        let renewed_address = crate::wallet::sync::get_next_available_address(
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        let renewed_address = crate::sync::get_next_available_address(
             db_path_str,
             WalletNetwork::Main,
             &uuid,
-            crate::wallet::sync::AddressRequestKind::Shielded,
+            crate::sync::AddressRequestKind::Shielded,
         )
         .unwrap();
 
@@ -1238,21 +1238,21 @@ mod tests {
             Some(seed_fingerprint.to_vec())
         );
 
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
-        let shielded_error = crate::wallet::sync::get_next_available_address(
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        let shielded_error = crate::sync::get_next_available_address(
             db_path_str,
             WalletNetwork::Main,
             &uuid,
-            crate::wallet::sync::AddressRequestKind::Shielded,
+            crate::sync::AddressRequestKind::Shielded,
         )
         .unwrap_err();
         assert!(shielded_error.contains("Sapling"));
 
-        let renewed_address = crate::wallet::sync::get_next_available_address(
+        let renewed_address = crate::sync::get_next_available_address(
             db_path_str,
             WalletNetwork::Main,
             &uuid,
-            crate::wallet::sync::AddressRequestKind::Orchard,
+            crate::sync::AddressRequestKind::Orchard,
         )
         .unwrap();
 
@@ -1427,7 +1427,7 @@ mod tests {
             "existing",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         // Capture the surviving account's birthday BEFORE the import: this is
         // the threshold the orphan must end up below. (MIN(birthday) read after
@@ -1482,7 +1482,7 @@ mod tests {
             "existing",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         let min_birthday = scan_min_birthday(db_path_str);
         let below_start = min_birthday - 2_000_000;
@@ -1600,7 +1600,7 @@ mod tests {
             "healthy",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         let before = scan_queue_snapshot(db_path_str);
         let demoted = prune_orphaned_scan_ranges(db_path_str).unwrap();
@@ -1651,7 +1651,7 @@ mod tests {
             "surviving",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         let birthday = scan_min_birthday(db_path_str);
 
@@ -1722,7 +1722,7 @@ mod tests {
             "surviving",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         let birthday = scan_min_birthday(db_path_str);
         let straddle_start = birthday - 50_000;
@@ -1811,7 +1811,7 @@ mod tests {
             "surviving",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
 
         let birthday = scan_min_birthday(db_path_str);
         let straddle_start = birthday - 1_000_000; // below B
@@ -1906,7 +1906,7 @@ mod tests {
             "survivor",
         )
         .unwrap();
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
         let birthday = scan_min_birthday(db_path_str);
 
         // Simulate a deleted account's leftover scanned block BELOW the birthday:
@@ -1924,7 +1924,7 @@ mod tests {
         // Re-run update_chain_tip (as the sync does). With max_scanned (746399)
         // below the birthday, it re-creates sub-birthday pending work anchored at
         // max_scanned + 1, NOT clamped to the birthday.
-        crate::wallet::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
         assert!(
             pending_scan_coverage_below(db_path_str, birthday),
             "update_chain_tip should re-create sub-birthday pending work from max_scanned+1",
@@ -2257,7 +2257,6 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-        assert!(!listed_account.is_hardware);
 
         // Decode and verify receiver types
         let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();

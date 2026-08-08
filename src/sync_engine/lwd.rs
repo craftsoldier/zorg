@@ -30,7 +30,7 @@ use zcash_client_backend::{
 };
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::wallet::{db::with_wallet_db_write_lock, network::WalletNetwork};
+use crate::{db::with_wallet_db_write_lock, network::WalletNetwork};
 
 use super::block_source::MemoryBlockSource;
 use super::{elapsed, SyncError, WalletDatabase};
@@ -331,7 +331,7 @@ pub(super) async fn download_subtree_roots(
 ) -> Result<(), SyncError> {
     let (sap_start, orch_start, ironwood_start) = {
         let summary =
-            crate::wallet::wallet_summary_cache::get_wallet_summary_cached(db_path, network)
+            crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)
                 .map_err(SyncError::db)?;
         match summary {
             Some(s) => (

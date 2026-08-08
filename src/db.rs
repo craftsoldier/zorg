@@ -9,7 +9,7 @@ use std::{
 use rand::rngs::OsRng;
 use zcash_client_sqlite::{util::SystemClock, WalletDb};
 
-use crate::wallet::network::WalletNetwork;
+use crate::network::WalletNetwork;
 
 pub(crate) type WalletDatabase = WalletDb<rusqlite::Connection, WalletNetwork, SystemClock, OsRng>;
 

@@ -31,9 +31,9 @@ use zcash_protocol::{
     memo::{Memo, MemoBytes},
 };
 
-use crate::wallet::db::with_wallet_db_write_lock;
-use crate::wallet::keys::parse_account_uuid;
-use crate::wallet::network::WalletNetwork;
+use crate::db::with_wallet_db_write_lock;
+use crate::keys::parse_account_uuid;
+use crate::network::WalletNetwork;
 
 use super::{open_readonly_conn, open_wallet_db, open_wallet_db_for_read};
 
@@ -139,7 +139,7 @@ pub fn get_wallet_balances(
         .map(|uuid| parse_account_uuid(uuid))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let summary = crate::wallet::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
+    let summary = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
 
     let Some(summary) = summary else {
         return Ok(target_ids
