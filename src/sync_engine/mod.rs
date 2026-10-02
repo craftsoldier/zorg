@@ -1742,6 +1742,17 @@ async fn run_sync_impl(
                         format!("BlockConflict at {at_height}: wallet rewind required"),
                     )
                 }
+                ChainError::Wallet(ref wallet_err)
+                    if matches!(wallet_err, SqliteClientError::NonSequentialBlocks) =>
+                {
+                    let at_height = u32::from(start) as u64;
+                    SyncError::continuity(
+                        at_height,
+                        format!(
+                            "NonSequentialBlocks at {at_height}: from_state does not match first block, rewind required"
+                        ),
+                    )
+                }
                 ChainError::Wallet(wallet_err) if is_commitment_tree_root_conflict(&wallet_err) => {
                     let at_height = u32::from(start) as u64;
                     SyncError::continuity(

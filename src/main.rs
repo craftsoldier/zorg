@@ -26,6 +26,7 @@ OPTIONS:
     --db <path>          Wallet database path (default: ~/.zorg/wallet.db)
     --network <net>      main | test | regtest (default: wallet DB network, else main)
     --lwd <url>          Lightwalletd endpoint (default: mainnet.lightwalletd.com)
+    --version, -V        Show version
     --help, -h           Show this help
 
 ENV:
@@ -51,6 +52,11 @@ fn main() {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("zorg {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // Extract global flags, leaving command + command args
     let mut db: String = std::env::var("ZORG_WALLET_DB").unwrap_or_else(|_| default_db_path());
     let mut network = std::env::var("ZORG_NETWORK").ok();
@@ -87,15 +93,31 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     let net = resolve_network(&db, network.as_deref())?;
-    if let Some(parent) = std::path::Path::new(&db).parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let db_path = std::path::Path::new(&db);
+    let default_db = default_db_path();
+    let default_wallet_dir = std::path::Path::new(&default_db)
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    let parent = db_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    if Some(parent) == default_wallet_dir.as_deref() {
+        ensure_private_wallet_dir(parent)?;
+    } else {
+        ensure_custom_wallet_dir(parent)?;
     }
+    secure_wallet_db_file(db_path)?;
     let lwd_url = lwd.unwrap_or_else(|| default_lwd_url(&net).to_string());
 
     let cmd = command_args[0].as_str();
     let opts = &command_args[1..];
 
-    match cmd {
+    let result = match cmd {
         "create" => cmd_create(&db, net, &lwd_url, opts),
         "import" => cmd_import(&db, net, opts),
         "accounts" => {
@@ -149,7 +171,74 @@ fn run(args: &[String]) -> Result<(), String> {
             eprint!("{USAGE}");
             Err(format!("Unknown command: {cmd}"))
         }
+    };
+
+    secure_wallet_db_file(db_path)?;
+    result
+}
+
+#[cfg(unix)]
+fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("Failed to create wallet directory: {e}"))?;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("Failed to secure wallet directory: {e}"))
+}
+
+#[cfg(unix)]
+fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("Failed to create wallet directory: {e}"))?;
+
+    let mode = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to inspect wallet directory: {e}"))?
+        .permissions()
+        .mode();
+    if mode & 0o077 == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Wallet database directory {} is accessible by other users; use a private directory with permissions 0700",
+            path.display()
+        ))
     }
+}
+
+#[cfg(not(unix))]
+fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
+}
+
+#[cfg(not(unix))]
+fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
+}
+
+#[cfg(unix)]
+fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.exists() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure wallet database: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Result<(), String> {
