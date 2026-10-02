@@ -76,6 +76,8 @@ pub fn shielded_address_request() -> UnifiedAddressRequest {
 /// Validate that a wallet database exists and has at least one account.
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
