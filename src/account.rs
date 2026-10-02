@@ -12,9 +12,7 @@ use zcash_client_backend::data_api::{
     WalletWrite, Zip32Derivation,
 };
 use zcash_client_sqlite::{error::SqliteClientError, wallet::init::init_wallet_db, AccountUuid};
-use zcash_keys::keys::{
-    UnifiedFullViewingKey, UnifiedSpendingKey,
-};
+use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use zip32::fingerprint::SeedFingerprint;

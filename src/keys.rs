@@ -1,11 +1,8 @@
-
 use bip0039::{Count, English, Language, Mnemonic};
 use secrecy::SecretVec;
 
 use zcash_client_sqlite::AccountUuid;
-use zcash_keys::keys::{
-    ReceiverRequirement, UnifiedAddressRequest,
-};
+use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
 use zeroize::Zeroizing;
 
 use crate::network::WalletNetwork;
