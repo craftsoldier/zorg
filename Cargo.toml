@@ -67,7 +67,7 @@ package = "zcash_transparent"
 version = "0.10.0"
 
 [dependencies.zcash_client_backend]
-version = "0.24.0-rc.6"
+version = "0.24.0-rc.7"
 features = [
     "orchard",
     "transparent-inputs",
@@ -77,7 +77,7 @@ features = [
 ]
 
 [dependencies.zcash_client_sqlite]
-version = "0.22.0-rc.6"
+version = "0.22.0-rc.7"
 features = ["orchard", "transparent-inputs", "unstable", "serde"]
 
 # Keep Orchard aligned with the released librustzcash family

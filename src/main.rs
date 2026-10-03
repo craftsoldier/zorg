@@ -153,7 +153,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn cmd_create(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
     let name = flag_str(opts, "--name").unwrap_or("Account 1".into());
     let birthday = flag_u64(opts, "--birthday");
-    let result = keys::create_wallet(&net.as_str(), db, birthday, Some(&name))?;
+    let result = keys::create_wallet(net.as_str(), db, birthday, Some(&name))?;
     println!("Mnemonic (save this!): {}", result.mnemonic);
     println!("Account UUID: {}", result.account_uuid);
     println!("Address: {}", result.unified_address);
@@ -172,7 +172,7 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
         mnemonic,
         &passphrase,
         birthday,
-        &net.as_str(),
+        net.as_str(),
         db,
         Some(&name),
     )?;

@@ -12,9 +12,7 @@ use zcash_client_backend::data_api::{
     WalletWrite, Zip32Derivation,
 };
 use zcash_client_sqlite::{error::SqliteClientError, wallet::init::init_wallet_db, AccountUuid};
-use zcash_keys::keys::{
-    UnifiedFullViewingKey, UnifiedSpendingKey,
-};
+use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use zip32::fingerprint::SeedFingerprint;
@@ -660,7 +658,8 @@ pub fn wallet_exists(db_path: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn test_create_wallet_and_get_address() {
+    #[test]
+    fn create_wallet_and_get_address() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
         let db_path_str = db_path.to_str().unwrap();

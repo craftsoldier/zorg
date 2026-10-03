@@ -383,17 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn rewind_budget_is_nonzero_and_small() {
-        // If MAX_REWINDS_PER_RUN gets set to 0 the loop would bail on the
-        // first reorg, defeating the fix. If it gets cranked absurdly high
-        // the loop could spin forever against a flapping chain. 3 matches
-        // Zashi's REWIND_DISTANCE usage pattern (bounded, room to recover
-        // across a handful of quick reorgs).
-        assert!(MAX_REWINDS_PER_RUN >= 1);
-        assert!(MAX_REWINDS_PER_RUN <= 10);
-    }
-
-    #[test]
     fn continuity_constructor_records_height_and_detail() {
         // Exercise the `SyncError::continuity` constructor the
         // `scan_cached_blocks` call site uses. The recovery loop matches

@@ -26,6 +26,8 @@ use super::open_wallet_db;
 
 const TABLE: &str = "zorg_send_proposal_locks";
 
+type PreviousSessionLocks = BTreeMap<LockOwner, (u32, bool, Vec<OutputRef>)>;
+
 static PROCESS_SESSION_ID: LazyLock<[u8; 16]> = LazyLock::new(|| {
     let mut bytes = [0; 16];
     OsRng.fill_bytes(&mut bytes);
@@ -157,9 +159,7 @@ pub(super) fn update_expiry(
     Ok(())
 }
 
-fn read_previous_session_locks(
-    conn: &Connection,
-) -> Result<BTreeMap<LockOwner, (u32, bool, Vec<OutputRef>)>, String> {
+fn read_previous_session_locks(conn: &Connection) -> Result<PreviousSessionLocks, String> {
     ensure_schema(conn)?;
     let mut stmt = conn
         .prepare(&format!(

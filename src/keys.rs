@@ -1,11 +1,8 @@
-
 use bip0039::{Count, English, Language, Mnemonic};
 use secrecy::SecretVec;
 
 use zcash_client_sqlite::AccountUuid;
-use zcash_keys::keys::{
-    ReceiverRequirement, UnifiedAddressRequest,
-};
+use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
 use zeroize::Zeroizing;
 
 use crate::network::WalletNetwork;
@@ -56,7 +53,7 @@ pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
 
 /// Parse network string to wallet network enum.
 pub fn parse_network(network: &str) -> Result<WalletNetwork, String> {
-    WalletNetwork::from_str(network).ok_or_else(|| format!("Unknown network: {network}"))
+    network.parse()
 }
 
 /// Initialize the wallet database schema. Idempotent — safe to call multiple times.
@@ -76,9 +73,102 @@ pub fn shielded_address_request() -> UnifiedAddressRequest {
     .expect("valid receiver requirements")
 }
 
-/// Validate that a wallet database exists and has at least one account.
+// ======================== Public API Structs ========================
+
+pub struct WalletCreationResult {
+    pub mnemonic: String,
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+pub struct WalletImportResult {
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+pub struct AccountCreationResult {
+    pub unified_address: String,
+    pub account_uuid: String,
+}
+
+// ======================== Convenience Functions ========================
+
+/// Create a new wallet: generate mnemonic, derive seed, create first account.
+pub fn create_wallet(
+    network_str: &str,
+    db_path: &str,
+    birthday_height: Option<u64>,
+    account_name: Option<&str>,
+) -> Result<WalletCreationResult, String> {
+    let network = parse_network(network_str)?;
+    let mnemonic = generate_mnemonic();
+    let seed = mnemonic_to_seed(&mnemonic)?;
+    let name = account_name.unwrap_or("Account 1");
+    let (account_uuid, unified_address) =
+        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) =
+        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, &mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
+    Ok(WalletCreationResult {
+        mnemonic,
+        unified_address,
+        account_uuid,
+    })
+}
+
+/// Import a wallet from a mnemonic phrase.
+pub fn import_wallet(
+    mnemonic: &str,
+    bip39_passphrase: &str,
+    birthday_height: Option<u64>,
+    network_str: &str,
+    db_path: &str,
+    account_name: Option<&str>,
+) -> Result<WalletImportResult, String> {
+    let network = parse_network(network_str)?;
+    let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
+    let name = account_name.unwrap_or("Account 1");
+    let (account_uuid, unified_address) =
+        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) =
+        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
+    Ok(WalletImportResult {
+        unified_address,
+        account_uuid,
+    })
+}
+
+/// Get the unified address for an account.
+pub fn get_unified_address(
+    db_path: &str,
+    network_str: &str,
+    account_uuid: &str,
+) -> Result<String, String> {
+    let network = parse_network(network_str)?;
+    let accounts = list_accounts(db_path, network)?;
+    accounts
+        .into_iter()
+        .find(|a| a.uuid == account_uuid)
+        .map(|a| a.unified_address)
+        .ok_or_else(|| format!("Account {account_uuid} not found"))
+}
+
+/// Validate a mnemonic phrase.
+pub fn validate_mnemonic(mnemonic: &str) -> bool {
+    mnemonic_to_seed(mnemonic).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -97,18 +187,16 @@ mod tests {
 
     #[test]
     fn test_mnemonic_to_seed_accepts_supported_word_counts() {
-        for count in [Count::Words24] {
-            let phrase = Mnemonic::<English>::generate(count).phrase().to_string();
-            let seed = mnemonic_to_seed(&phrase).unwrap();
-            assert_eq!(seed.expose_secret().len(), 64);
-        }
+        let count = Count::Words24;
+        let phrase = Mnemonic::<English>::generate(count).phrase().to_string();
+        let seed = mnemonic_to_seed(&phrase).unwrap();
+        assert_eq!(seed.expose_secret().len(), 64);
     }
 
     #[test]
     fn test_mnemonic_to_seed_rejects_unsupported_word_counts() {
         for count in [11, 12, 13, 25] {
-            let phrase = std::iter::repeat("abandon")
-                .take(count)
+            let phrase = std::iter::repeat_n("abandon", count)
                 .collect::<Vec<_>>()
                 .join(" ");
             let error = match mnemonic_to_seed(&phrase) {
@@ -215,96 +303,4 @@ mod tests {
             "UA should NOT contain transparent receiver"
         );
     }
-}
-
-// ======================== Public API Structs ========================
-
-pub struct WalletCreationResult {
-    pub mnemonic: String,
-    pub unified_address: String,
-    pub account_uuid: String,
-}
-
-pub struct WalletImportResult {
-    pub unified_address: String,
-    pub account_uuid: String,
-}
-
-pub struct AccountCreationResult {
-    pub unified_address: String,
-    pub account_uuid: String,
-}
-
-// ======================== Convenience Functions ========================
-
-/// Create a new wallet: generate mnemonic, derive seed, create first account.
-pub fn create_wallet(
-    network_str: &str,
-    db_path: &str,
-    birthday_height: Option<u64>,
-    account_name: Option<&str>,
-) -> Result<WalletCreationResult, String> {
-    let network = parse_network(network_str)?;
-    let mnemonic = generate_mnemonic();
-    let seed = mnemonic_to_seed(&mnemonic)?;
-    let name = account_name.unwrap_or("Account 1");
-    let (account_uuid, unified_address) =
-        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, &mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletCreationResult {
-        mnemonic,
-        unified_address,
-        account_uuid,
-    })
-}
-
-/// Import a wallet from a mnemonic phrase.
-pub fn import_wallet(
-    mnemonic: &str,
-    bip39_passphrase: &str,
-    birthday_height: Option<u64>,
-    network_str: &str,
-    db_path: &str,
-    account_name: Option<&str>,
-) -> Result<WalletImportResult, String> {
-    let network = parse_network(network_str)?;
-    let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
-    let name = account_name.unwrap_or("Account 1");
-    let (account_uuid, unified_address) =
-        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletImportResult {
-        unified_address,
-        account_uuid,
-    })
-}
-
-/// Get the unified address for an account.
-pub fn get_unified_address(
-    db_path: &str,
-    network_str: &str,
-    account_uuid: &str,
-) -> Result<String, String> {
-    let network = parse_network(network_str)?;
-    let accounts = list_accounts(db_path, network)?;
-    accounts
-        .into_iter()
-        .find(|a| a.uuid == account_uuid)
-        .map(|a| a.unified_address)
-        .ok_or_else(|| format!("Account {account_uuid} not found"))
-}
-
-/// Validate a mnemonic phrase.
-pub fn validate_mnemonic(mnemonic: &str) -> bool {
-    mnemonic_to_seed(mnemonic).is_ok()
 }

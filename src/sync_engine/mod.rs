@@ -97,6 +97,7 @@ const LAST_COMPLETED_SYNC_HEIGHT_KEY: &str = "last_completed_sync_height";
 const SYNC_IN_PROGRESS_KEY: &str = "sync_in_progress";
 const WITNESS_CHECK_POLICY_VERSION_KEY: &str = "witness_check_policy_version";
 const WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY: &str = "witness_check_last_clean_height";
+type SyncCompletionMeta = (Option<u32>, Option<u64>, Option<bool>);
 // Witness repair is finalization work after the main scan drains. Cap its
 // starting display percentage so a long repair pass is visible instead of
 // looking pinned at 99%, while still avoiding a misleading deep rewind signal.
@@ -555,9 +556,7 @@ fn read_witness_check_meta(db_data_path: &str) -> Result<WitnessCheckMeta, Strin
     })
 }
 
-fn read_sync_completion_meta(
-    db_data_path: &str,
-) -> Result<(Option<u32>, Option<u64>, Option<bool>), String> {
+fn read_sync_completion_meta(db_data_path: &str) -> Result<SyncCompletionMeta, String> {
     let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
     if !sync_meta_table_exists(&conn)? {
         return Ok((None, None, None));
@@ -2417,6 +2416,41 @@ fn should_use_empty_chain_state(
     Ok(start <= sapling_activation_height)
 }
 
+// ======================== Public Lightwalletd Helpers ========================
+
+/// Get the latest block height from a lightwalletd endpoint.
+pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let tip = crate::sync_engine::lwd::get_latest_block(&mut client)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(tip.height)
+    })
+}
+
+/// Get the chain name from a lightwalletd endpoint.
+pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        use zcash_client_backend::proto::service::Empty;
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get_lightd_info(Empty {}),
+        )
+        .await
+        .map_err(|_| "get_lightd_info: timed out".to_string())?
+        .map_err(|e| format!("get_lightd_info: {e}"))?;
+        Ok(info.into_inner().chain_name)
+    })
+}
+
 // ==================== Tests ====================
 //
 // Error-taxonomy tests now live alongside their types in `error.rs`. The
@@ -2851,39 +2885,4 @@ mod tests {
         assert_eq!(ironwood_positions, vec![None, Some(1)]);
         assert_eq!(clear_unmined_note_commitment_positions(db_path).unwrap(), 0);
     }
-}
-
-// ======================== Public Lightwalletd Helpers ========================
-
-/// Get the latest block height from a lightwalletd endpoint.
-pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    rt.block_on(async {
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        let tip = crate::sync_engine::lwd::get_latest_block(&mut client)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(tip.height)
-    })
-}
-
-/// Get the chain name from a lightwalletd endpoint.
-pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    rt.block_on(async {
-        use zcash_client_backend::proto::service::Empty;
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        let info = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get_lightd_info(Empty {}),
-        )
-        .await
-        .map_err(|_| "get_lightd_info: timed out".to_string())?
-        .map_err(|e| format!("get_lightd_info: {e}"))?;
-        Ok(info.into_inner().chain_name)
-    })
 }
