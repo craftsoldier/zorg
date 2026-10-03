@@ -12,9 +12,9 @@ pub fn seed_from_macos_stored_mnemonic(
     let account_key = account_mnemonic_key(account_uuid);
 
     // The payload is now the raw utf-8 mnemonic string stored in the keychain
-    let mnemonic_bytes =
-        macos_read_secure_store_value(&mnemonic_store_service_for_network(network), &account_key)?
-            .ok_or_else(|| "Mnemonic not found for account".to_string())?;
+    let service = mnemonic_store_service_for_network(network);
+    let mnemonic_bytes = macos_read_secure_store_value(&service, &account_key)?
+        .ok_or_else(|| "Mnemonic not found for account".to_string())?;
 
     let mnemonic_str = std::str::from_utf8(mnemonic_bytes.as_slice())
         .map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
@@ -52,6 +52,43 @@ fn account_mnemonic_key(account_uuid: &str) -> String {
     format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{account_uuid}")
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn keychain_round_trips_through_production_read_path() {
+        use security_framework::passwords::delete_generic_password;
+
+        let account_uuid = uuid::Uuid::new_v4().to_string();
+        let mnemonic = keys::generate_mnemonic();
+        let expected = keys::mnemonic_to_seed(&mnemonic).unwrap();
+        let service = mnemonic_store_service_for_network(WalletNetwork::Regtest);
+        let key = account_mnemonic_key(&account_uuid);
+
+        if let Err(error) =
+            store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic)
+        {
+            if keychain_is_unavailable(&error) && std::env::var_os("CI").is_none() {
+                eprintln!("Skipping keychain round-trip: {error}");
+                return;
+            }
+            panic!("failed to write test mnemonic: {error}");
+        }
+        let actual =
+            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &account_uuid).unwrap();
+        assert_eq!(actual.expose_secret(), expected.expose_secret());
+
+        delete_generic_password(&service, &key).unwrap();
+    }
+
+    fn keychain_is_unavailable(error: &str) -> bool {
+        error.contains("No keychain is available")
+            || error.contains("One or more parameters passed to a function were not valid")
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_read_secure_store_value(
     service: &str,
@@ -66,7 +103,6 @@ fn macos_read_secure_store_value(
         .class(ItemClass::generic_password())
         .service(service)
         .account(key)
-        .ignore_legacy_keychains()
         .load_data(true);
 
     match search.search() {

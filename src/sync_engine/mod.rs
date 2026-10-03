@@ -88,16 +88,12 @@ const SANDBLASTING_END: u32 = 2_050_000;
 const BATCH_SIZE_SANDBLASTING: u32 = 100;
 
 const MAX_WITNESS_REPAIR_PASSES_PER_RUN: u32 = 3;
-const WITNESS_CHECK_POLICY_VERSION: u32 = 1;
 const WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS: u64 = 10_000;
 const SYNC_META_TABLE: &str = "ext_zorg_sync_meta";
-const SYNC_COMPLETION_POLICY_VERSION: u32 = 1;
-const SYNC_COMPLETION_POLICY_VERSION_KEY: &str = "sync_completion_policy_version";
 const LAST_COMPLETED_SYNC_HEIGHT_KEY: &str = "last_completed_sync_height";
 const SYNC_IN_PROGRESS_KEY: &str = "sync_in_progress";
-const WITNESS_CHECK_POLICY_VERSION_KEY: &str = "witness_check_policy_version";
 const WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY: &str = "witness_check_last_clean_height";
-type SyncCompletionMeta = (Option<u32>, Option<u64>, Option<bool>);
+type SyncCompletionMeta = (Option<u64>, Option<bool>);
 // Witness repair is finalization work after the main scan drains. Cap its
 // starting display percentage so a long repair pass is visible instead of
 // looking pinned at 99%, while still avoiding a misleading deep rewind signal.
@@ -412,7 +408,6 @@ fn describe_block_range(range: &std::ops::Range<BlockHeight>) -> String {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct WitnessCheckMeta {
-    policy_version: Option<u32>,
     last_clean_height: Option<u64>,
 }
 
@@ -420,7 +415,6 @@ struct WitnessCheckMeta {
 enum WitnessCheckRunReason {
     Forced,
     MissingMarker,
-    PolicyVersionChanged { stored: u32 },
     TipBelowLastClean { last_clean_height: u64 },
     MaxCleanAgeReached { age_blocks: u64 },
     MetadataUnavailable,
@@ -440,9 +434,6 @@ impl WitnessCheckRunReason {
         match self {
             WitnessCheckRunReason::Forced => "forced by repair/reorg signal".into(),
             WitnessCheckRunReason::MissingMarker => "no clean marker".into(),
-            WitnessCheckRunReason::PolicyVersionChanged { stored } => format!(
-                "policy version changed (stored={stored}, current={WITNESS_CHECK_POLICY_VERSION})"
-            ),
             WitnessCheckRunReason::TipBelowLastClean { last_clean_height } => format!(
                 "tip moved below last clean height (last_clean_height={last_clean_height})"
             ),
@@ -461,16 +452,6 @@ fn decide_witness_check(
 ) -> WitnessCheckDecision {
     if force_check {
         return WitnessCheckDecision::Run(WitnessCheckRunReason::Forced);
-    }
-
-    match meta.policy_version {
-        Some(WITNESS_CHECK_POLICY_VERSION) => {}
-        Some(stored) => {
-            return WitnessCheckDecision::Run(WitnessCheckRunReason::PolicyVersionChanged {
-                stored,
-            });
-        }
-        None => return WitnessCheckDecision::Run(WitnessCheckRunReason::MissingMarker),
     }
 
     let Some(last_clean_height) = meta.last_clean_height else {
@@ -545,10 +526,6 @@ fn read_witness_check_meta(db_data_path: &str) -> Result<WitnessCheckMeta, Strin
     }
 
     Ok(WitnessCheckMeta {
-        policy_version: parse_sync_meta_u32(
-            WITNESS_CHECK_POLICY_VERSION_KEY,
-            read_sync_meta_value(&conn, WITNESS_CHECK_POLICY_VERSION_KEY)?,
-        ),
         last_clean_height: parse_sync_meta_u64(
             WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
             read_sync_meta_value(&conn, WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY)?,
@@ -559,14 +536,10 @@ fn read_witness_check_meta(db_data_path: &str) -> Result<WitnessCheckMeta, Strin
 fn read_sync_completion_meta(db_data_path: &str) -> Result<SyncCompletionMeta, String> {
     let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
     if !sync_meta_table_exists(&conn)? {
-        return Ok((None, None, None));
+        return Ok((None, None));
     }
 
     Ok((
-        parse_sync_meta_u32(
-            SYNC_COMPLETION_POLICY_VERSION_KEY,
-            read_sync_meta_value(&conn, SYNC_COMPLETION_POLICY_VERSION_KEY)?,
-        ),
         parse_sync_meta_u64(
             LAST_COMPLETED_SYNC_HEIGHT_KEY,
             read_sync_meta_value(&conn, LAST_COMPLETED_SYNC_HEIGHT_KEY)?,
@@ -604,8 +577,8 @@ fn ensure_sync_meta_table(conn: &rusqlite::Connection) -> Result<(), String> {
         )",
         [],
     )
-    .map(|_| ())
-    .map_err(|e| format!("create sync metadata table: {e}"))
+    .map_err(|e| format!("create sync metadata table: {e}"))?;
+    Ok(())
 }
 
 fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Result<(), String> {
@@ -619,15 +592,6 @@ fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Resu
         "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
-            WITNESS_CHECK_POLICY_VERSION_KEY,
-            WITNESS_CHECK_POLICY_VERSION.to_string()
-        ],
-    )
-    .map_err(|e| format!("write witness check policy version: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![
             WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
             current_tip_height.to_string()
         ],
@@ -637,71 +601,19 @@ fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Resu
         .map_err(|e| format!("commit sync metadata transaction: {e}"))
 }
 
-fn initialize_sync_completion_policy(
-    db_data_path: &str,
-    legacy_completed_height: Option<u64>,
-) -> Result<(Option<u64>, Option<bool>), String> {
-    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)?;
-    ensure_sync_meta_table(&conn)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin sync completion metadata transaction: {e}"))?;
-    let inserted = tx
-        .execute(
-            "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO NOTHING",
-            params![
-                SYNC_COMPLETION_POLICY_VERSION_KEY,
-                SYNC_COMPLETION_POLICY_VERSION.to_string()
-            ],
-        )
-        .map_err(|e| format!("initialize sync completion policy version: {e}"))?;
-    if inserted > 0 {
-        tx.execute(
-            "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '0')
-             ON CONFLICT(key) DO NOTHING",
-            params![SYNC_IN_PROGRESS_KEY],
-        )
-        .map_err(|e| format!("initialize sync in-progress marker: {e}"))?;
-        if let Some(height) = legacy_completed_height {
-            tx.execute(
-                "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![LAST_COMPLETED_SYNC_HEIGHT_KEY, height.to_string()],
-            )
-            .map_err(|e| format!("migrate legacy completed sync height: {e}"))?;
-        }
-    }
-    tx.commit()
-        .map_err(|e| format!("commit sync completion metadata: {e}"))?;
-    read_sync_completion_meta(db_data_path).map(|(_, height, in_progress)| (height, in_progress))
-}
-
 pub(crate) fn completed_sync_height_for_status(
     db_data_path: &str,
     scanned_height: u64,
     chain_tip_height: u64,
 ) -> Result<Option<u64>, String> {
-    let (policy_version, completed_height, in_progress) = read_sync_completion_meta(db_data_path)?;
-    match policy_version {
-        Some(SYNC_COMPLETION_POLICY_VERSION) => Ok((in_progress == Some(false))
-            .then_some(completed_height)
-            .flatten()),
-        Some(other) => {
-            log::warn!(
-                "sync: unsupported completion policy version {other}; treating status as incomplete"
-            );
-            Ok(None)
-        }
-        None => {
-            let legacy_completed_height = (chain_tip_height > 0
-                && scanned_height >= chain_tip_height)
-                .then_some(chain_tip_height);
-            initialize_sync_completion_policy(db_data_path, legacy_completed_height).map(
-                |(height, in_progress)| (in_progress == Some(false)).then_some(height).flatten(),
-            )
-        }
-    }
+    let (completed_height, in_progress) = read_sync_completion_meta(db_data_path)?;
+    Ok(if in_progress == Some(true) {
+        None
+    } else {
+        completed_height.or_else(|| {
+            (chain_tip_height > 0 && scanned_height >= chain_tip_height).then_some(chain_tip_height)
+        })
+    })
 }
 
 fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
@@ -710,15 +622,6 @@ fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin sync-start metadata transaction: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![
-            SYNC_COMPLETION_POLICY_VERSION_KEY,
-            SYNC_COMPLETION_POLICY_VERSION.to_string()
-        ],
-    )
-    .map_err(|e| format!("write sync-start policy version: {e}"))?;
     tx.execute(
         "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -735,15 +638,6 @@ fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin completed sync transaction: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![
-            SYNC_COMPLETION_POLICY_VERSION_KEY,
-            SYNC_COMPLETION_POLICY_VERSION.to_string()
-        ],
-    )
-    .map_err(|e| format!("write sync completion policy version: {e}"))?;
     tx.execute(
         "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2612,9 +2506,8 @@ mod tests {
     }
 
     #[test]
-    fn witness_check_skips_when_recent_clean_marker_matches_policy() {
+    fn witness_check_skips_when_recent_clean_marker_is_fresh() {
         let meta = WitnessCheckMeta {
-            policy_version: Some(WITNESS_CHECK_POLICY_VERSION),
             last_clean_height: Some(3_364_774),
         };
 
@@ -2630,7 +2523,6 @@ mod tests {
     #[test]
     fn witness_check_runs_when_forced_or_marker_is_stale() {
         let meta = WitnessCheckMeta {
-            policy_version: Some(WITNESS_CHECK_POLICY_VERSION),
             last_clean_height: Some(1_000),
         };
 
@@ -2647,24 +2539,10 @@ mod tests {
     }
 
     #[test]
-    fn witness_check_runs_when_policy_changes_or_tip_rewinds() {
+    fn witness_check_runs_when_tip_rewinds() {
         assert_eq!(
             decide_witness_check(
                 WitnessCheckMeta {
-                    policy_version: Some(WITNESS_CHECK_POLICY_VERSION + 1),
-                    last_clean_height: Some(3_364_774),
-                },
-                3_364_776,
-                false,
-            ),
-            WitnessCheckDecision::Run(WitnessCheckRunReason::PolicyVersionChanged {
-                stored: WITNESS_CHECK_POLICY_VERSION + 1,
-            }),
-        );
-        assert_eq!(
-            decide_witness_check(
-                WitnessCheckMeta {
-                    policy_version: Some(WITNESS_CHECK_POLICY_VERSION),
                     last_clean_height: Some(3_364_776),
                 },
                 3_364_775,
@@ -2686,7 +2564,6 @@ mod tests {
         assert_eq!(
             read_witness_check_meta(db_path).unwrap(),
             WitnessCheckMeta {
-                policy_version: Some(WITNESS_CHECK_POLICY_VERSION),
                 last_clean_height: Some(3_364_776),
             },
         );
@@ -2697,19 +2574,25 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let db_path = file.path().to_str().unwrap();
 
-        assert_eq!(
-            read_sync_completion_meta(db_path).unwrap(),
-            (None, None, None)
-        );
+        assert_eq!(read_sync_completion_meta(db_path).unwrap(), (None, None));
         mark_sync_completed(db_path, 3_364_776).unwrap();
         assert_eq!(
             read_sync_completion_meta(db_path).unwrap(),
-            (
-                Some(SYNC_COMPLETION_POLICY_VERSION),
-                Some(3_364_776),
-                Some(false)
-            ),
+            (Some(3_364_776), Some(false)),
         );
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let stored_keys: Vec<String> = conn
+            .prepare("SELECT key FROM ext_zorg_sync_meta ORDER BY key")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            stored_keys,
+            ["last_completed_sync_height", "sync_in_progress"]
+        );
+        drop(conn);
         mark_sync_started(db_path).unwrap();
         assert_eq!(
             completed_sync_height_for_status(db_path, 3_364_776, 3_364_776).unwrap(),
@@ -2718,16 +2601,12 @@ mod tests {
         mark_sync_completed(db_path, 3_364_777).unwrap();
         assert_eq!(
             read_sync_completion_meta(db_path).unwrap(),
-            (
-                Some(SYNC_COMPLETION_POLICY_VERSION),
-                Some(3_364_777),
-                Some(false)
-            ),
+            (Some(3_364_777), Some(false)),
         );
     }
 
     #[test]
-    fn completion_policy_migrates_legacy_tip_only_once() {
+    fn completion_status_uses_tip_for_legacy_wallets_without_markers() {
         let legacy_file = tempfile::NamedTempFile::new().unwrap();
         let legacy_path = legacy_file.path().to_str().unwrap();
         assert_eq!(
@@ -2736,7 +2615,7 @@ mod tests {
         );
         assert_eq!(
             read_sync_completion_meta(legacy_path).unwrap(),
-            (Some(SYNC_COMPLETION_POLICY_VERSION), Some(100), Some(false)),
+            (None, None),
         );
 
         let active_sync_file = tempfile::NamedTempFile::new().unwrap();
@@ -2749,7 +2628,7 @@ mod tests {
         );
         assert_eq!(
             read_sync_completion_meta(active_sync_path).unwrap(),
-            (Some(SYNC_COMPLETION_POLICY_VERSION), Some(100), Some(true)),
+            (Some(100), Some(true)),
         );
     }
 
