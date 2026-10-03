@@ -9,6 +9,7 @@
 //!   - Transaction list + on-chain enhancement requests
 //!     (`get_transaction_history`, `get_transaction_data_requests`,
 //!     `decrypt_and_store_transaction`, `set_transaction_status`).
+//!
 //! None of these belong to the orchestration loop — the loop lives
 //! in `sync_engine/mod.rs`. They're one-shot lookups the UI drives
 //! directly, so extracting them into their own submodule keeps

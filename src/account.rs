@@ -658,7 +658,8 @@ pub fn wallet_exists(db_path: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn test_create_wallet_and_get_address() {
+    #[test]
+    fn create_wallet_and_get_address() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
         let db_path_str = db_path.to_str().unwrap();

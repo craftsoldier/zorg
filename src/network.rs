@@ -8,20 +8,24 @@ pub enum WalletNetwork {
 }
 
 impl WalletNetwork {
-    pub fn from_str(network: &str) -> Option<Self> {
-        match network {
-            "main" => Some(Self::Main),
-            "test" => Some(Self::Test),
-            "regtest" => Some(Self::Regtest),
-            _ => None,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Main => "main",
             Self::Test => "test",
             Self::Regtest => "regtest",
+        }
+    }
+}
+
+impl std::str::FromStr for WalletNetwork {
+    type Err = String;
+
+    fn from_str(network: &str) -> Result<Self, Self::Err> {
+        match network {
+            "main" => Ok(Self::Main),
+            "test" => Ok(Self::Test),
+            "regtest" => Ok(Self::Regtest),
+            _ => Err(format!("Unknown network: {network}")),
         }
     }
 }

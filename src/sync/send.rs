@@ -391,9 +391,8 @@ where
     F: FnOnce(WalletNetwork, AccountUuid) -> Result<SecretVec<u8>, String>,
 {
     let stored = consume_stored_proposal(proposal_id, send_flow_id, "Proposal not found")?;
-    let seed = load_seed(stored.network, stored.account_id).map_err(|e| {
+    let seed = load_seed(stored.network, stored.account_id).inspect_err(|_| {
         let _ = finish_stored_proposal(proposal_id, send_flow_id, true);
-        e
     })?;
     execute_stored(
         db_path,
@@ -425,9 +424,8 @@ async fn execute_stored(
     let min_target = BlockHeight::from(stored.proposal.min_target_height());
     let live_expiry = live_send_expiry_height(lightwalletd_url, min_target)
         .await
-        .map_err(|e| {
+        .inspect_err(|_| {
             let _ = finish_stored_proposal(proposal_id, &send_flow_id, true);
-            e
         })?;
 
     let create_result = with_wallet_db_write_lock("send.execute", || {

@@ -238,6 +238,7 @@ pub fn write_block_metadata(
         .map_err(|e| format!("{e:?}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn scan_blocks(
     db_path: &str,
     cache_path: &str,
