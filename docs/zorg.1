@@ -12,11 +12,10 @@ is a command-line Zcash wallet. It manages accounts, keeps a local
 copy of the shielded blockchain state in a SQLite database, and builds
 and broadcasts shielded transfers natively from the terminal. The
 mnemonic is stored in the macOS Keychain; wallet state lives in a
-SQLite database (see
-.BR FILES ).
-.PP
-Zorg is a moment, not a presence: every command runs, prints, and
-exits. Nothing is left running.
+SQLite database at
+.IR ~/Library/Application\ Support/zorg/wallet.db
+by default (override with
+.BR \-\-db ).
 .SH GLOBAL FLAGS
 Recognized before or after the command:
 .TP
@@ -87,19 +86,10 @@ is a valid Zcash address.
 .TP
 .BI zorg\ delete " uuid"
 Delete an account from the wallet database.
-.SH FILES
-.TP
-.I ~/Library/Application Support/zorg/wallet.db
-Default wallet database (override with
-.B \-\-db
-or
-.BR ZORG_WALLET_DB ).
-.SH EXIT STATUS
-0 on success, nonzero on error. Errors are printed to stderr.
+.SH AUTHORS
+Julian Abraham (github.com/craftsoldier)
 .SH LICENSE
 Dual-licensed under the MIT license and the Apache License 2.0;
 you may choose either.
-.SH AUTHORS
-The zorg developers.
 .SH SEE ALSO
 https://github.com/craftsoldier/zorg
