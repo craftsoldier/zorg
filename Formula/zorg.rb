@@ -19,6 +19,8 @@ class Zorg < Formula
   def install
     system "cargo", "install", *std_cargo_args
 
+    man1.install "docs/zorg.1"
+
     (pkgshare/"params").mkpath
     resource("sapling-spend").stage { (pkgshare/"params").install "sapling-spend.params" }
     resource("sapling-output").stage { (pkgshare/"params").install "sapling-output.params" }

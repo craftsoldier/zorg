@@ -2,6 +2,12 @@
 name = "zorg"
 version = "0.1.0"
 edition = "2021"
+description = "A fast, lightweight, CLI-only Zcash wallet: accounts, shielded sync, and native Orchard sends from your terminal."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/craftsoldier/zorg"
+homepage = "https://github.com/craftsoldier/zorg"
+keywords = ["zcash", "wallet", "cryptocurrency", "cli", "blockchain"]
+categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
 
 [lib]
 name = "zorg"
