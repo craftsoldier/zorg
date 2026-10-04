@@ -1,0 +1,105 @@
+.TH ZORG 1 2026-10-05 "zorg 0.1.0" "User Commands"
+.SH NAME
+zorg \- a fast, lightweight, CLI-only Zcash wallet
+.SH SYNOPSIS
+.B zorg
+.RI [ GLOBAL\ FLAGS ]
+.I COMMAND
+.RI [ ARGS ]
+.SH DESCRIPTION
+.B zorg
+is a command-line Zcash wallet. It manages accounts, keeps a local
+copy of the shielded blockchain state in a SQLite database, and builds
+and broadcasts shielded transfers natively from the terminal. The
+mnemonic is stored in the macOS Keychain; wallet state lives in a
+SQLite database (see
+.BR FILES ).
+.PP
+Zorg is a moment, not a presence: every command runs, prints, and
+exits. Nothing is left running.
+.SH GLOBAL FLAGS
+Recognized before or after the command:
+.TP
+.BI \-\-network " main|test"
+Target network. Defaults to mainnet.
+.TP
+.BI \-\-db " path"
+Path to the wallet database. Defaults to
+.IR ~/Library/Application\ Support/zorg/wallet.db .
+.TP
+.BI \-\-lwd " url"
+lightwalletd endpoint override. Well-known public endpoints are the
+default; use only if you need a specific one.
+.TP
+.B \-h\fR, \fB\-\-help
+Print usage and exit.
+.TP
+.B \-V\fR, \fB\-\-version
+Print version and exit.
+.PP
+Environment equivalents:
+.B ZORG_NETWORK\fR,
+.B ZORG_WALLET_DB\fR,
+.B ZORG_LIGHTWALLETD_URL\fR.
+.SH COMMANDS
+.TP
+.BI zorg\ create " [\-\-name\ n] [\-\-birthday\ height]"
+Create a new wallet and print its mnemonic. The name defaults to
+"Account 1". The wallet birthday defaults to the current chain tip
+(resolved via the lightwalletd endpoint); pass an explicit height to
+scan from earlier.
+.TP
+.BI zorg\ import " mnemonic [\-\-passphrase\ p] [\-\-name\ n]"
+Import an existing wallet from its mnemonic (optionally passphrase-
+protected) and reconstruct its accounts.
+.TP
+.B zorg\ accounts
+List all accounts: uuid, name, and unified address.
+.TP
+.BI zorg\ balance " [\-\-account\ uuid]"
+Print spendable, pending, and locked balances for the account
+(the first account, if none given).
+.TP
+.BI zorg\ address " [\-\-account\ uuid]"
+Print the account's unified receiving address.
+.TP
+.B zorg\ sync
+Scan the blockchain and bring the wallet database up to the chain tip.
+.TP
+.B zorg\ status
+Print scan progress against the chain tip (height, percentage,
+complete flag).
+.TP
+.BI zorg\ send " to\ zec [\-\-memo\ text]"
+Propose, authorize, and broadcast a shielded transfer of
+.I zec
+to
+.IR to .
+Prints the fee before authorization and the broadcast txids after.
+.TP
+.BI zorg\ history " [\-\-account\ uuid] [\-\-limit\ n]"
+Print recent transactions.
+.TP
+.BI zorg\ validate " address"
+Check whether
+.I address
+is a valid Zcash address.
+.TP
+.BI zorg\ delete " uuid"
+Delete an account from the wallet database.
+.SH FILES
+.TP
+.I ~/Library/Application Support/zorg/wallet.db
+Default wallet database (override with
+.B \-\-db
+or
+.BR ZORG_WALLET_DB ).
+.SH EXIT STATUS
+0 on success, nonzero on error. Errors are printed to stderr.
+.SH LICENSE
+Dual-licensed under the MIT license and the Apache License 2.0;
+you may choose either.
+.SH AUTHORS
+The zorg developers.
+.SH SEE ALSO
+https://github.com/craftsoldier/zorg
