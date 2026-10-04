@@ -480,15 +480,30 @@ pub(super) async fn download_subtree_roots(
     Ok(())
 }
 
-/// lightwalletd into an in-memory [`MemoryBlockSource`] that the scan
-/// loop can hand straight to `scan_cached_blocks`. No file I/O — the
-/// batch lives in RAM for exactly one scan call and is dropped
-/// immediately after.
-pub(super) async fn download_blocks(
+/// True when a gRPC status says the wallet asked for a block newer than
+/// the ones this backend can currently serve. `GetLatestBlock` is answered
+/// from the backing node while `GetBlockRange` is served from the
+/// compact-block cache, and the two can disagree on fast-moving chains
+/// (testnet in particular) or behind a load balancer. That is a
+/// clamp-and-retry condition, not a real failure.
+fn is_newer_than_latest(status: &Status) -> bool {
+    status.code() == tonic::Code::OutOfRange
+}
+
+/// How many times `download_blocks` will re-fetch the server tip and clamp
+/// its requested range after OUT_OF_RANGE replies before giving up and
+/// letting the outer retry wrapper take over.
+const BLOCK_RANGE_CLAMP_RETRIES: usize = 4;
+
+/// Single attempt: stream `[start, end]` from lightwalletd into an
+/// in-memory [`MemoryBlockSource`]. Returns the raw tonic `Status` on
+/// failure so the caller can inspect the gRPC code before it is flattened
+/// into a `SyncError` string.
+async fn download_blocks_once(
     client: &mut CompactTxStreamerClient<Channel>,
     start: BlockHeight,
     end: BlockHeight,
-) -> Result<MemoryBlockSource, SyncError> {
+) -> Result<MemoryBlockSource, Status> {
     let mut stream = await_tonic_stream(
         "get_block_range",
         LIGHTWALLETD_STREAM_START_TIMEOUT,
@@ -504,13 +519,77 @@ pub(super) async fn download_blocks(
             pool_types: compact_block_pool_types(),
         })),
     )
-    .await
-    .map_err(|e| status_to_network_error("get_block_range", e))?;
+    .await?;
 
     let mut blocks = Vec::new();
-    while let Some(block) = next_stream_message(&mut stream, "get_block_range stream").await? {
-        blocks.push(block);
+    loop {
+        match tokio::time::timeout(LIGHTWALLETD_STREAM_IDLE_TIMEOUT, stream.message()).await {
+            Ok(Ok(Some(block))) => blocks.push(block),
+            Ok(Ok(None)) => break,
+            Ok(Err(status)) => return Err(status),
+            Err(_) => {
+                return Err(timeout_status(
+                    "get_block_range stream",
+                    LIGHTWALLETD_STREAM_IDLE_TIMEOUT,
+                ))
+            }
+        }
     }
 
     Ok(MemoryBlockSource::new(blocks))
+}
+
+/// lightwalletd into an in-memory [`MemoryBlockSource`] that the scan
+/// loop can hand straight to `scan_cached_blocks`. No file I/O — the
+/// batch lives in RAM for exactly one scan call and is dropped
+/// immediately after.
+///
+/// The wallet derives its scan target from `GetLatestBlock`, but the
+/// server streams compact blocks from a cache that may lag that tip. When
+/// the range crosses the cache's current head the server replies
+/// OUT_OF_RANGE ("newer than the latest block"); rather than failing the
+/// whole sync we re-fetch the tip, clamp the range down to what the server
+/// can actually serve, and retry with backoff. The tail of the range is
+/// picked up by later batches once the cache catches up.
+pub(super) async fn download_blocks(
+    client: &mut CompactTxStreamerClient<Channel>,
+    start: BlockHeight,
+    end: BlockHeight,
+) -> Result<MemoryBlockSource, SyncError> {
+    let mut end = end;
+    let mut attempt = 0;
+    loop {
+        match download_blocks_once(client, start, end).await {
+            Ok(source) => return Ok(source),
+            Err(status) if is_newer_than_latest(&status) => {
+                attempt += 1;
+                if attempt > BLOCK_RANGE_CLAMP_RETRIES {
+                    return Err(SyncError::net(format!("get_block_range: {status}")));
+                }
+                log::warn!(
+                    "[{}] get_block_range: block {} is newer than the server's latest; \
+                     re-fetching tip and retrying (attempt {attempt}/{BLOCK_RANGE_CLAMP_RETRIES})",
+                    elapsed(),
+                    u32::from(end),
+                );
+                match get_latest_block(client).await {
+                    Ok(tip) => {
+                        let tip_h = u32::try_from(tip.height).unwrap_or(u32::MAX);
+                        let clamped = std::cmp::min(end, BlockHeight::from_u32(tip_h));
+                        // Only clamp downward, and never below `start`: a fresh
+                        // tip at or above `end` means the cache is merely lagging
+                        // behind the node, in which case we wait and retry as-is.
+                        if clamped < end && clamped >= start {
+                            end = clamped;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[{}] tip refresh during clamp retry failed: {e}", elapsed(),);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(250 * (1 << (attempt - 1)))).await;
+            }
+            Err(status) => return Err(SyncError::net(format!("get_block_range: {status}"))),
+        }
+    }
 }
