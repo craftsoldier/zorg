@@ -25,7 +25,8 @@ COMMANDS:
 OPTIONS:
     --db <path>          Wallet database path (default: ~/.zorg/wallet.db)
     --network <net>      main | test | regtest (default: wallet DB network, else main)
-    --lwd <url>          Lightwalletd endpoint (default: mainnet.lightwalletd.com)
+    --lwd <url>          Lightwalletd endpoint (default: zec.rocks with automatic failover across
+                         trusted public endpoints; see DEFAULT_LWD_ENDPOINTS)
     --version, -V        Show version
     --help, -h           Show this help
 
@@ -112,10 +113,13 @@ fn run(args: &[String]) -> Result<(), String> {
         ensure_custom_wallet_dir(parent)?;
     }
     secure_wallet_db_file(db_path)?;
-    let lwd_url = lwd.unwrap_or_else(|| default_lwd_url(&net).to_string());
-
     let cmd = command_args[0].as_str();
     let opts = &command_args[1..];
+    let lwd_url = match lwd {
+        // Explicit endpoint: the user's choice is used verbatim, no failover.
+        Some(url) => url,
+        None => resolve_default_lwd_url(&net, cmd),
+    };
 
     let result = match cmd {
         "create" => cmd_create(&db, net, &lwd_url, opts),
@@ -542,12 +546,47 @@ fn default_db_path() -> String {
     }
 }
 
-fn default_lwd_url(net: &WalletNetwork) -> &'static str {
+/// Candidate lightwalletd endpoints per network, in priority order.
+fn default_lwd_urls(net: &WalletNetwork) -> &'static [&'static str] {
     match net {
-        WalletNetwork::Main => "https://mainnet.lightwalletd.com:443",
-        WalletNetwork::Test => "https://testnet.lightwalletd.com:443",
-        WalletNetwork::Regtest => "http://localhost:9067",
+        WalletNetwork::Main => &[
+            "https://zec.rocks:443",
+            "https://us.zec.stardust.rest:443",
+            "https://eu.zec.stardust.rest:443",
+            "https://eu.zec.rocks:443",
+            "https://na.zec.rocks:443",
+            "https://ap.zec.rocks:443",
+            "https://sa.zec.rocks:443",
+        ],
+        WalletNetwork::Test => &["https://testnet.zec.rocks:443"],
+        WalletNetwork::Regtest => &["http://localhost:9067"],
     }
+}
+
+/// Pick a lightwalletd endpoint when the user did not specify one.
+fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
+    let candidates = default_lwd_urls(net);
+    let needs_network = matches!(cmd, "sync" | "create" | "send");
+    let Some((first_alive, attempts)) = candidates.iter().enumerate().find_map(|(i, url)| {
+        if !needs_network {
+            return None;
+        }
+        match zorg::sync_engine::get_latest_block_height(url) {
+            Ok(_) => Some((url, i + 1)),
+            Err(e) => {
+                eprintln!("note: {url} unreachable ({e}); trying next endpoint");
+                None
+            }
+        }
+    }) else {
+        // No probe needed, or every candidate refused the connection: the
+        // primary default is returned and the command itself reports failure.
+        return candidates[0].to_string();
+    };
+    if attempts > 1 {
+        eprintln!("note: failing over to {first_alive}");
+    }
+    first_alive.to_string()
 }
 
 fn load_seed(
