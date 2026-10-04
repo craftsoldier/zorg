@@ -19,17 +19,30 @@ Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provi
 
 | Command | Description |
 |---|---|
-| `zorg create [name]` | Create a new Zcash wallet |
-| `zorg import "<mnemonic>" "<passphrase>" [name]` | Import an existing wallet |
-| `zorg accounts` | List all accounts in the wallet |
-| `zorg balance` | Show your wallet balance |
+| `zorg create [--name <n>] [--birthday <height>]` | Create a new Zcash wallet (name defaults to "Account 1"; birthday defaults to the current chain tip) |
+| `zorg import <mnemonic> [--passphrase <p>] [--name <n>]` | Import an existing wallet from its mnemonic |
+| `zorg accounts` | List all accounts in the wallet (uuid, name, address) |
+| `zorg balance [--account <uuid>]` | Show spendable, pending, and locked balances |
 | `zorg address [--account <uuid>]` | Get a unified receiving address |
 | `zorg sync` | Sync your wallet with the blockchain |
-| `zorg status` | Check current sync status |
-| `zorg send <address> <amount> [memo]` | Send Zcash to an address |
-| `zorg history` | View transaction history |
+| `zorg status` | Check current sync status (scan height vs chain tip) |
+| `zorg send <to> <zec> [--memo <text>]` | Send Zcash to an address |
+| `zorg history [--account <uuid>] [--limit <n>]` | View transaction history |
 | `zorg validate <address>` | Validate a Zcash address |
 | `zorg delete <uuid>` | Delete an account from the wallet |
+
+### Global flags
+
+Every flag works on any command:
+
+| Flag | Meaning |
+|---|---|
+| `--network <main\|test>` | Network (defaults to mainnet) |
+| `--db <path>` | Wallet database path |
+| `--lwd <url>` | lightwalletd endpoint override |
+| `--help`, `-V` | Show usage / version |
+
+The same values can be set through the environment: `ZORG_NETWORK`, `ZORG_WALLET_DB`, `ZORG_LIGHTWALLETD_URL`.
 
 ## Requirements
 - Rust & Cargo
@@ -42,3 +55,11 @@ cd zorg
 cargo build --release
 ```
 The compiled binary will be available at `target/release/zorg`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Zorg is dual-licensed under the [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) licenses; you may choose either.
