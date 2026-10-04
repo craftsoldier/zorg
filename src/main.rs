@@ -145,16 +145,12 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "status" => {
             let p = sync::get_sync_progress(&db, net)?;
-            if p.chain_tip_height == 0 {
-                println!("Wallet not synced. Run `zorg sync`.");
-            } else {
-                let pct = p.scanned_height as f64 / p.chain_tip_height as f64 * 100.0;
-                println!(
-                    "Scanned: {} / {} ({:.1}%)",
-                    p.scanned_height, p.chain_tip_height, pct
-                );
-                println!("Syncing: {} | Complete: {}", p.is_syncing, p.is_complete);
-            }
+            let live_tip = zorg::sync_engine::fetch_chain_tip(&lwd_url).ok();
+            let verified_at = zorg::sync_engine::last_completed_sync_at(&db)?;
+            println!(
+                "{}",
+                render_sync_status(p.scanned_height, live_tip, verified_at, unix_now())
+            );
             Ok(())
         }
         "send" => cmd_send(&db, net, &lwd_url, opts),
@@ -439,6 +435,59 @@ fn fmt_zec(zatoshis: u64) -> String {
     format!("{:.8} ZEC", zatoshis as f64 / 100_000_000.0)
 }
 
+/// Unix seconds since the epoch (0 if the clock is somehow before 1970).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Human-readable age: "just now", "4m ago", "3h ago", "12d ago".
+fn humanize_age(seconds_ago: u64) -> String {
+    if seconds_ago < 90 {
+        "just now".into()
+    } else if seconds_ago < 3600 {
+        format!("{}m ago", seconds_ago / 60)
+    } else if seconds_ago < 86_400 {
+        format!("{}h ago", seconds_ago / 3600)
+    } else {
+        format!("{}d ago", seconds_ago / 86_400)
+    }
+}
+
+/// One honest status line: local scan position vs the live chain tip.
+/// `live_tip` is None when the network was unreachable — say so rather
+/// than let a locally-remembered tip claim completeness.
+fn render_sync_status(
+    scanned: u64,
+    live_tip: Option<u64>,
+    verified_at: Option<u64>,
+    now: u64,
+) -> String {
+    let verified = verified_at
+        .map(|t| humanize_age(now.saturating_sub(t)))
+        .unwrap_or_else(|| "never".into());
+    match live_tip {
+        // Verified live right now; the timestamp only matters when behind.
+        Some(tip) if scanned >= tip => {
+            format!("fully synced ✓  height {scanned} (verified just now)")
+        }
+        Some(tip) => format!(
+            "behind {behind} blocks  scanned {scanned} / chain {tip}  \
+             (last verified {verified})\nrun: zorg sync",
+            behind = tip - scanned,
+        ),
+        None if scanned == 0 => {
+            format!("nothing scanned yet  (last verified {verified})\nrun: zorg sync")
+        }
+        None => format!(
+            "offline — last known height {scanned}  \
+             (not verified against the chain, last verified {verified})"
+        ),
+    }
+}
+
 fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
     const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
     const MAX_ZATOSHIS: u64 = 21_000_000 * ZATOSHIS_PER_ZEC;
@@ -613,7 +662,9 @@ fn load_seed(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_zatoshi_amount, resolve_create_birthday, resolve_network};
+    use super::{
+        parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
+    };
     use zorg::network::WalletNetwork;
 
     #[test]
@@ -686,5 +737,40 @@ mod tests {
         assert!(resolve_create_birthday(None, || Err("offline".into()))
             .unwrap_err()
             .contains("Could not determine wallet birthday"));
+    }
+
+    #[test]
+    fn status_renders_fully_synced() {
+        let s = render_sync_status(4_462_729, Some(4_462_729), Some(1_000), 2_000);
+        assert_eq!(s, "fully synced ✓  height 4462729 (verified just now)");
+        let s = render_sync_status(4_462_800, Some(4_462_729), None, 0);
+        assert!(s.starts_with("fully synced ✓"), "{s}");
+        assert!(s.contains("4462800"), "{s}");
+    }
+
+    #[test]
+    fn status_renders_behind_with_nudge() {
+        let s = render_sync_status(4_339_008, Some(4_462_634), Some(1_000), 2_000);
+        assert!(s.starts_with("behind 123626 blocks"), "{s}");
+        assert!(s.contains("scanned 4339008 / chain 4462634"), "{s}");
+        assert!(s.contains("last verified 16m ago"), "{s}");
+        assert!(s.contains("run: zorg sync"), "{s}");
+    }
+
+    #[test]
+    fn status_renders_offline_without_claiming_completeness() {
+        let s = render_sync_status(4_339_008, None, Some(120), 120 + 3 * 3600);
+        assert!(s.starts_with("offline"), "{s}");
+        assert!(s.contains("last known height 4339008"), "{s}");
+        assert!(s.contains("not verified against the chain"), "{s}");
+        assert!(s.contains("3h ago"), "{s}");
+    }
+
+    #[test]
+    fn status_renders_never_synced_wallet() {
+        let s = render_sync_status(0, None, None, 1_000);
+        assert!(s.contains("nothing scanned yet"), "{s}");
+        assert!(s.contains("last verified never"), "{s}");
+        assert!(s.contains("run: zorg sync"), "{s}");
     }
 }

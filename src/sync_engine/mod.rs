@@ -92,6 +92,7 @@ const WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS: u64 = 10_000;
 const SYNC_META_TABLE: &str = "ext_zorg_sync_meta";
 const LAST_COMPLETED_SYNC_HEIGHT_KEY: &str = "last_completed_sync_height";
 const SYNC_IN_PROGRESS_KEY: &str = "sync_in_progress";
+const LAST_COMPLETED_SYNC_AT_KEY: &str = "last_completed_sync_at";
 const WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY: &str = "witness_check_last_clean_height";
 type SyncCompletionMeta = (Option<u64>, Option<bool>);
 // Witness repair is finalization work after the main scan drains. Cap its
@@ -653,8 +654,30 @@ fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<
         params![SYNC_IN_PROGRESS_KEY],
     )
     .map_err(|e| format!("clear sync in-progress marker: {e}"))?;
+    let completed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    tx.execute(
+        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![LAST_COMPLETED_SYNC_AT_KEY, completed_at.to_string()],
+    )
+    .map_err(|e| format!("write last-completed-sync timestamp: {e}"))?;
     tx.commit()
         .map_err(|e| format!("commit completed sync transaction: {e}"))
+}
+
+/// Unix time of the last completed sync, if the wallet has ever synced.
+pub fn last_completed_sync_at(db_path: &str) -> Result<Option<u64>, String> {
+    let conn = open_readonly_conn_with_timeout(db_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
+    if !sync_meta_table_exists(&conn)? {
+        return Ok(None);
+    }
+    Ok(parse_sync_meta_u64(
+        LAST_COMPLETED_SYNC_AT_KEY,
+        read_sync_meta_value(&conn, LAST_COMPLETED_SYNC_AT_KEY)?,
+    ))
 }
 
 fn ensure_complete_scan_state(
@@ -2337,6 +2360,25 @@ pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
     })
 }
 
+/// Get the chain tip from a lightwalletd endpoint, bounded by a timeout so
+/// a dead endpoint cannot hang a one-shot command. Used by `status`.
+pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::sync_engine::lwd::get_latest_block(&mut client),
+        )
+        .await
+        .map_err(|_| "get_latest_block: timed out".to_string())?
+        .map(|tip| tip.height)
+        .map_err(|e| e.to_string())
+    })
+}
+
 /// Get the chain name from a lightwalletd endpoint.
 pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
@@ -2601,7 +2643,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             stored_keys,
-            ["last_completed_sync_height", "sync_in_progress"]
+            [
+                "last_completed_sync_at",
+                "last_completed_sync_height",
+                "sync_in_progress"
+            ]
         );
         drop(conn);
         mark_sync_started(db_path).unwrap();
