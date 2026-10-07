@@ -26,7 +26,7 @@ Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provi
 | `zorg address [--account <uuid>]` | Get a unified receiving address |
 | `zorg sync` | Sync your wallet with the blockchain |
 | `zorg status` | Check current sync status (scan height vs chain tip) |
-| `zorg send <to> <zec> [--memo <text>]` | Send Zcash to an address |
+| `zorg send <to> <amount> [--memo <text>] [--account <uuid>]` | Send Zcash to an address (TAZ on testnet) |
 | `zorg history [--account <uuid>] [--limit <n>]` | View transaction history |
 | `zorg validate <address>` | Validate a Zcash address |
 | `zorg delete <uuid>` | Delete an account from the wallet |
