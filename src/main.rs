@@ -17,7 +17,7 @@ COMMANDS:
     address [--account <uuid>]                          Show receive address
     sync                                                Sync with the chain
     status                                              Show sync progress
-    send <to> <zec> [--memo <text>] [--account <uuid>] Send ZEC
+    send <to> <amount> [--memo <text>] [--account <uuid>] Send ZEC (TAZ on testnet)
     history [--limit <n>] [--account <uuid>]            Show transaction history
     validate <address>                                  Validate a Zcash address
     delete <uuid>                                       Delete an account
@@ -343,10 +343,10 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
     let positional: Vec<&String> = opts.iter().filter(|a| !a.starts_with("--")).collect();
     let to = positional
         .first()
-        .ok_or("Usage: zorg send <to> <zec> [--memo <text>]")?;
+        .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
     let amount_str = positional
         .get(1)
-        .ok_or("Usage: zorg send <to> <zec> [--memo <text>]")?;
+        .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
     let amount_zat = parse_zatoshi_amount(amount_str)?;
     let memo = flag_str(opts, "--memo");
     let uuid = match flag_str(opts, "--account") {
@@ -509,7 +509,7 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
         || amount.matches('.').count() > 1
     {
-        return Err("Invalid amount; use a positive decimal ZEC amount".into());
+        return Err("Invalid amount; use a positive decimal amount".into());
     }
     if fraction.len() > 8 {
         return Err("Amount cannot have more than 8 decimal places".into());

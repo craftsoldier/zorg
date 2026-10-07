@@ -69,9 +69,10 @@ Scan the blockchain and bring the wallet database up to the chain tip.
 Print scan progress against the chain tip (height, percentage,
 complete flag).
 .TP
-.BI zorg\ send " to\ zec [\-\-memo\ text]"
+.BI zorg\ send " to\ amount [\-\-memo\ text] [\-\-account\ uuid]"
 Propose, authorize, and broadcast a shielded transfer of
-.I zec
+.I amount
+(ZEC on mainnet, TAZ on testnet)
 to
 .IR to .
 Prints the fee before authorization and the broadcast txids after.
