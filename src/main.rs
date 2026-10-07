@@ -320,18 +320,21 @@ fn cmd_balance(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Stri
         None => first_account_uuid(db, net)?,
     };
     let bal = sync::get_wallet_balance(db, net, &uuid)?;
-    println!("Spendable:  {}", fmt_zec(bal.spendable));
-    println!("Pending:    {}", fmt_zec(bal.value_pending_spendability));
-    println!("Locked:     {}", fmt_zec(bal.locked));
-    println!("Total:      {}", fmt_zec(bal.total));
+    println!("Spendable:  {}", fmt_zec(bal.spendable, net));
+    println!(
+        "Pending:    {}",
+        fmt_zec(bal.value_pending_spendability, net)
+    );
+    println!("Locked:     {}", fmt_zec(bal.locked, net));
+    println!("Total:      {}", fmt_zec(bal.total, net));
     if bal.transparent > 0 {
-        println!("  Transparent: {}", fmt_zec(bal.transparent));
+        println!("  Transparent: {}", fmt_zec(bal.transparent, net));
     }
     if bal.sapling > 0 {
-        println!("  Sapling:      {}", fmt_zec(bal.sapling));
+        println!("  Sapling:      {}", fmt_zec(bal.sapling, net));
     }
     if bal.orchard > 0 {
-        println!("  Orchard:      {}", fmt_zec(bal.orchard));
+        println!("  Orchard:      {}", fmt_zec(bal.orchard, net));
     }
     Ok(())
 }
@@ -361,7 +364,7 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
         amount_zat,
         memo.as_deref(),
     )?;
-    println!("Fee: {}", fmt_zec(proposal.fee_zatoshi));
+    println!("Fee: {}", fmt_zec(proposal.fee_zatoshi, net));
 
     let seed = load_seed(db, net, &uuid)?;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -400,7 +403,7 @@ fn cmd_history(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Stri
             "  {:<10} {:<10} {:>16}  {:<8}  {}",
             tx.tx_kind,
             tx.display_pool,
-            fmt_zec(tx.display_amount),
+            fmt_zec(tx.display_amount, net),
             height,
             &tx.txid_hex[..16.min(tx.txid_hex.len())]
         );
@@ -431,8 +434,13 @@ fn first_account_uuid(db: &str, net: WalletNetwork) -> Result<String, String> {
         .ok_or_else(|| "No accounts found. Run `zorg create`.".into())
 }
 
-fn fmt_zec(zatoshis: u64) -> String {
-    format!("{:.8} ZEC", zatoshis as f64 / 100_000_000.0)
+/// Testnet (and regtest) coins are worthless by design — say so.
+fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
+    let unit = match net {
+        WalletNetwork::Main => "ZEC",
+        WalletNetwork::Test | WalletNetwork::Regtest => "TAZ",
+    };
+    format!("{:.8} {unit}", zatoshis as f64 / 100_000_000.0)
 }
 
 /// Unix seconds since the epoch (0 if the clock is somehow before 1970).
@@ -663,8 +671,18 @@ fn load_seed(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
+        fmt_zec, parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
     };
+
+    #[test]
+    fn amounts_are_labeled_per_network() {
+        assert_eq!(fmt_zec(29_000_000, WalletNetwork::Main), "0.29000000 ZEC");
+        assert_eq!(fmt_zec(29_000_000, WalletNetwork::Test), "0.29000000 TAZ");
+        assert_eq!(
+            fmt_zec(29_000_000, WalletNetwork::Regtest),
+            "0.29000000 TAZ"
+        );
+    }
     use zorg::network::WalletNetwork;
 
     #[test]
