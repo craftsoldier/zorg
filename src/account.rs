@@ -168,6 +168,26 @@ fn account_name_for_index(account_index: u32) -> String {
     format!("Account {}", account_index + 1)
 }
 
+/// Current receive address for a numbered account. `None` = the only account.
+pub fn account_address_by_number(
+    db_path: &str,
+    network: WalletNetwork,
+    number: Option<u32>,
+) -> Result<String, String> {
+    let accounts = list_accounts(db_path, network)?;
+    let picked = pick_account(&accounts, number)?;
+    let uuid = uuid_for_index(db_path, network, picked.account_index)?;
+
+    let db = open_wallet_db_for_read(db_path, network)?;
+    let account_id = parse_account_uuid(&uuid)?;
+    let account = db
+        .get_account(account_id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .ok_or("Account not found")?;
+    let ufvk = account.ufvk().ok_or("Account does not have a UFVK")?;
+    current_receive_address(&db, network, account_id, ufvk)
+}
+
 /// The next derived account index is MAX(hd_account_index) + 1, or 0 when
 /// the wallet has no derived accounts yet. (One wallet file binds one seed,
 /// so no per-seed scoping is needed.)
@@ -378,23 +398,16 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
     Ok(accounts)
 }
 
-pub fn list_account_uuids_from_db(db_path: &str) -> Result<Vec<String>, String> {
-    let conn = open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?;
-    let mut stmt = conn
-        .prepare("SELECT uuid FROM accounts ORDER BY id ASC")
-        .map_err(|e| format!("Failed to prepare account UUID query: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|e| format!("Failed to list account UUIDs: {e}"))?;
-
-    let mut uuids = Vec::new();
-    for row in rows {
-        let bytes = row.map_err(|e| format!("Failed to read account UUID: {e}"))?;
-        let uuid = uuid::Uuid::from_slice(&bytes)
-            .map_err(|e| format!("Invalid account UUID bytes in DB: {e}"))?;
-        uuids.push(uuid.to_string());
-    }
-    Ok(uuids)
+/// Delete the account with the given number.
+/// Resolves fresh at call time, so it always targets the account the number
+/// currently points at.
+pub fn delete_account_by_number(
+    db_path: &str,
+    network: WalletNetwork,
+    number: u32,
+) -> Result<(), String> {
+    let uuid = resolve_account_uuid(db_path, network, Some(number))?;
+    delete_account(db_path, network, &uuid)
 }
 
 /// Delete an account from the wallet database.
@@ -648,26 +661,6 @@ pub fn prune_orphaned_scan_ranges(db_path: &str) -> Result<usize, String> {
     })
 }
 
-/// Get the Unified Address from an existing wallet database.
-pub fn get_address_from_db(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<String, String> {
-    let db = open_wallet_db_for_read(db_path, network)?;
-
-    let account_id = parse_account_uuid(account_uuid)?;
-
-    let account = db
-        .get_account(account_id)
-        .map_err(|e| format!("Failed to get account: {e}"))?
-        .ok_or("Account not found")?;
-
-    let ufvk = account.ufvk().ok_or("Account does not have a UFVK")?;
-
-    current_receive_address(&db, network, account_id, ufvk)
-}
-
 fn current_receive_address(
     db: &WalletDatabase,
     network: WalletNetwork,
@@ -717,7 +710,7 @@ mod tests {
 
         // Verify we can read the address back
         let address2 =
-            get_address_from_db(db_path_str, WalletNetwork::Main, &created.uuid).unwrap();
+            account_address_by_number(db_path_str, WalletNetwork::Main, Some(1)).unwrap();
         assert_eq!(address, address2);
     }
 
@@ -799,10 +792,6 @@ mod tests {
         .unwrap();
 
         assert_ne!(default_address, renewed_address);
-        assert_eq!(
-            renewed_address,
-            get_address_from_db(db_path_str, WalletNetwork::Main, &uuid).unwrap()
-        );
         assert_eq!(
             renewed_address,
             list_accounts(db_path_str, WalletNetwork::Main).unwrap()[0].unified_address
