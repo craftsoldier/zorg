@@ -264,67 +264,6 @@ pub fn import_derived_account_at_index(
     })
 }
 
-// ======================== Wallet creation entry points ========================
-
-pub struct WalletCreationResult {
-    pub mnemonic: String,
-    pub unified_address: String,
-    pub account_number: u32,
-}
-
-pub struct WalletImportResult {
-    pub unified_address: String,
-    pub account_number: u32,
-}
-
-/// Create a new wallet: generate mnemonic, derive seed, create first account.
-/// The bootstrap account is always "Account 1" (index 0).
-pub fn create_wallet(
-    network_str: &str,
-    db_path: &str,
-    birthday_height: Option<u64>,
-) -> Result<WalletCreationResult, String> {
-    let network = parse_network(network_str)?;
-    let mnemonic = generate_mnemonic();
-    let seed = mnemonic_to_seed(&mnemonic)?;
-    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, &mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletCreationResult {
-        mnemonic,
-        unified_address: created.unified_address,
-        account_number: created.number,
-    })
-}
-
-/// Import a wallet from a mnemonic phrase.
-/// The bootstrap account is always "Account 1" (index 0).
-pub fn import_wallet(
-    mnemonic: &str,
-    bip39_passphrase: &str,
-    birthday_height: Option<u64>,
-    network_str: &str,
-    db_path: &str,
-) -> Result<WalletImportResult, String> {
-    let network = parse_network(network_str)?;
-    let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
-    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletImportResult {
-        unified_address: created.unified_address,
-        account_number: created.number,
-    })
-}
-
 /// Resolve an account number (1-based, as shown by `zorg accounts`) to the
 /// account's backend uuid. `None` means "the only account" and errors when
 /// ambiguous.
