@@ -398,25 +398,6 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
     Ok(accounts)
 }
 
-pub fn list_account_uuids_from_db(db_path: &str) -> Result<Vec<String>, String> {
-    let conn = open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?;
-    let mut stmt = conn
-        .prepare("SELECT uuid FROM accounts ORDER BY id ASC")
-        .map_err(|e| format!("Failed to prepare account UUID query: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|e| format!("Failed to list account UUIDs: {e}"))?;
-
-    let mut uuids = Vec::new();
-    for row in rows {
-        let bytes = row.map_err(|e| format!("Failed to read account UUID: {e}"))?;
-        let uuid = uuid::Uuid::from_slice(&bytes)
-            .map_err(|e| format!("Invalid account UUID bytes in DB: {e}"))?;
-        uuids.push(uuid.to_string());
-    }
-    Ok(uuids)
-}
-
 /// Delete the account with the given number.
 /// Resolves fresh at call time, so it always targets the account the number
 /// currently points at.
