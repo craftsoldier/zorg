@@ -86,11 +86,6 @@ pub struct WalletImportResult {
     pub account_number: u32,
 }
 
-pub struct AccountCreationResult {
-    pub unified_address: String,
-    pub account_uuid: String,
-}
-
 // ======================== Convenience Functions ========================
 
 /// Create a new wallet: generate mnemonic, derive seed, create first account.

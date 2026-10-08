@@ -146,9 +146,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "balance" => cmd_balance(&db, net, opts),
         "address" => {
-            let (uuid, _) =
-                zorg::account::resolve_account(&db, net, flag_str(opts, "--account").as_deref())?;
-            let addr = zorg::account::get_address_from_db(&db, net, Some(&uuid))?;
+            let uuid = zorg::account::resolve_account_uuid(&db, net, account_number_opt(opts)?)?;
+            let addr = zorg::account::get_address_from_db(&db, net, &uuid)?;
             println!("{addr}");
             Ok(())
         }
@@ -178,17 +177,17 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "delete" => {
             let number =
-                flag_str(opts, "--account").ok_or("Usage: zorg delete --account <n> [--yes]")?;
+                account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
             let confirmed = opts.iter().any(|a| a == "--yes");
-            let (uuid, name) = zorg::account::resolve_account(&db, net, Some(&number))?;
-            let address = zorg::account::get_address_from_db(&db, net, Some(&uuid))?;
+            let uuid = zorg::account::resolve_account_uuid(&db, net, Some(number))?;
+            let address = zorg::account::get_address_from_db(&db, net, &uuid)?;
             if !confirmed {
-                println!("This deletes account #{number} '{name}' ({address}).");
+                println!("This deletes Account {number} ({address}).");
                 println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
                 return Ok(());
             }
             zorg::account::delete_account(&db, net, &uuid)?;
-            println!("Account '{name}' deleted.");
+            println!("Account {number} deleted.");
             Ok(())
         }
         _ => {
@@ -330,8 +329,7 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
 }
 
 fn cmd_balance(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
-    let (uuid, _) =
-        zorg::account::resolve_account(db, net, flag_str(opts, "--account").as_deref())?;
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let bal = sync::get_wallet_balance(db, net, &uuid)?;
     println!("Spendable:  {}", fmt_zec(bal.spendable, net));
     println!(
@@ -362,8 +360,7 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
         .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
     let amount_zat = parse_zatoshi_amount(amount_str)?;
     let memo = flag_str(opts, "--memo");
-    let (uuid, _) =
-        zorg::account::resolve_account(db, net, flag_str(opts, "--account").as_deref())?;
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
     let proposal = sync::propose_send(
@@ -395,8 +392,7 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
 }
 
 fn cmd_history(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
-    let (uuid, _) =
-        zorg::account::resolve_account(db, net, flag_str(opts, "--account").as_deref())?;
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let limit = flag_u64(opts, "--limit").map(|n| n as u32);
     let txs = sync::get_transaction_history(db, net, limit, &uuid)?;
     if txs.is_empty() {
@@ -434,6 +430,19 @@ fn flag_str(opts: &[String], flag: &str) -> Option<String> {
 
 fn flag_u64(opts: &[String], flag: &str) -> Option<u64> {
     flag_str(opts, flag)?.parse().ok()
+}
+
+/// `--account <n>` from the flags, parsed at the UI boundary. `None` = not given.
+fn account_number_opt(opts: &[String]) -> Result<Option<u32>, String> {
+    match flag_str(opts, "--account") {
+        None => Ok(None),
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(n) => Ok(Some(n)),
+            Err(_) => {
+                Err("Account must be a number (1, 2, 3…); `zorg accounts` lists them.".into())
+            }
+        },
+    }
 }
 
 /// Testnet (and regtest) coins are worthless by design — say so.
@@ -675,6 +684,7 @@ mod tests {
     use super::{
         fmt_zec, parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
     };
+    use zorg::network::WalletNetwork;
 
     #[test]
     fn amounts_are_labeled_per_network() {
@@ -685,7 +695,6 @@ mod tests {
             "0.29000000 TAZ"
         );
     }
-    use zorg::network::WalletNetwork;
 
     #[test]
     fn send_amounts_are_exact_and_invalid_values_are_rejected() {

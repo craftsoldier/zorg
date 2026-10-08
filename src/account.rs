@@ -273,18 +273,17 @@ pub fn import_derived_account_at_index(
     })
 }
 
-/// Resolve an account number (1-based, as shown by `zorg accounts`) to
-/// `(uuid, name)`. The uuid is internal plumbing for the backend APIs.
-/// `None` means "the only account" and errors when ambiguous.
-pub fn resolve_account(
+/// Resolve an account number (1-based, as shown by `zorg accounts`) to the
+/// account's backend uuid. `None` means "the only account" and errors when
+/// ambiguous.
+pub fn resolve_account_uuid(
     db_path: &str,
     network: WalletNetwork,
-    number: Option<&str>,
-) -> Result<(String, String), String> {
+    number: Option<u32>,
+) -> Result<String, String> {
     let accounts = list_accounts(db_path, network)?;
     let picked = pick_account(&accounts, number)?;
-    let uuid = uuid_for_index(db_path, network, picked.account_index)?;
-    Ok((uuid, picked.name.clone()))
+    uuid_for_index(db_path, network, picked.account_index)
 }
 
 /// Internal: the backend uuid for a numbered account. Single-seed CLI wallets
@@ -312,10 +311,7 @@ fn uuid_for_index(
     Err(format!("No account with index {account_index}"))
 }
 
-fn pick_account<'a>(
-    accounts: &'a [AccountInfo],
-    number: Option<&str>,
-) -> Result<&'a AccountInfo, String> {
+fn pick_account(accounts: &[AccountInfo], number: Option<u32>) -> Result<&AccountInfo, String> {
     let n = match number {
         None => match accounts.len() {
             0 => return Err("No accounts found. Run `zorg create`.".into()),
@@ -327,17 +323,10 @@ fn pick_account<'a>(
                 ))
             }
         },
-        Some(raw) => {
-            let n = raw.parse::<usize>().map_err(|_| {
-                "Account must be a number (1, 2, 3…); `zorg accounts` lists them.".to_string()
-            })?;
-            if n == 0 {
-                return Err("Accounts are numbered from 1.".into());
-            }
-            n
-        }
+        Some(0) => return Err("Accounts are numbered from 1.".into()),
+        Some(n) => n,
     };
-    match accounts.iter().find(|a| a.account_index as usize == n - 1) {
+    match accounts.iter().find(|a| a.account_index + 1 == n as u32) {
         Some(account) => Ok(account),
         None => {
             let valid: Vec<String> = accounts
@@ -659,33 +648,15 @@ pub fn prune_orphaned_scan_ranges(db_path: &str) -> Result<usize, String> {
     })
 }
 
-/// Parse an account UUID string into AccountUuid.
-fn resolve_account_id(
-    db: &WalletDatabase,
-    account_uuid: Option<&str>,
-) -> Result<AccountUuid, String> {
-    match account_uuid {
-        Some(uuid_str) => parse_account_uuid(uuid_str),
-        None => {
-            let ids = db
-                .get_account_ids()
-                .map_err(|e| format!("Failed to list accounts: {e}"))?;
-            ids.into_iter()
-                .next()
-                .ok_or_else(|| "No accounts found in wallet".to_string())
-        }
-    }
-}
-
 /// Get the Unified Address from an existing wallet database.
 pub fn get_address_from_db(
     db_path: &str,
     network: WalletNetwork,
-    account_uuid: Option<&str>,
+    account_uuid: &str,
 ) -> Result<String, String> {
     let db = open_wallet_db_for_read(db_path, network)?;
 
-    let account_id = resolve_account_id(&db, account_uuid)?;
+    let account_id = parse_account_uuid(account_uuid)?;
 
     let account = db
         .get_account(account_id)
@@ -734,9 +705,9 @@ mod tests {
         let phrase = generate_mnemonic();
         let seed = mnemonic_to_seed(&phrase).unwrap();
 
-        let address = init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None)
-            .unwrap()
-            .unified_address;
+        let created =
+            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None).unwrap();
+        let address = created.unified_address;
 
         // Mainnet unified addresses start with "u1"
         assert!(
@@ -745,7 +716,8 @@ mod tests {
         );
 
         // Verify we can read the address back
-        let address2 = get_address_from_db(db_path_str, WalletNetwork::Main, None).unwrap();
+        let address2 =
+            get_address_from_db(db_path_str, WalletNetwork::Main, &created.uuid).unwrap();
         assert_eq!(address, address2);
     }
 
@@ -786,20 +758,15 @@ mod tests {
         let accounts = vec![mk(1, "Account 1"), mk(2, "Account 2")];
 
         // numbers select positionally in the sorted listing
-        assert_eq!(
-            pick_account(&accounts, Some("2")).unwrap().name,
-            "Account 2"
-        );
+        assert_eq!(pick_account(&accounts, Some(2)).unwrap().name, "Account 2");
         // a bare reference resolves when the wallet has exactly one account
         assert_eq!(
             pick_account(&accounts[..1], None).unwrap().name,
             "Account 1"
         );
-        // strictly numbers: names and uuids are rejected, not matched
-        assert!(pick_account(&accounts, Some("Account 2")).is_err());
-        assert!(pick_account(&accounts, Some("00000002-0000-0000-0000-000000000000")).is_err());
-        assert!(pick_account(&accounts, Some("0")).is_err());
-        assert!(pick_account(&accounts, Some("9"))
+        // strictly numbers: anything that is not a number is rejected by the
+        // UI-boundary parser before pick_account ever sees it
+        assert!(pick_account(&accounts, Some(9))
             .unwrap_err()
             .contains("No account #9"));
         assert!(pick_account(&accounts, None)
@@ -834,7 +801,7 @@ mod tests {
         assert_ne!(default_address, renewed_address);
         assert_eq!(
             renewed_address,
-            get_address_from_db(db_path_str, WalletNetwork::Main, Some(&uuid)).unwrap()
+            get_address_from_db(db_path_str, WalletNetwork::Main, &uuid).unwrap()
         );
         assert_eq!(
             renewed_address,
