@@ -17,8 +17,6 @@ Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provi
 
 ## Commands
 
-| Command | Description |
-|---|---|
 Accounts are numbered 1, 2, 3… — `--account` takes the number, never a UUID.
 
 | Command | Description |
