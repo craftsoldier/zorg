@@ -1,13 +1,10 @@
 use bip0039::{Count, English, Language, Mnemonic};
-use secrecy::SecretVec;
+use secrecy::{ExposeSecret, SecretVec};
 
-use zcash_client_sqlite::AccountUuid;
-use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
+use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedSpendingKey};
 use zeroize::Zeroizing;
 
 use crate::network::WalletNetwork;
-
-use crate::account::*;
 
 pub fn generate_mnemonic() -> String {
     let mnemonic = Mnemonic::<English>::generate(Count::Words24);
@@ -56,14 +53,25 @@ pub fn parse_network(network: &str) -> Result<WalletNetwork, String> {
     network.parse()
 }
 
-/// Initialize the wallet database schema. Idempotent — safe to call multiple times.
-/// Called without seed to avoid SeedNotRelevant errors when only Imported accounts exist.
-pub fn parse_account_uuid(s: &str) -> Result<AccountUuid, String> {
-    let uuid = uuid::Uuid::parse_str(s).map_err(|e| format!("Invalid account UUID: {e}"))?;
-    Ok(AccountUuid::from_uuid(uuid))
+/// Convert an account index to the backend's ZIP-32 account id.
+pub fn zip32_account_id(account_index: u32) -> Result<zip32::AccountId, String> {
+    zip32::AccountId::try_from(account_index)
+        .map_err(|_| format!("Invalid ZIP32 account index: {account_index}"))
 }
 
-/// Resolve account_id: if uuid provided, parse it; otherwise take first account.
+/// Derive the Unified Spending Key for an account index from the seed.
+fn unified_spending_key_for_account(
+    network: WalletNetwork,
+    seed: &SecretVec<u8>,
+    account_index: u32,
+) -> Result<UnifiedSpendingKey, String> {
+    let account_id = zip32_account_id(account_index)?;
+    UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), account_id)
+        .map_err(|e| format!("USK derivation failed for account {account_index}: {e:?}"))
+}
+
+/// Standard shielded address request: Orchard + Sapling, no transparent.
+/// Matches the behavior of zodl/Zashi wallets.
 pub fn shielded_address_request() -> UnifiedAddressRequest {
     UnifiedAddressRequest::custom(
         ReceiverRequirement::Require, // Orchard
@@ -73,67 +81,18 @@ pub fn shielded_address_request() -> UnifiedAddressRequest {
     .expect("valid receiver requirements")
 }
 
-// ======================== Public API Structs ========================
-
-pub struct WalletCreationResult {
-    pub mnemonic: String,
-    pub unified_address: String,
-    pub account_number: u32,
-}
-
-pub struct WalletImportResult {
-    pub unified_address: String,
-    pub account_number: u32,
-}
-
-// ======================== Convenience Functions ========================
-
-/// Create a new wallet: generate mnemonic, derive seed, create first account.
-/// The bootstrap account is always "Account 1" (index 0).
-pub fn create_wallet(
-    network_str: &str,
-    db_path: &str,
-    birthday_height: Option<u64>,
-) -> Result<WalletCreationResult, String> {
-    let network = parse_network(network_str)?;
-    let mnemonic = generate_mnemonic();
-    let seed = mnemonic_to_seed(&mnemonic)?;
-    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, &mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletCreationResult {
-        mnemonic,
-        unified_address: created.unified_address,
-        account_number: created.number,
-    })
-}
-
-/// Import a wallet from a mnemonic phrase.
-/// The bootstrap account is always "Account 1" (index 0).
-pub fn import_wallet(
-    mnemonic: &str,
-    bip39_passphrase: &str,
-    birthday_height: Option<u64>,
-    network_str: &str,
-    db_path: &str,
-) -> Result<WalletImportResult, String> {
-    let network = parse_network(network_str)?;
-    let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
-    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-    Ok(WalletImportResult {
-        unified_address: created.unified_address,
-        account_number: created.number,
-    })
+/// The default unified address for account `index`, derived from the seed.
+pub fn default_address_for_account(
+    network: WalletNetwork,
+    seed: &SecretVec<u8>,
+    account_index: u32,
+) -> Result<String, String> {
+    let usk = unified_spending_key_for_account(network, seed, account_index)?;
+    let ufvk = usk.to_unified_full_viewing_key();
+    let (ua, _) = ufvk
+        .default_address(shielded_address_request())
+        .map_err(|e| format!("Failed to derive address: {e}"))?;
+    Ok(ua.encode(&network))
 }
 
 /// Validate a mnemonic phrase.
@@ -198,77 +157,5 @@ mod tests {
             Ok(WalletNetwork::Regtest)
         ));
         assert!(parse_network("invalid").is_err());
-    }
-
-    #[test]
-    fn test_create_testnet_wallet() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-
-        let address = init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None)
-            .unwrap()
-            .unified_address;
-
-        assert!(
-            address.starts_with("utest1"),
-            "Expected utest1 prefix, got: {address}"
-        );
-    }
-
-    #[test]
-    fn test_deterministic_address_from_same_seed() {
-        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
-        let seed = mnemonic_to_seed(phrase).unwrap();
-
-        let temp1 = tempfile::tempdir().unwrap();
-        let db1 = temp1.path().join("wallet.db");
-        let addr1 =
-            init_db_and_create_account(db1.to_str().unwrap(), WalletNetwork::Main, &seed, None)
-                .unwrap()
-                .unified_address;
-
-        let temp2 = tempfile::tempdir().unwrap();
-        let db2 = temp2.path().join("wallet.db");
-        let addr2 =
-            init_db_and_create_account(db2.to_str().unwrap(), WalletNetwork::Main, &seed, None)
-                .unwrap()
-                .unified_address;
-
-        assert_eq!(addr1, addr2, "Same seed should produce same address");
-    }
-
-    #[test]
-    fn test_shielded_address_has_sapling_and_orchard_only() {
-        // Verify our address uses Sapling+Orchard receivers (no transparent),
-        // matching zodl/Zashi wallet behavior.
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-
-        let address = init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None)
-            .unwrap()
-            .unified_address;
-        // Decode and verify receiver types
-        let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();
-        let debug = format!("{:?}", za);
-        assert!(
-            debug.contains("Sapling"),
-            "UA should contain Sapling receiver"
-        );
-        assert!(
-            debug.contains("Orchard"),
-            "UA should contain Orchard receiver"
-        );
-        assert!(
-            !debug.contains("P2pkh"),
-            "UA should NOT contain transparent receiver"
-        );
     }
 }

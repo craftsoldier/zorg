@@ -263,10 +263,19 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let birthday = resolve_create_birthday(birthday_arg.as_deref(), || {
         zorg::sync_engine::get_latest_block_height(lwd_url)
     })?;
-    let result = keys::create_wallet(net.as_str(), db, Some(birthday))?;
-    println!("Mnemonic (save this!): {}", result.mnemonic);
-    println!("Account number: {}", result.account_number);
-    println!("Address: {}", result.unified_address);
+    let mnemonic = keys::generate_mnemonic();
+    let seed = keys::mnemonic_to_seed(&mnemonic)?;
+    let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) =
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
+
+    println!("Mnemonic (save this!): {mnemonic}");
+    println!("Account number: {}", created.number);
+    println!("Address: {}", created.unified_address);
     Ok(())
 }
 
@@ -308,9 +317,17 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
         .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>]")?;
     let passphrase = flag_str(opts, "--passphrase").unwrap_or_default();
     let birthday = flag_u64(opts, "--birthday");
-    let result = keys::import_wallet(mnemonic, &passphrase, birthday, net.as_str(), db)?;
-    println!("Account number: {}", result.account_number);
-    println!("Address: {}", result.unified_address);
+    let seed = keys::mnemonic_to_seed_with_passphrase(mnemonic, &passphrase)?;
+    let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday)?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) =
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
+    }
+
+    println!("Account number: {}", created.number);
+    println!("Address: {}", created.unified_address);
     Ok(())
 }
 

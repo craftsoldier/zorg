@@ -19,17 +19,21 @@ Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provi
 
 | Command | Description |
 |---|---|
-| `zorg create [--name <n>] [--birthday <height>]` | Create a new Zcash wallet (name defaults to "Account 1"; birthday defaults to the current chain tip) |
-| `zorg import <mnemonic> [--passphrase <p>] [--name <n>]` | Import an existing wallet from its mnemonic |
-| `zorg accounts` | List all accounts in the wallet (uuid, name, address) |
-| `zorg balance [--account <uuid>]` | Show spendable, pending, and locked balances |
-| `zorg address [--account <uuid>]` | Get a unified receiving address |
+Accounts are numbered 1, 2, 3… — `--account` takes the number, never a UUID.
+
+| Command | Description |
+|---|---|
+| `zorg create [--birthday <height>]` | Create a new Zcash wallet ("Account 1"; birthday defaults to chain tip − 100) |
+| `zorg import <mnemonic> [--passphrase <p>]` | Import an existing wallet from its mnemonic |
+| `zorg accounts` | List all accounts (numbered) |
+| `zorg balance [--account <n>]` | Show spendable, pending, and locked balances |
+| `zorg address [--account <n>]` | Get a unified receiving address |
 | `zorg sync` | Sync your wallet with the blockchain |
 | `zorg status` | Check current sync status (scan height vs chain tip) |
-| `zorg send <to> <amount> [--memo <text>] [--account <uuid>]` | Send Zcash to an address (TAZ on testnet) |
-| `zorg history [--account <uuid>] [--limit <n>]` | View transaction history |
+| `zorg send <to> <amount> [--memo <text>] [--account <n>]` | Send Zcash to an address (TAZ on testnet) |
+| `zorg history [--account <n>] [--limit <n>]` | View transaction history |
 | `zorg validate <address>` | Validate a Zcash address |
-| `zorg delete <uuid>` | Delete an account from the wallet |
+| `zorg delete --account <n> [--yes]` | Delete an account (asks to confirm) |
 
 ### Global flags
 

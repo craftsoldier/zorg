@@ -11,7 +11,7 @@ use zcash_client_backend::data_api::{
     chain::ChainState, Account as _, AccountBirthday, WalletRead, WalletWrite,
 };
 use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
@@ -133,32 +133,6 @@ fn make_birthday(network: WalletNetwork, birthday_height: Option<u64>) -> Accoun
     }
 }
 
-fn zip32_account_id(account_index: u32) -> Result<zip32::AccountId, String> {
-    zip32::AccountId::try_from(account_index)
-        .map_err(|_| format!("Invalid ZIP32 account index: {account_index}"))
-}
-
-fn unified_spending_key_for_account(
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-    account_index: u32,
-) -> Result<UnifiedSpendingKey, String> {
-    let account_id = zip32_account_id(account_index)?;
-    UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), account_id)
-        .map_err(|e| format!("USK derivation failed for account {account_index}: {e:?}"))
-}
-
-fn software_account_ufvk(
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-    account_index: u32,
-) -> Result<UnifiedFullViewingKey, String> {
-    Ok(
-        unified_spending_key_for_account(network, seed, account_index)?
-            .to_unified_full_viewing_key(),
-    )
-}
-
 /// Init DB + create the bootstrap software account as Derived.
 /// This pins the DB seed fingerprint for seed-aware initialization, but the
 /// account may later be deleted like any other non-final account.
@@ -268,10 +242,7 @@ pub fn import_derived_account_at_index(
 ) -> Result<CreatedAccount, String> {
     let birthday = make_birthday(network, birthday_height);
     let account_id = zip32_account_id(account_index)?;
-    let ufvk = software_account_ufvk(network, seed, account_index)?;
-    let (ua, _di) = ufvk
-        .default_address(shielded_address_request())
-        .map_err(|e| format!("Failed to derive address: {e}"))?;
+    let address = default_address_for_account(network, seed, account_index)?;
 
     let account = with_wallet_db_write_lock("keys.import_derived_account_at_index", || {
         let mut db = open_wallet_db_for_mutation(db_path, network)?;
@@ -289,7 +260,7 @@ pub fn import_derived_account_at_index(
     Ok(CreatedAccount {
         uuid: account.id().expose_uuid().to_string(),
         number: account_index + 1,
-        unified_address: ua.encode(&network),
+        unified_address: address,
     })
 }
 
@@ -408,6 +379,12 @@ pub fn delete_account_by_number(
 ) -> Result<(), String> {
     let uuid = resolve_account_uuid(db_path, network, Some(number))?;
     delete_account(db_path, network, &uuid)
+}
+
+/// Parse an account UUID string into the backend's AccountUuid.
+pub fn parse_account_uuid(s: &str) -> Result<AccountUuid, String> {
+    let uuid = uuid::Uuid::parse_str(s).map_err(|e| format!("Invalid account UUID: {e}"))?;
+    Ok(AccountUuid::from_uuid(uuid))
 }
 
 /// Delete an account from the wallet database.
@@ -679,8 +656,7 @@ fn current_receive_address(
     Ok(address.encode(&network))
 }
 
-/// Returns the standard shielded address request (Orchard + Sapling, no transparent).
-/// This matches the behavior of zodl/Zashi wallets.
+/// True when a wallet database file exists at the path.
 pub fn wallet_exists(db_path: &str) -> bool {
     Path::new(db_path).exists()
 }
@@ -1414,6 +1390,78 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert!(accounts.iter().all(|account| account.name != "first"));
         assert_eq!(accounts[0].account_index, 1);
+    }
+
+    #[test]
+    fn test_create_testnet_wallet() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("wallet.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let phrase = generate_mnemonic();
+        let seed = mnemonic_to_seed(&phrase).unwrap();
+
+        let address = init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None)
+            .unwrap()
+            .unified_address;
+
+        assert!(
+            address.starts_with("utest1"),
+            "Expected utest1 prefix, got: {address}"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_address_from_same_seed() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let seed = mnemonic_to_seed(phrase).unwrap();
+
+        let temp1 = tempfile::tempdir().unwrap();
+        let db1 = temp1.path().join("wallet.db");
+        let addr1 =
+            init_db_and_create_account(db1.to_str().unwrap(), WalletNetwork::Main, &seed, None)
+                .unwrap()
+                .unified_address;
+
+        let temp2 = tempfile::tempdir().unwrap();
+        let db2 = temp2.path().join("wallet.db");
+        let addr2 =
+            init_db_and_create_account(db2.to_str().unwrap(), WalletNetwork::Main, &seed, None)
+                .unwrap()
+                .unified_address;
+
+        assert_eq!(addr1, addr2, "Same seed should produce same address");
+    }
+
+    #[test]
+    fn test_shielded_address_has_sapling_and_orchard_only() {
+        // Verify our address uses Sapling+Orchard receivers (no transparent),
+        // matching zodl/Zashi wallet behavior.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("wallet.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let phrase = generate_mnemonic();
+        let seed = mnemonic_to_seed(&phrase).unwrap();
+
+        let address = init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None)
+            .unwrap()
+            .unified_address;
+        // Decode and verify receiver types
+        let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();
+        let debug = format!("{:?}", za);
+        assert!(
+            debug.contains("Sapling"),
+            "UA should contain Sapling receiver"
+        );
+        assert!(
+            debug.contains("Orchard"),
+            "UA should contain Orchard receiver"
+        );
+        assert!(
+            !debug.contains("P2pkh"),
+            "UA should NOT contain transparent receiver"
+        );
     }
 
     fn seed_internal_sent_note_to_account(db_path: &str, from_uuid: &str, to_uuid: &str) {
