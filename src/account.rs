@@ -8,14 +8,12 @@ use rusqlite::{named_params, OptionalExtension};
 use secrecy::{ExposeSecret, SecretVec};
 
 use zcash_client_backend::data_api::{
-    chain::ChainState, Account as _, AccountBirthday, AccountPurpose, AccountSource, WalletRead,
-    WalletWrite, Zip32Derivation,
+    chain::ChainState, Account as _, AccountBirthday, WalletRead, WalletWrite,
 };
-use zcash_client_sqlite::{error::SqliteClientError, wallet::init::init_wallet_db, AccountUuid};
+use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
-use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
     db::{
@@ -27,20 +25,6 @@ use crate::{
 };
 
 use crate::keys::*;
-
-pub(crate) const DUPLICATE_SOFTWARE_ACCOUNT_MESSAGE: &str =
-    "This account is already in your wallet.";
-
-fn map_account_import_error(
-    error: SqliteClientError,
-    duplicate_message: &str,
-    fallback_prefix: &str,
-) -> String {
-    match error {
-        SqliteClientError::AccountCollision(_) => duplicate_message.to_string(),
-        other => format!("{fallback_prefix}: {other}"),
-    }
-}
 
 fn open_wallet_db_for_init(
     db_path: &str,
@@ -158,70 +142,6 @@ fn software_account_ufvk(
     )
 }
 
-fn import_ufvk_account(
-    db_path: &str,
-    network: WalletNetwork,
-    name: &str,
-    seed: &SecretVec<u8>,
-    birthday_height: Option<u64>,
-    account_index: u32,
-) -> Result<(String, String), String> {
-    let birthday = make_birthday(network, birthday_height);
-    let seed_fp = SeedFingerprint::from_seed(seed.expose_secret())
-        .ok_or("Invalid seed length for fingerprint")?;
-    let account_id = zip32_account_id(account_index)?;
-    let ufvk = software_account_ufvk(network, seed, account_index)?;
-    let derivation = Zip32Derivation::new(seed_fp, account_id);
-    let purpose = AccountPurpose::Spending {
-        derivation: Some(derivation),
-    };
-    let (ua, _di) = ufvk
-        .default_address(shielded_address_request())
-        .map_err(|e| format!("Failed to derive address: {e}"))?;
-
-    let account_id = with_wallet_db_write_lock("keys.import_ufvk_account", || {
-        let mut db = open_wallet_db_for_mutation(db_path, network)?;
-        let account = db
-            .import_account_ufvk(name, &ufvk, &birthday, purpose, None)
-            .map_err(|e| {
-                map_account_import_error(
-                    e,
-                    DUPLICATE_SOFTWARE_ACCOUNT_MESSAGE,
-                    "Failed to import account",
-                )
-            })?;
-        Ok::<_, String>(account.id())
-    })?;
-
-    Ok((account_id.expose_uuid().to_string(), ua.encode(&network)))
-}
-
-/// Add an additional account (from a different seed) to the wallet database.
-/// Uses import_account_ufvk with AccountPurpose::Spending so that accounts from
-/// different seeds can coexist in the same DB (create_account enforces single-seed).
-/// The first account should be created via init_db_and_create_account (Derived).
-pub fn add_account(
-    db_path: &str,
-    network: WalletNetwork,
-    name: &str,
-    seed: &SecretVec<u8>,
-    birthday_height: Option<u64>,
-) -> Result<(String, String), String> {
-    add_account_at_index(db_path, network, name, seed, birthday_height, 0)
-}
-
-/// Add a software account for a specific ZIP32 account index as an imported UFVK.
-pub fn add_account_at_index(
-    db_path: &str,
-    network: WalletNetwork,
-    name: &str,
-    seed: &SecretVec<u8>,
-    birthday_height: Option<u64>,
-    account_index: u32,
-) -> Result<(String, String), String> {
-    import_ufvk_account(db_path, network, name, seed, birthday_height, account_index)
-}
-
 /// Init DB + create the bootstrap software account as Derived.
 /// This pins the DB seed fingerprint for seed-aware initialization, but the
 /// account may later be deleted like any other non-final account.
@@ -233,7 +153,16 @@ pub fn init_db_and_create_account(
     birthday_height: Option<u64>,
     name: &str,
 ) -> Result<(String, String), String> {
-    ensure_db_initialized_with_seed(db_path, network, seed)?;
+    if let Err(e) = ensure_db_initialized_with_seed(db_path, network, seed) {
+        if wallet_exists(db_path) {
+            return Err(format!(
+                "A wallet already exists at {db_path} bound to a different seed. \
+                 One wallet file holds one seed; use `--db <path>` to open a separate wallet. \
+                 (Underlying error: {e})"
+            ));
+        }
+        return Err(e);
+    }
 
     let birthday = make_birthday(network, birthday_height);
 
@@ -283,14 +212,133 @@ pub fn import_derived_account_at_index(
     Ok((account.id().expose_uuid().to_string(), ua.encode(&network)))
 }
 
+#[derive(Debug)]
 pub struct AccountInfo {
-    pub uuid: String,
     pub name: String,
     pub unified_address: String,
-    pub is_seed_anchor: bool,
+    /// ZIP-32 derivation index, verbatim from the backend (`hd_account_index`).
+    /// The user-facing number is `account_index + 1`.
+    pub account_index: u32,
+    /// Height the wallet must scan from for this account.
+    pub birthday_height: u32,
 }
 
-/// List all accounts in the wallet database.
+/// Next free default account name: "Account 1", "Account 2", …
+/// Skips names already in use so a second account never collides with the first.
+pub fn next_account_name(db_path: &str, network: WalletNetwork) -> Result<String, String> {
+    let existing: HashSet<String> = if wallet_exists(db_path) {
+        list_accounts(db_path, network)?
+            .into_iter()
+            .map(|a| a.name)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let mut n = 1;
+    while existing.contains(&format!("Account {n}")) {
+        n += 1;
+    }
+    Ok(format!("Account {n}"))
+}
+
+/// Resolve an account number (1-based, as shown by `zorg accounts`) to
+/// `(uuid, name)`. The uuid is internal plumbing for the backend APIs.
+/// `None` means "the only account" and errors when ambiguous.
+pub fn resolve_account(
+    db_path: &str,
+    network: WalletNetwork,
+    number: Option<&str>,
+) -> Result<(String, String), String> {
+    let accounts = list_accounts(db_path, network)?;
+    let picked = pick_account(&accounts, number)?;
+    let uuid = uuid_for_index(db_path, network, picked.account_index)?;
+    Ok((uuid, picked.name.clone()))
+}
+
+/// The user-facing number of the account with the given uuid:
+/// `hd_account_index + 1`. Errors if the account does not exist or is not
+/// a numbered (seed-derived) account.
+pub fn account_number(db_path: &str, network: WalletNetwork, uuid: &str) -> Result<u32, String> {
+    let db = open_wallet_db_for_read(db_path, network)?;
+    let account_id = parse_account_uuid(uuid)?;
+    let account = db
+        .get_account(account_id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .ok_or_else(|| format!("Account {uuid} not found"))?;
+    let index = account
+        .source()
+        .key_derivation()
+        .map(|d| u32::from(d.account_index()))
+        .ok_or_else(|| format!("Account {uuid} has no account number"))?;
+    Ok(index + 1)
+}
+
+/// Internal: the backend uuid for a numbered account. Single-seed CLI wallets
+/// keep at most a handful of accounts, so a linear scan is fine.
+fn uuid_for_index(
+    db_path: &str,
+    network: WalletNetwork,
+    account_index: u32,
+) -> Result<String, String> {
+    let db = open_wallet_db_for_read(db_path, network)?;
+    for id in db
+        .get_account_ids()
+        .map_err(|e| format!("Failed to list accounts: {e}"))?
+    {
+        let account = db
+            .get_account(id)
+            .map_err(|e| format!("Failed to get account: {e}"))?
+            .ok_or("Account not found")?;
+        if let Some(d) = account.source().key_derivation() {
+            if u32::from(d.account_index()) == account_index {
+                return Ok(id.expose_uuid().to_string());
+            }
+        }
+    }
+    Err(format!("No account with index {account_index}"))
+}
+
+fn pick_account<'a>(
+    accounts: &'a [AccountInfo],
+    number: Option<&str>,
+) -> Result<&'a AccountInfo, String> {
+    let n = match number {
+        None => match accounts.len() {
+            0 => return Err("No accounts found. Run `zorg create`.".into()),
+            1 => 1,
+            _ => {
+                return Err(format!(
+                    "Multiple accounts; pass --account <number>. `zorg accounts` lists {}.",
+                    accounts.len()
+                ))
+            }
+        },
+        Some(raw) => {
+            let n = raw.parse::<usize>().map_err(|_| {
+                "Account must be a number (1, 2, 3…); `zorg accounts` lists them.".to_string()
+            })?;
+            if n == 0 {
+                return Err("Accounts are numbered from 1.".into());
+            }
+            n
+        }
+    };
+    match accounts.iter().find(|a| a.account_index as usize == n - 1) {
+        Some(account) => Ok(account),
+        None => {
+            let valid: Vec<String> = accounts
+                .iter()
+                .map(|a| (a.account_index + 1).to_string())
+                .collect();
+            Err(format!(
+                "No account #{n}; valid numbers: {}",
+                valid.join(", ")
+            ))
+        }
+    }
+}
+
+/// List all numbered (seed-derived) accounts in the wallet database.
 pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<AccountInfo>, String> {
     let db = open_wallet_db_for_read(db_path, network)?;
 
@@ -305,20 +353,25 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
             .map_err(|e| format!("Failed to get account: {e}"))?
             .ok_or_else(|| format!("Account not found: {}", id.expose_uuid()))?;
 
+        let source = account.source();
+        let Some(derivation) = source.key_derivation() else {
+            continue;
+        };
+
         let address = match account.ufvk() {
             Some(ufvk) => current_receive_address(&db, network, id, ufvk)?,
             None => String::new(),
         };
 
-        let source = account.source();
         accounts.push(AccountInfo {
-            uuid: id.expose_uuid().to_string(),
             name: account.name().unwrap_or("").to_string(),
             unified_address: address,
-            is_seed_anchor: matches!(source, AccountSource::Derived { .. }),
+            account_index: u32::from(derivation.account_index()),
+            birthday_height: u32::from(account.birthday_height()),
         });
     }
 
+    accounts.sort_by_key(|a| a.account_index);
     Ok(accounts)
 }
 
@@ -683,6 +736,76 @@ mod tests {
     }
 
     #[test]
+    fn derived_accounts_are_numbered_and_sorted() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path_str = temp_dir.path().join("wallet.db");
+        let db_path_str = db_path_str.to_str().unwrap();
+
+        assert_eq!(
+            next_account_name(db_path_str, WalletNetwork::Main).unwrap(),
+            "Account 1"
+        );
+
+        let phrase = generate_mnemonic();
+        let seed = mnemonic_to_seed(&phrase).unwrap();
+        let (uuid1, _) =
+            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 1")
+                .unwrap();
+
+        assert_eq!(
+            next_account_name(db_path_str, WalletNetwork::Main).unwrap(),
+            "Account 2"
+        );
+
+        // Same seed again: the backend derives the next ZIP-32 account.
+        let (uuid2, _) =
+            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 2")
+                .unwrap();
+        assert_ne!(uuid1, uuid2);
+
+        let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].name, "Account 1");
+        assert_eq!(accounts[0].account_index, 0);
+        assert_eq!(accounts[1].name, "Account 2");
+        assert_eq!(accounts[1].account_index, 1);
+        assert_eq!(accounts[1].account_index, 1);
+    }
+
+    #[test]
+    fn pick_account_is_strictly_numbers() {
+        let mk = |n: u32, name: &str| AccountInfo {
+            name: name.to_string(),
+            unified_address: String::new(),
+            account_index: n - 1,
+            birthday_height: 1,
+        };
+        let accounts = vec![mk(1, "Account 1"), mk(2, "Account 2")];
+
+        // numbers select positionally in the sorted listing
+        assert_eq!(
+            pick_account(&accounts, Some("2")).unwrap().name,
+            "Account 2"
+        );
+        // a bare reference resolves when the wallet has exactly one account
+        assert_eq!(
+            pick_account(&accounts[..1], None).unwrap().name,
+            "Account 1"
+        );
+        // strictly numbers: names and uuids are rejected, not matched
+        assert!(pick_account(&accounts, Some("Account 2")).is_err());
+        assert!(pick_account(&accounts, Some("00000002-0000-0000-0000-000000000000")).is_err());
+        assert!(pick_account(&accounts, Some("0")).is_err());
+        assert!(pick_account(&accounts, Some("9"))
+            .unwrap_err()
+            .contains("No account #9"));
+        assert!(pick_account(&accounts, None)
+            .unwrap_err()
+            .contains("--account"));
+        assert!(pick_account(&[], None).unwrap_err().contains("zorg create"));
+    }
+
+    #[test]
     fn test_get_address_returns_last_generated_receive_address() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
@@ -711,30 +834,8 @@ mod tests {
         );
         assert_eq!(
             renewed_address,
-            list_accounts(db_path_str, WalletNetwork::Main)
-                .unwrap()
-                .into_iter()
-                .find(|account| account.uuid == uuid)
-                .unwrap()
-                .unified_address
+            list_accounts(db_path_str, WalletNetwork::Main).unwrap()[0].unified_address
         );
-    }
-
-    #[test]
-    fn test_add_account_duplicate_seed_returns_user_message() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-
-        init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "first").unwrap();
-
-        let error = add_account(db_path_str, WalletNetwork::Main, "duplicate", &seed, None)
-            .expect_err("duplicate seed import should fail");
-
-        assert_eq!(error, DUPLICATE_SOFTWARE_ACCOUNT_MESSAGE);
     }
 
     #[test]
@@ -748,14 +849,14 @@ mod tests {
         init_db_and_create_account(db_path_str, WalletNetwork::Main, &first_seed, None, "first")
             .unwrap();
 
-        let second_phrase = generate_mnemonic();
-        let second_seed = mnemonic_to_seed(&second_phrase).unwrap();
-        let (second_uuid, _) = add_account(
+        // Second numbered account, derived from the same seed at index 1.
+        let (second_uuid, _) = import_derived_account_at_index(
             db_path_str,
             WalletNetwork::Main,
-            "second",
-            &second_seed,
+            &first_seed,
             None,
+            "second",
+            1,
         )
         .unwrap();
 
@@ -765,19 +866,12 @@ mod tests {
                 .len(),
             2
         );
-        let accounts_before_delete = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
-        assert!(accounts_before_delete
-            .iter()
-            .any(|account| account.name == "first" && account.is_seed_anchor));
-        assert!(accounts_before_delete
-            .iter()
-            .any(|account| account.name == "second" && !account.is_seed_anchor));
 
         delete_account(db_path_str, WalletNetwork::Main, &second_uuid).unwrap();
 
         let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
         assert_eq!(accounts.len(), 1);
-        assert!(accounts.iter().all(|account| account.uuid != second_uuid));
+        assert!(accounts.iter().all(|account| account.name != "second"));
     }
 
     // --- VZR-89: orphaned scan-range pruning -------------------------------
@@ -840,12 +934,13 @@ mod tests {
         let surviving_birthday = scan_min_birthday(db_path_str);
 
         let imported_seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
-        let (imported_uuid, _) = add_account(
+        let (imported_uuid, _) = import_derived_account_at_index(
             db_path_str,
             WalletNetwork::Main,
-            "imported-old",
             &imported_seed,
             Some(419_200),
+            "imported-old",
+            1,
         )
         .unwrap();
 
@@ -1363,12 +1458,13 @@ mod tests {
 
         let second_phrase = generate_mnemonic();
         let second_seed = mnemonic_to_seed(&second_phrase).unwrap();
-        let (second_uuid, _) = add_account(
+        let (second_uuid, _) = import_derived_account_at_index(
             db_path_str,
             WalletNetwork::Main,
-            "second",
             &second_seed,
             None,
+            "second",
+            1,
         )
         .unwrap();
 
@@ -1378,12 +1474,12 @@ mod tests {
 
         let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
         assert_eq!(accounts.len(), 1);
-        assert!(accounts.iter().all(|account| account.uuid != second_uuid));
+        assert!(accounts.iter().all(|account| account.name != "second"));
         assert_internal_sent_note_rewritten(db_path_str);
     }
 
     #[test]
-    fn test_delete_account_allows_last_seed_anchor_with_remaining_accounts() {
+    fn test_delete_account_allows_seed_anchor_with_remaining_accounts() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
         let db_path_str = db_path.to_str().unwrap();
@@ -1399,14 +1495,14 @@ mod tests {
         )
         .unwrap();
 
-        let second_phrase = generate_mnemonic();
-        let second_seed = mnemonic_to_seed(&second_phrase).unwrap();
-        add_account(
+        // A second numbered account derived from the same seed at index 1.
+        import_derived_account_at_index(
             db_path_str,
             WalletNetwork::Main,
-            "second",
-            &second_seed,
+            &first_seed,
             None,
+            "second",
+            1,
         )
         .unwrap();
 
@@ -1414,8 +1510,8 @@ mod tests {
 
         let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
         assert_eq!(accounts.len(), 1);
-        assert!(accounts.iter().all(|account| account.uuid != first_uuid));
-        assert!(accounts.iter().all(|account| !account.is_seed_anchor));
+        assert!(accounts.iter().all(|account| account.name != "first"));
+        assert_eq!(accounts[0].account_index, 1);
     }
 
     fn seed_internal_sent_note_to_account(db_path: &str, from_uuid: &str, to_uuid: &str) {

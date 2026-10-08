@@ -119,6 +119,26 @@ pub fn create_wallet(
     })
 }
 
+/// Use the caller-provided name if given (trimmed, 1–20 chars — vizor's policy);
+/// otherwise pick the next free "Account N" so accounts never collide.
+fn default_or_validated_name(
+    account_name: Option<&str>,
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<String, String> {
+    match account_name {
+        Some(name) => {
+            let trimmed = name.trim();
+            let count = trimmed.chars().count();
+            if !(1..=20).contains(&count) {
+                return Err("Account name must be 1-20 characters".into());
+            }
+            Ok(trimmed.to_string())
+        }
+        None => crate::account::next_account_name(db_path, network),
+    }
+}
+
 /// Import a wallet from a mnemonic phrase.
 pub fn import_wallet(
     mnemonic: &str,
@@ -130,9 +150,9 @@ pub fn import_wallet(
 ) -> Result<WalletImportResult, String> {
     let network = parse_network(network_str)?;
     let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
-    let name = account_name.unwrap_or("Account 1");
+    let name = default_or_validated_name(account_name, db_path, network)?;
     let (account_uuid, unified_address) =
-        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+        init_db_and_create_account(db_path, network, &seed, birthday_height, &name)?;
     #[cfg(target_os = "macos")]
     if let Err(e) =
         crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, mnemonic)
@@ -143,21 +163,6 @@ pub fn import_wallet(
         unified_address,
         account_uuid,
     })
-}
-
-/// Get the unified address for an account.
-pub fn get_unified_address(
-    db_path: &str,
-    network_str: &str,
-    account_uuid: &str,
-) -> Result<String, String> {
-    let network = parse_network(network_str)?;
-    let accounts = list_accounts(db_path, network)?;
-    accounts
-        .into_iter()
-        .find(|a| a.uuid == account_uuid)
-        .map(|a| a.unified_address)
-        .ok_or_else(|| format!("Account {account_uuid} not found"))
 }
 
 /// Validate a mnemonic phrase.
