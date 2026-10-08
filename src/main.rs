@@ -10,8 +10,8 @@ USAGE:
     zorg <command> [options]
 
 COMMANDS:
-    create [--name <name>] [--birthday <height>]       Create a wallet (default birthday: chain tip − 100)
-    import <mnemonic> [--passphrase <p>] [--name <n>]   Import from mnemonic
+    create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100)
+    import <mnemonic> [--passphrase <p>]                Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
     address [--account <n>]                             Show receive address
@@ -266,7 +266,6 @@ fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
 }
 
 fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Result<(), String> {
-    let name = flag_str(opts, "--name");
     let birthday_arg = opts
         .iter()
         .position(|arg| arg == "--birthday")
@@ -279,10 +278,9 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let birthday = resolve_create_birthday(birthday_arg.as_deref(), || {
         zorg::sync_engine::get_latest_block_height(lwd_url)
     })?;
-    let result = keys::create_wallet(net.as_str(), db, Some(birthday), name.as_deref())?;
+    let result = keys::create_wallet(net.as_str(), db, Some(birthday))?;
     println!("Mnemonic (save this!): {}", result.mnemonic);
-    let n = zorg::account::account_number(db, net, &result.account_uuid)?;
-    println!("Account number: {n}");
+    println!("Account number: {}", result.account_number);
     println!("Address: {}", result.unified_address);
     Ok(())
 }
@@ -322,20 +320,11 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     let positional: Vec<&String> = opts.iter().filter(|a| !a.starts_with("--")).collect();
     let mnemonic = positional
         .first()
-        .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>] [--name <n>]")?;
+        .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>]")?;
     let passphrase = flag_str(opts, "--passphrase").unwrap_or_default();
-    let name = flag_str(opts, "--name");
     let birthday = flag_u64(opts, "--birthday");
-    let result = keys::import_wallet(
-        mnemonic,
-        &passphrase,
-        birthday,
-        net.as_str(),
-        db,
-        name.as_deref(),
-    )?;
-    let n = zorg::account::account_number(db, net, &result.account_uuid)?;
-    println!("Account number: {n}");
+    let result = keys::import_wallet(mnemonic, &passphrase, birthday, net.as_str(), db)?;
+    println!("Account number: {}", result.account_number);
     println!("Address: {}", result.unified_address);
     Ok(())
 }
