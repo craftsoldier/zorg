@@ -14,7 +14,6 @@ use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
-use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
     db::{
@@ -169,17 +168,16 @@ fn account_name_for_index(account_index: u32) -> String {
     format!("Account {}", account_index + 1)
 }
 
-/// Mirror of the backend's rule: the next derived account index for a seed is
-/// MAX(hd_account_index) + 1, or 0 when the seed has no derived accounts yet.
-fn next_derived_index(db_path: &str, seed: &SecretVec<u8>) -> Result<u32, String> {
-    let fingerprint = SeedFingerprint::from_seed(seed.expose_secret())
-        .ok_or("Invalid seed length for fingerprint")?;
+/// The next derived account index is MAX(hd_account_index) + 1, or 0 when
+/// the wallet has no derived accounts yet. (One wallet file binds one seed,
+/// so no per-seed scoping is needed.)
+fn next_derived_index(db_path: &str) -> Result<u32, String> {
     let conn = open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?;
     let next: u32 = conn
         .query_row(
             "SELECT COALESCE(MAX(hd_account_index) + 1, 0) FROM accounts \
-             WHERE hd_seed_fingerprint = :fingerprint",
-            named_params! {":fingerprint": fingerprint.to_bytes()},
+             WHERE hd_account_index IS NOT NULL",
+            [],
             |row| row.get(0),
         )
         .map_err(|e| format!("Failed to read account index: {e}"))?;
@@ -215,7 +213,7 @@ pub fn init_db_and_create_account(
 
         // The backend derives the new account at MAX(hd_account_index)+1 for
         // this seed; compute it up front so the name and reported number match.
-        let next_index = next_derived_index(db_path, seed)?;
+        let next_index = next_derived_index(db_path)?;
 
         // The bootstrap account uses create_account (Derived) so initial
         // seed-aware DB setup records the seed fingerprint.
