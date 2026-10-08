@@ -32,8 +32,8 @@ use zcash_protocol::{
     memo::{Memo, MemoBytes},
 };
 
+use crate::account::parse_account_uuid;
 use crate::db::with_wallet_db_write_lock;
-use crate::keys::parse_account_uuid;
 use crate::network::WalletNetwork;
 
 use super::{open_readonly_conn, open_wallet_db, open_wallet_db_for_read};

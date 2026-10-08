@@ -29,8 +29,8 @@ use zcash_protocol::{
     PoolType, ShieldedPool,
 };
 
+use crate::account::parse_account_uuid;
 use crate::db::{with_wallet_db_write_lock, WalletDatabase};
-use crate::keys::parse_account_uuid;
 use crate::network::WalletNetwork;
 use crate::sync::{
     consume_stored_proposal, finish_stored_proposal, open_readonly_conn, open_wallet_db,
