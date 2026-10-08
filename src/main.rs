@@ -146,8 +146,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "balance" => cmd_balance(&db, net, opts),
         "address" => {
-            let uuid = zorg::account::resolve_account_uuid(&db, net, account_number_opt(opts)?)?;
-            let addr = zorg::account::get_address_from_db(&db, net, &uuid)?;
+            let addr =
+                zorg::account::account_address_by_number(&db, net, account_number_opt(opts)?)?;
             println!("{addr}");
             Ok(())
         }
@@ -317,7 +317,7 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
 fn cmd_delete(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
     let number = account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
     let confirmed = opts.iter().any(|a| a == "--yes");
-    let address = zorg::account::account_address_by_number(db, net, number)?;
+    let address = zorg::account::account_address_by_number(db, net, Some(number))?;
     if !confirmed {
         println!("This deletes Account {number} ({address}).");
         println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
