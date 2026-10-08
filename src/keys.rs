@@ -78,86 +78,62 @@ pub fn shielded_address_request() -> UnifiedAddressRequest {
 pub struct WalletCreationResult {
     pub mnemonic: String,
     pub unified_address: String,
-    pub account_uuid: String,
+    pub account_number: u32,
 }
 
 pub struct WalletImportResult {
     pub unified_address: String,
-    pub account_uuid: String,
-}
-
-pub struct AccountCreationResult {
-    pub unified_address: String,
-    pub account_uuid: String,
+    pub account_number: u32,
 }
 
 // ======================== Convenience Functions ========================
 
 /// Create a new wallet: generate mnemonic, derive seed, create first account.
+/// The bootstrap account is always "Account 1" (index 0).
 pub fn create_wallet(
     network_str: &str,
     db_path: &str,
     birthday_height: Option<u64>,
-    account_name: Option<&str>,
 ) -> Result<WalletCreationResult, String> {
     let network = parse_network(network_str)?;
     let mnemonic = generate_mnemonic();
     let seed = mnemonic_to_seed(&mnemonic)?;
-    let name = account_name.unwrap_or("Account 1");
-    let (account_uuid, unified_address) =
-        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
     #[cfg(target_os = "macos")]
     if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, &mnemonic)
+        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, &mnemonic)
     {
         log::warn!("Failed to store mnemonic in keychain: {e}");
     }
     Ok(WalletCreationResult {
         mnemonic,
-        unified_address,
-        account_uuid,
+        unified_address: created.unified_address,
+        account_number: created.number,
     })
 }
 
 /// Import a wallet from a mnemonic phrase.
+/// The bootstrap account is always "Account 1" (index 0).
 pub fn import_wallet(
     mnemonic: &str,
     bip39_passphrase: &str,
     birthday_height: Option<u64>,
     network_str: &str,
     db_path: &str,
-    account_name: Option<&str>,
 ) -> Result<WalletImportResult, String> {
     let network = parse_network(network_str)?;
     let seed = mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)?;
-    let name = account_name.unwrap_or("Account 1");
-    let (account_uuid, unified_address) =
-        init_db_and_create_account(db_path, network, &seed, birthday_height, name)?;
+    let created = init_db_and_create_account(db_path, network, &seed, birthday_height)?;
     #[cfg(target_os = "macos")]
     if let Err(e) =
-        crate::secret_store::store_mnemonic_in_macos_keychain(network, &account_uuid, mnemonic)
+        crate::secret_store::store_mnemonic_in_macos_keychain(network, &created.uuid, mnemonic)
     {
         log::warn!("Failed to store mnemonic in keychain: {e}");
     }
     Ok(WalletImportResult {
-        unified_address,
-        account_uuid,
+        unified_address: created.unified_address,
+        account_number: created.number,
     })
-}
-
-/// Get the unified address for an account.
-pub fn get_unified_address(
-    db_path: &str,
-    network_str: &str,
-    account_uuid: &str,
-) -> Result<String, String> {
-    let network = parse_network(network_str)?;
-    let accounts = list_accounts(db_path, network)?;
-    accounts
-        .into_iter()
-        .find(|a| a.uuid == account_uuid)
-        .map(|a| a.unified_address)
-        .ok_or_else(|| format!("Account {account_uuid} not found"))
 }
 
 /// Validate a mnemonic phrase.
@@ -233,9 +209,9 @@ mod tests {
         let phrase = generate_mnemonic();
         let seed = mnemonic_to_seed(&phrase).unwrap();
 
-        let (_, address) =
-            init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None, "test")
-                .unwrap();
+        let address = init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None)
+            .unwrap()
+            .unified_address;
 
         assert!(
             address.starts_with("utest1"),
@@ -250,25 +226,17 @@ mod tests {
 
         let temp1 = tempfile::tempdir().unwrap();
         let db1 = temp1.path().join("wallet.db");
-        let (_, addr1) = init_db_and_create_account(
-            db1.to_str().unwrap(),
-            WalletNetwork::Main,
-            &seed,
-            None,
-            "test",
-        )
-        .unwrap();
+        let addr1 =
+            init_db_and_create_account(db1.to_str().unwrap(), WalletNetwork::Main, &seed, None)
+                .unwrap()
+                .unified_address;
 
         let temp2 = tempfile::tempdir().unwrap();
         let db2 = temp2.path().join("wallet.db");
-        let (_, addr2) = init_db_and_create_account(
-            db2.to_str().unwrap(),
-            WalletNetwork::Main,
-            &seed,
-            None,
-            "test",
-        )
-        .unwrap();
+        let addr2 =
+            init_db_and_create_account(db2.to_str().unwrap(), WalletNetwork::Main, &seed, None)
+                .unwrap()
+                .unified_address;
 
         assert_eq!(addr1, addr2, "Same seed should produce same address");
     }
@@ -284,9 +252,9 @@ mod tests {
         let phrase = generate_mnemonic();
         let seed = mnemonic_to_seed(&phrase).unwrap();
 
-        let (_, address) =
-            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "test")
-                .unwrap();
+        let address = init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None)
+            .unwrap()
+            .unified_address;
         // Decode and verify receiver types
         let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();
         let debug = format!("{:?}", za);

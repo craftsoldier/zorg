@@ -10,17 +10,21 @@ USAGE:
     zorg <command> [options]
 
 COMMANDS:
-    create [--name <name>] [--birthday <height>]       Create a wallet (default birthday: chain tip − 100)
-    import <mnemonic> [--passphrase <p>] [--name <n>]   Import from mnemonic
-    accounts                                           List accounts
-    balance [--account <uuid>]                          Show balance
-    address [--account <uuid>]                          Show receive address
+    create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100)
+    import <mnemonic> [--passphrase <p>]                Import from mnemonic
+    accounts                                           List accounts (numbered)
+    balance [--account <n>]                             Show balance
+    address [--account <n>]                             Show receive address
     sync                                                Sync with the chain
     status                                              Show sync progress
-    send <to> <amount> [--memo <text>] [--account <uuid>] Send ZEC (TAZ on testnet)
-    history [--limit <n>] [--account <uuid>]            Show transaction history
+    send <to> <amount> [--memo <text>] [--account <n>]  Send ZEC (TAZ on testnet)
+    history [--limit <n>] [--account <n>]               Show transaction history
     validate <address>                                  Validate a Zcash address
-    delete <uuid>                                       Delete an account
+    delete --account <n> [--yes]                        Delete an account (asks to confirm)
+
+Accounts are numbered 1, 2, 3…; `zorg accounts` lists them. Commands that touch
+a specific account take `--account <n>`; with one account you can omit it
+(except `delete`, which always requires it).
 
 OPTIONS:
     --db <path>          Wallet database path (default: ~/.zorg/wallet.db)
@@ -125,15 +129,25 @@ fn run(args: &[String]) -> Result<(), String> {
         "create" => cmd_create(&db, net, &lwd_url, opts),
         "import" => cmd_import(&db, net, opts),
         "accounts" => {
-            for a in zorg::account::list_accounts(&db, net)? {
-                println!("  {}  {:<20}  {}", a.uuid, a.name, a.unified_address);
+            let accounts = zorg::account::list_accounts(&db, net)?;
+            if accounts.is_empty() {
+                println!("No accounts yet. Run `zorg create` to make one.");
+                return Ok(());
+            }
+            for a in &accounts {
+                println!(
+                    "  {:>2}  {:<20}  {}",
+                    a.account_index + 1,
+                    a.name,
+                    a.unified_address
+                );
             }
             Ok(())
         }
         "balance" => cmd_balance(&db, net, opts),
         "address" => {
-            let account = flag_str(opts, "--account");
-            let addr = zorg::account::get_address_from_db(&db, net, account.as_deref())?;
+            let uuid = zorg::account::resolve_account_uuid(&db, net, account_number_opt(opts)?)?;
+            let addr = zorg::account::get_address_from_db(&db, net, &uuid)?;
             println!("{addr}");
             Ok(())
         }
@@ -162,9 +176,18 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "delete" => {
-            let uuid = opts.first().ok_or("Usage: zorg delete <uuid>")?;
-            zorg::account::delete_account(&db, net, uuid)?;
-            println!("Account deleted.");
+            let number =
+                account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
+            let confirmed = opts.iter().any(|a| a == "--yes");
+            let uuid = zorg::account::resolve_account_uuid(&db, net, Some(number))?;
+            let address = zorg::account::get_address_from_db(&db, net, &uuid)?;
+            if !confirmed {
+                println!("This deletes Account {number} ({address}).");
+                println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
+                return Ok(());
+            }
+            zorg::account::delete_account(&db, net, &uuid)?;
+            println!("Account {number} deleted.");
             Ok(())
         }
         _ => {
@@ -242,7 +265,6 @@ fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
 }
 
 fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Result<(), String> {
-    let name = flag_str(opts, "--name").unwrap_or("Account 1".into());
     let birthday_arg = opts
         .iter()
         .position(|arg| arg == "--birthday")
@@ -255,9 +277,9 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let birthday = resolve_create_birthday(birthday_arg.as_deref(), || {
         zorg::sync_engine::get_latest_block_height(lwd_url)
     })?;
-    let result = keys::create_wallet(net.as_str(), db, Some(birthday), Some(&name))?;
+    let result = keys::create_wallet(net.as_str(), db, Some(birthday))?;
     println!("Mnemonic (save this!): {}", result.mnemonic);
-    println!("Account UUID: {}", result.account_uuid);
+    println!("Account number: {}", result.account_number);
     println!("Address: {}", result.unified_address);
     Ok(())
 }
@@ -297,28 +319,17 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     let positional: Vec<&String> = opts.iter().filter(|a| !a.starts_with("--")).collect();
     let mnemonic = positional
         .first()
-        .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>] [--name <n>]")?;
+        .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>]")?;
     let passphrase = flag_str(opts, "--passphrase").unwrap_or_default();
-    let name = flag_str(opts, "--name").unwrap_or("Account 1".into());
     let birthday = flag_u64(opts, "--birthday");
-    let result = keys::import_wallet(
-        mnemonic,
-        &passphrase,
-        birthday,
-        net.as_str(),
-        db,
-        Some(&name),
-    )?;
-    println!("Account UUID: {}", result.account_uuid);
+    let result = keys::import_wallet(mnemonic, &passphrase, birthday, net.as_str(), db)?;
+    println!("Account number: {}", result.account_number);
     println!("Address: {}", result.unified_address);
     Ok(())
 }
 
 fn cmd_balance(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
-    let uuid = match flag_str(opts, "--account") {
-        Some(u) => u,
-        None => first_account_uuid(db, net)?,
-    };
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let bal = sync::get_wallet_balance(db, net, &uuid)?;
     println!("Spendable:  {}", fmt_zec(bal.spendable, net));
     println!(
@@ -349,10 +360,7 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
         .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
     let amount_zat = parse_zatoshi_amount(amount_str)?;
     let memo = flag_str(opts, "--memo");
-    let uuid = match flag_str(opts, "--account") {
-        Some(u) => u,
-        None => first_account_uuid(db, net)?,
-    };
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
     let proposal = sync::propose_send(
@@ -384,10 +392,7 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
 }
 
 fn cmd_history(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
-    let uuid = match flag_str(opts, "--account") {
-        Some(u) => u,
-        None => first_account_uuid(db, net)?,
-    };
+    let uuid = zorg::account::resolve_account_uuid(db, net, account_number_opt(opts)?)?;
     let limit = flag_u64(opts, "--limit").map(|n| n as u32);
     let txs = sync::get_transaction_history(db, net, limit, &uuid)?;
     if txs.is_empty() {
@@ -427,11 +432,17 @@ fn flag_u64(opts: &[String], flag: &str) -> Option<u64> {
     flag_str(opts, flag)?.parse().ok()
 }
 
-fn first_account_uuid(db: &str, net: WalletNetwork) -> Result<String, String> {
-    zorg::account::list_accounts(db, net)?
-        .first()
-        .map(|a| a.uuid.clone())
-        .ok_or_else(|| "No accounts found. Run `zorg create`.".into())
+/// `--account <n>` from the flags, parsed at the UI boundary. `None` = not given.
+fn account_number_opt(opts: &[String]) -> Result<Option<u32>, String> {
+    match flag_str(opts, "--account") {
+        None => Ok(None),
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(n) => Ok(Some(n)),
+            Err(_) => {
+                Err("Account must be a number (1, 2, 3…); `zorg accounts` lists them.".into())
+            }
+        },
+    }
 }
 
 /// Testnet (and regtest) coins are worthless by design — say so.
@@ -673,6 +684,7 @@ mod tests {
     use super::{
         fmt_zec, parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
     };
+    use zorg::network::WalletNetwork;
 
     #[test]
     fn amounts_are_labeled_per_network() {
@@ -683,7 +695,6 @@ mod tests {
             "0.29000000 TAZ"
         );
     }
-    use zorg::network::WalletNetwork;
 
     #[test]
     fn send_amounts_are_exact_and_invalid_values_are_rejected() {

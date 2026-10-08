@@ -555,7 +555,6 @@ mod tests {
             WalletNetwork::Regtest,
             &seed,
             Some(1_000),
-            "test",
         )
         .unwrap();
         crate::sync::update_chain_tip(db_path, WalletNetwork::Regtest, 1_100).unwrap();
