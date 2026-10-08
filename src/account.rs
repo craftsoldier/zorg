@@ -168,6 +168,18 @@ fn account_name_for_index(account_index: u32) -> String {
     format!("Account {}", account_index + 1)
 }
 
+/// Current receive address for a numbered account.
+pub fn account_address_by_number(
+    db_path: &str,
+    network: WalletNetwork,
+    number: u32,
+) -> Result<String, String> {
+    let accounts = list_accounts(db_path, network)?;
+    let picked = pick_account(&accounts, Some(number))?;
+    let uuid = uuid_for_index(db_path, network, picked.account_index)?;
+    get_address_from_db(db_path, network, &uuid)
+}
+
 /// The next derived account index is MAX(hd_account_index) + 1, or 0 when
 /// the wallet has no derived accounts yet. (One wallet file binds one seed,
 /// so no per-seed scoping is needed.)
@@ -395,6 +407,18 @@ pub fn list_account_uuids_from_db(db_path: &str) -> Result<Vec<String>, String> 
         uuids.push(uuid.to_string());
     }
     Ok(uuids)
+}
+
+/// Delete the account with the given number.
+/// Resolves fresh at call time, so it always targets the account the number
+/// currently points at.
+pub fn delete_account_by_number(
+    db_path: &str,
+    network: WalletNetwork,
+    number: u32,
+) -> Result<(), String> {
+    let uuid = resolve_account_uuid(db_path, network, Some(number))?;
+    delete_account(db_path, network, &uuid)
 }
 
 /// Delete an account from the wallet database.

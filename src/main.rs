@@ -179,14 +179,13 @@ fn run(args: &[String]) -> Result<(), String> {
             let number =
                 account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
             let confirmed = opts.iter().any(|a| a == "--yes");
-            let uuid = zorg::account::resolve_account_uuid(&db, net, Some(number))?;
-            let address = zorg::account::get_address_from_db(&db, net, &uuid)?;
+            let address = zorg::account::account_address_by_number(&db, net, number)?;
             if !confirmed {
                 println!("This deletes Account {number} ({address}).");
                 println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
                 return Ok(());
             }
-            zorg::account::delete_account(&db, net, &uuid)?;
+            zorg::account::delete_account_by_number(&db, net, number)?;
             println!("Account {number} deleted.");
             Ok(())
         }
