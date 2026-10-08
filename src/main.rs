@@ -175,20 +175,7 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("Valid: {t}");
             Ok(())
         }
-        "delete" => {
-            let number =
-                account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
-            let confirmed = opts.iter().any(|a| a == "--yes");
-            let address = zorg::account::account_address_by_number(&db, net, number)?;
-            if !confirmed {
-                println!("This deletes Account {number} ({address}).");
-                println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
-                return Ok(());
-            }
-            zorg::account::delete_account_by_number(&db, net, number)?;
-            println!("Account {number} deleted.");
-            Ok(())
-        }
+        "delete" => cmd_delete(&db, net, opts),
         _ => {
             eprint!("{USAGE}");
             Err(format!("Unknown command: {cmd}"))
@@ -324,6 +311,20 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     let result = keys::import_wallet(mnemonic, &passphrase, birthday, net.as_str(), db)?;
     println!("Account number: {}", result.account_number);
     println!("Address: {}", result.unified_address);
+    Ok(())
+}
+
+fn cmd_delete(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
+    let number = account_number_opt(opts)?.ok_or("Usage: zorg delete --account <n> [--yes]")?;
+    let confirmed = opts.iter().any(|a| a == "--yes");
+    let address = zorg::account::account_address_by_number(db, net, number)?;
+    if !confirmed {
+        println!("This deletes Account {number} ({address}).");
+        println!("Re-run with `zorg delete --account {number} --yes` to confirm.");
+        return Ok(());
+    }
+    zorg::account::delete_account_by_number(db, net, number)?;
+    println!("Account {number} deleted.");
     Ok(())
 }
 
