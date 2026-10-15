@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretVec};
 
 use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
@@ -19,7 +19,7 @@ use zcash_client_backend::{
     wallet::{LockOwner, OvkPolicy},
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_client_sqlite::{util::SystemClock, AccountUuid, ReceivedNoteId};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
@@ -273,7 +273,7 @@ pub fn propose_send(
             .map(|s| u64::from(s.balance().fee_required()))
             .sum();
 
-        let lock_owner = LockOwner::random(&mut OsRng);
+        let lock_owner = LockOwner::random(&mut UnwrapErr(SysRng));
         let lock_expiry =
             send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
@@ -507,6 +507,8 @@ async fn execute_stored(
         >(
             &mut db,
             &network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &spend_prover,
             &output_prover,
             &SpendingKeys::from_unified_spending_key(usk),

@@ -53,7 +53,8 @@ impl Parameters for WalletNetwork {
                 | NetworkUpgrade::Nu6
                 | NetworkUpgrade::Nu6_1
                 | NetworkUpgrade::Nu6_2
-                | NetworkUpgrade::Nu6_3 => Some(BlockHeight::from_u32(1)),
+                | NetworkUpgrade::Nu6_3
+                | NetworkUpgrade::Nu7 => Some(BlockHeight::from_u32(1)),
             },
         }
     }

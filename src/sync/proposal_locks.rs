@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use rusqlite::{params, Connection};
 use zcash_client_backend::{
     data_api::{OutputLockStore, WalletRead},
@@ -30,7 +30,7 @@ type PreviousSessionLocks = BTreeMap<LockOwner, (u32, bool, Vec<OutputRef>)>;
 
 static PROCESS_SESSION_ID: LazyLock<[u8; 16]> = LazyLock::new(|| {
     let mut bytes = [0; 16];
-    OsRng.fill_bytes(&mut bytes);
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
     bytes
 });
 
