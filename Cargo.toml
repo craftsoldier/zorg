@@ -17,16 +17,16 @@ name = "zorg"
 path = "src/main.rs"
 
 [dependencies]
-sapling-crypto = { version = "0.7", default-features = false, features = ["circuit"] }
+sapling-crypto = { version = "0.9", default-features = false, features = ["circuit"] }
 uuid = "1.1"
-zip32 = "0.2"
+zip32 = "0.3"
 
 # Key generation
 bip0039 = "0.12"
 
 # Serialization
 nonempty = "0.11"
-shardtree = "0.7"
+shardtree = "0.8"
 
 # Security
 secrecy = "0.8"
@@ -34,7 +34,7 @@ zeroize = "1"
 blake2b_simd = "1"
 
 # Random number generation
-rand = "0.8"
+rand = "0.10"
 
 # Async runtime & gRPC
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
@@ -56,24 +56,24 @@ hex = "0.4"
 
 # Zcash core
 [dependencies.zcash_primitives]
-version = "0.30.0"
+version = "0.31.0-pre.2"
 
 [dependencies.zcash_address]
-version = "0.13.0"
+version = "0.14.0-pre.2"
 
 [dependencies.zcash_keys]
-version = "0.16.0"
+version = "0.17.0-pre.2"
 features = ["orchard"]
 
 [dependencies.zcash_protocol]
-version = "0.10.1"
+version = "0.11.0-pre.1"
 
 [dependencies.transparent]
 package = "zcash_transparent"
-version = "0.10.0"
+version = "0.11.0-pre.2"
 
 [dependencies.zcash_client_backend]
-version = "0.24.0-rc.7"
+version = "0.25.0-pre.2"
 features = [
     "orchard",
     "transparent-inputs",
@@ -83,20 +83,20 @@ features = [
 ]
 
 [dependencies.zcash_client_sqlite]
-version = "0.22.0-rc.7"
+version = "0.23.0-pre.2"
 features = ["orchard", "transparent-inputs", "unstable", "serde"]
 
 # Keep Orchard aligned with the released librustzcash family
 # to avoid type conflicts.
 [dependencies.orchard]
-version = "0.15.4"
+version = "0.16.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
 
 [dev-dependencies]
 tempfile = "3"
-incrementalmerkletree = "0.8"
+incrementalmerkletree = "0.9"
 hex = "0.4"
 rusqlite = "0.37"
 

@@ -122,9 +122,10 @@ pub(super) async fn run_enhancement(
                             }
                             if matches!(req, TransactionDataRequest::GetStatus(_)) {
                                 let status = transaction_status_from_raw_height(raw.height)?;
+                                let txid = *txid;
                                 if let Err(e) = with_wallet_db_write_lock(
                                     "sync_engine.enhance.set_transaction_status",
-                                    || db.set_transaction_status(*txid, status),
+                                    || db.set_transaction_status(txid, status),
                                 ) {
                                     log::error!("sync: set_transaction_status failed: {e}");
                                 }
@@ -136,11 +137,12 @@ pub(super) async fn run_enhancement(
                                     "sync: get_transaction did not recognize {txid_str}: {e}"
                                 );
                                 failed_txids.insert(txid_str);
+                                let txid = *txid;
                                 if let Err(e) = with_wallet_db_write_lock(
                                     "sync_engine.enhance.set_transaction_status",
                                     || {
                                         db.set_transaction_status(
-                                            *txid,
+                                            txid,
                                             TransactionStatus::TxidNotRecognized,
                                         )
                                     },

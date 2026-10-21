@@ -6,12 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use zcash_client_sqlite::{util::SystemClock, WalletDb};
 
 use crate::network::WalletNetwork;
 
-pub(crate) type WalletDatabase = WalletDb<rusqlite::Connection, WalletNetwork, SystemClock, OsRng>;
+pub(crate) type WalletDatabase =
+    WalletDb<rusqlite::Connection, WalletNetwork, SystemClock, UnwrapErr<SysRng>>;
 
 /// User-driven wallet operations can afford a longer wait for a short sync write.
 pub(crate) const WALLET_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -50,7 +51,12 @@ pub(crate) fn open_wallet_db_with_timeout(
     let conn = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open wallet DB: {e}"))?;
     configure_wallet_connection(&conn, timeout, true)?;
-    Ok(WalletDb::from_connection(conn, network, SystemClock, OsRng))
+    Ok(WalletDb::from_connection(
+        conn,
+        network,
+        SystemClock,
+        UnwrapErr(SysRng),
+    ))
 }
 
 pub(crate) fn open_wallet_db_for_read_with_timeout(
@@ -61,7 +67,12 @@ pub(crate) fn open_wallet_db_for_read_with_timeout(
     let conn = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open wallet DB: {e}"))?;
     configure_wallet_connection(&conn, timeout, false)?;
-    Ok(WalletDb::from_connection(conn, network, SystemClock, OsRng))
+    Ok(WalletDb::from_connection(
+        conn,
+        network,
+        SystemClock,
+        UnwrapErr(SysRng),
+    ))
 }
 
 pub(crate) fn open_wallet_raw_conn_with_timeout(
