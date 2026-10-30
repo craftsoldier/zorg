@@ -24,7 +24,7 @@ Accounts are numbered 1, 2, 3… — `--account` takes the number, never a UUID.
 | Command | Description |
 |---|---|
 | `zorg create [--birthday <height>]` | Create a new Zcash wallet ("Account 1"; birthday defaults to chain tip − 100) |
-| `zorg import <mnemonic>` | Import an existing wallet from its mnemonic |
+| `zorg import [--birthday <height>]` | Import an existing wallet from its mnemonic |
 | `zorg accounts` | List all accounts (numbered) |
 | `zorg balance [--account <n>]` | Show spendable, pending, and locked balances |
 | `zorg address [--account <n>]` | Get a unified receiving address |
