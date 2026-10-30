@@ -2,7 +2,6 @@ pub mod account;
 pub(crate) mod db;
 pub mod keys;
 pub mod network;
-#[cfg(target_os = "macos")]
 pub mod secret_store;
 pub mod sync;
 pub mod sync_engine;

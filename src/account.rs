@@ -387,24 +387,6 @@ pub fn parse_account_uuid(s: &str) -> Result<AccountUuid, String> {
     Ok(AccountUuid::from_uuid(uuid))
 }
 
-/// The ZIP-32 fingerprint of the seed an account is derived from.
-pub fn seed_fingerprint_for_account(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<zip32::fingerprint::SeedFingerprint, String> {
-    let db = open_wallet_db_for_read(db_path, network)?;
-    let account = db
-        .get_account(parse_account_uuid(account_uuid)?)
-        .map_err(|e| format!("Failed to get account: {e}"))?
-        .ok_or("Account not found")?;
-    account
-        .source()
-        .key_derivation()
-        .map(|d| *d.seed_fingerprint())
-        .ok_or_else(|| "Account is not derived from a seed".to_string())
-}
-
 /// Delete an account from the wallet database.
 pub fn delete_account(
     db_path: &str,

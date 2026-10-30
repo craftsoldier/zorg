@@ -267,8 +267,10 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
     #[cfg(target_os = "macos")]
-    if let Err(e) = zorg::secret_store::store_seed_in_macos_keychain(net, &seed) {
-        log::warn!("Failed to store seed in keychain: {e}");
+    if let Err(e) =
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
     }
 
     println!("Mnemonic (save this!): {mnemonic}");
@@ -318,8 +320,10 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     let seed = keys::mnemonic_to_seed_with_passphrase(mnemonic, &passphrase)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday)?;
     #[cfg(target_os = "macos")]
-    if let Err(e) = zorg::secret_store::store_seed_in_macos_keychain(net, &seed) {
-        log::warn!("Failed to store seed in keychain: {e}");
+    if let Err(e) =
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, mnemonic)
+    {
+        log::warn!("Failed to store mnemonic in keychain: {e}");
     }
 
     println!("Account number: {}", created.number);
@@ -671,14 +675,13 @@ fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
 }
 
 fn load_seed(
-    db: &str,
+    _db: &str,
     net: WalletNetwork,
     account_uuid: &str,
 ) -> Result<secrecy::SecretVec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
-        let seed_fingerprint = zorg::account::seed_fingerprint_for_account(db, net, account_uuid)?;
-        match zorg::secret_store::seed_from_macos_keychain(net, &seed_fingerprint) {
+        match zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid) {
             Ok(seed) => return Ok(seed),
             Err(error) => {
                 eprintln!("Keychain unavailable ({error}); falling back to manual mnemonic entry.")
@@ -690,15 +693,7 @@ fn load_seed(
     std::io::stdin()
         .read_line(&mut mnemonic)
         .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
-    eprint!("Enter passphrase (leave empty if none): ");
-    let mut passphrase = String::new();
-    std::io::stdin()
-        .read_line(&mut passphrase)
-        .map_err(|e| format!("Failed to read passphrase: {e}"))?;
-    keys::mnemonic_to_seed_with_passphrase(
-        mnemonic.trim(),
-        passphrase.trim_end_matches(['\r', '\n']),
-    )
+    keys::mnemonic_to_seed(mnemonic.trim())
 }
 
 #[cfg(test)]
