@@ -11,7 +11,7 @@ USAGE:
 
 COMMANDS:
     create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100)
-    import <mnemonic> [--passphrase <p>]                Import from mnemonic
+    import <mnemonic>                                   Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
     address [--account <n>]                             Show receive address
@@ -268,7 +268,7 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
     #[cfg(target_os = "macos")]
     if let Err(e) =
-        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic, "")
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
     {
         log::warn!("Failed to store mnemonic in keychain: {e}");
     }
@@ -312,20 +312,14 @@ fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
 
 fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
     let positional: Vec<&String> = opts.iter().filter(|a| !a.starts_with("--")).collect();
-    let mnemonic = positional
-        .first()
-        .ok_or("Usage: zorg import <mnemonic> [--passphrase <p>]")?;
-    let passphrase = flag_str(opts, "--passphrase").unwrap_or_default();
+    let mnemonic = positional.first().ok_or("Usage: zorg import <mnemonic>")?;
     let birthday = flag_u64(opts, "--birthday");
-    let seed = keys::mnemonic_to_seed_with_passphrase(mnemonic, &passphrase)?;
+    let seed = keys::mnemonic_to_seed(mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday)?;
     #[cfg(target_os = "macos")]
-    if let Err(e) = zorg::secret_store::store_mnemonic_in_macos_keychain(
-        net,
-        &created.uuid,
-        mnemonic,
-        &passphrase,
-    ) {
+    if let Err(e) =
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, mnemonic)
+    {
         log::warn!("Failed to store mnemonic in keychain: {e}");
     }
 
@@ -696,15 +690,7 @@ fn load_seed(
     std::io::stdin()
         .read_line(&mut mnemonic)
         .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
-    eprint!("Enter passphrase (leave empty if none): ");
-    let mut passphrase = String::new();
-    std::io::stdin()
-        .read_line(&mut passphrase)
-        .map_err(|e| format!("Failed to read passphrase: {e}"))?;
-    keys::mnemonic_to_seed_with_passphrase(
-        mnemonic.trim(),
-        passphrase.trim_end_matches(['\r', '\n']),
-    )
+    keys::mnemonic_to_seed(mnemonic.trim())
 }
 
 #[cfg(test)]

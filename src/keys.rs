@@ -23,12 +23,9 @@ fn is_supported_mnemonic_word_count(count: usize) -> bool {
     count == 24
 }
 
-/// Convert a mnemonic phrase and optional BIP39 passphrase to a 64-byte seed.
+/// Convert a mnemonic phrase to a 64-byte seed.
 /// The seed is zeroized from memory when the SecretVec is dropped.
-pub fn mnemonic_to_seed_with_passphrase(
-    phrase: &str,
-    bip39_passphrase: &str,
-) -> Result<SecretVec<u8>, String> {
+pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
     let word_count = phrase.split_whitespace().count();
     if !is_supported_mnemonic_word_count(word_count) {
         return Err("Invalid mnemonic word count: expected 24 words".to_string());
@@ -36,24 +33,11 @@ pub fn mnemonic_to_seed_with_passphrase(
 
     let mnemonic =
         Mnemonic::<English>::from_phrase(phrase).map_err(|e| format!("Invalid mnemonic: {e}"))?;
-    let seed = Zeroizing::new(mnemonic.to_seed(bip39_passphrase));
+    let seed = Zeroizing::new(mnemonic.to_seed(""));
     drop(mnemonic);
     let secret_seed = SecretVec::new(seed.to_vec());
     drop(seed);
     Ok(secret_seed)
-}
-
-/// Convert a mnemonic without a BIP39 passphrase.
-pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
-    mnemonic_to_seed_with_passphrase(phrase, "")
-}
-
-/// Convert stored UTF-8 mnemonic bytes, optionally followed by a newline and
-/// the BIP39 passphrase, to a 64-byte seed.
-pub fn mnemonic_bytes_to_seed(phrase: &[u8]) -> Result<SecretVec<u8>, String> {
-    let phrase = std::str::from_utf8(phrase).map_err(|_| "Mnemonic is not valid UTF-8")?;
-    let (mnemonic, bip39_passphrase) = phrase.split_once('\n').unwrap_or((phrase, ""));
-    mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)
 }
 
 /// Parse network string to wallet network enum.
