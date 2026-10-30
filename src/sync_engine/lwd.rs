@@ -109,20 +109,9 @@ where
 
 /// Opens a tonic gRPC channel to the given lightwalletd URL and
 /// returns a `CompactTxStreamerClient`.
-///
-/// Ensures the process-wide rustls `CryptoProvider` is installed
-/// before any TLS work. This is normally done by `init_app()` on
-/// path, but a cold start can reach this
-/// function on a cold background wake *before* `init_app()` ever ran. Without
-/// the `Once` guard here, rustls 0.23+ panics with "no
-/// process-level CryptoProvider installed" on the first handshake.
 pub(crate) async fn open_lwd_channel(
     lightwalletd_url: &str,
 ) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
-    static RUSTLS_INIT: std::sync::Once = std::sync::Once::new();
-    RUSTLS_INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
     let endpoint = Endpoint::from_shared(lightwalletd_url.to_string())
         .map_err(|e| SyncError::net(format!("invalid URL: {e}")))?
         .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT);
