@@ -424,7 +424,7 @@ fn cmd_history(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Stri
             tx.display_pool,
             fmt_zec(tx.display_amount, net),
             height,
-            &tx.txid_hex[..16.min(tx.txid_hex.len())]
+            tx.txid
         );
     }
     Ok(())

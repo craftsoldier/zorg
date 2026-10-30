@@ -26,7 +26,7 @@ use std::{
 use rusqlite::{types::Value, vtab::array::Array, OptionalExtension};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{WalletRead, WalletWrite};
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
     memo::{Memo, MemoBytes},
@@ -427,36 +427,10 @@ pub fn decrypt_and_store_transaction(
     })
 }
 
-pub fn set_transaction_status(
-    db_path: &str,
-    network: WalletNetwork,
-    txid_hex: &str,
-    status: i64,
-) -> Result<(), String> {
-    use zcash_client_backend::data_api::TransactionStatus;
-
-    let txid_bytes = hex::decode(txid_hex).map_err(|e| format!("Bad txid hex: {e}"))?;
-    let txid = zcash_primitives::transaction::TxId::from_bytes(
-        txid_bytes.try_into().map_err(|_| "TxId must be 32 bytes")?,
-    );
-
-    let tx_status = match status {
-        -2 => TransactionStatus::TxidNotRecognized,
-        -1 => TransactionStatus::NotInMainChain,
-        h => TransactionStatus::Mined(BlockHeight::from_u32(h as u32)),
-    };
-
-    with_wallet_db_write_lock("transactions.set_transaction_status", || {
-        let mut db = open_wallet_db(db_path, network)?;
-        db.set_transaction_status(txid, tx_status)
-            .map_err(|e| format!("Failed to set status: {e}"))
-    })
-}
-
 // ======================== Transaction History ========================
 
 pub struct TransactionInfo {
-    pub txid_hex: String,
+    pub txid: TxId,
     pub mined_height: u64,
     pub expired_unmined: bool,
     pub account_balance_delta: i64,
@@ -723,7 +697,7 @@ fn assemble_history(
             .then_with(|| b.sort_timestamp.cmp(&a.sort_timestamp))
             .then_with(|| b.sort_mined_height.cmp(&a.sort_mined_height))
             .then_with(|| b.tx_index.cmp(&a.tx_index))
-            .then_with(|| b.info.txid_hex.cmp(&a.info.txid_hex))
+            .then_with(|| b.info.txid.cmp(&a.info.txid))
             .then_with(|| a.row_order.cmp(&b.row_order))
     });
 
@@ -1838,7 +1812,12 @@ fn build_classified_tx_with_fee(
     let sort_timestamp = base.display_timestamp();
     ClassifiedTx {
         info: TransactionInfo {
-            txid_hex: hex::encode(&base.txid),
+            txid: TxId::from_bytes(
+                base.txid
+                    .as_slice()
+                    .try_into()
+                    .expect("wallet DB txids are 32 bytes"),
+            ),
             mined_height: base.mined_height.unwrap_or(0) as u64,
             expired_unmined: base.expired_unmined,
             account_balance_delta: base.account_balance_delta,
@@ -3841,7 +3820,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(external_send));
+        assert_eq!(got[0].txid, TxId::from_bytes(external_send));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 10_000_000);
         assert_eq!(got[0].fee, 50_000);
@@ -3896,7 +3875,7 @@ mod tests {
 
         let row_a = got
             .iter()
-            .find(|tx| tx.txid_hex == hex::encode(external_send_a))
+            .find(|tx| tx.txid == TxId::from_bytes(external_send_a))
             .unwrap();
         assert_eq!(row_a.tx_kind, "sent");
         assert_eq!(row_a.display_amount, 10_000_000);
@@ -3904,7 +3883,7 @@ mod tests {
 
         let row_b = got
             .iter()
-            .find(|tx| tx.txid_hex == hex::encode(external_send_b))
+            .find(|tx| tx.txid == TxId::from_bytes(external_send_b))
             .unwrap();
         assert_eq!(row_b.tx_kind, "sent");
         assert_eq!(row_b.display_amount, 20_000_000);
@@ -3960,7 +3939,7 @@ mod tests {
 
         let row_a = got
             .iter()
-            .find(|tx| tx.txid_hex == hex::encode(external_send_a))
+            .find(|tx| tx.txid == TxId::from_bytes(external_send_a))
             .unwrap();
         assert_eq!(row_a.tx_kind, "sent");
         assert_eq!(row_a.display_amount, 10_000_000);
@@ -3968,7 +3947,7 @@ mod tests {
 
         let row_b = got
             .iter()
-            .find(|tx| tx.txid_hex == hex::encode(external_send_b))
+            .find(|tx| tx.txid == TxId::from_bytes(external_send_b))
             .unwrap();
         assert_eq!(row_b.tx_kind, "sent");
         assert_eq!(row_b.display_amount, 10_000_000);
@@ -4015,11 +3994,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 18_262_101);
         assert_eq!(got[0].display_pool, "transparent");
-        assert_eq!(got[1].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[1].tx_kind, "received");
         assert_eq!(got[1].display_amount, 18_262_101);
         assert_eq!(got[1].display_pool, "transparent");
@@ -4068,7 +4047,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(migration_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(migration_tx));
         assert_eq!(got[0].tx_kind, "migration");
         assert_eq!(got[0].display_amount, 624_980_000);
         assert_eq!(got[0].display_pool, "ironwood");
@@ -4116,7 +4095,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(migration_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(migration_tx));
         assert_eq!(got[0].tx_kind, "migration");
         assert_eq!(got[0].display_amount, 624_980_000);
         assert_eq!(got[0].display_pool, "ironwood");
@@ -4161,7 +4140,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(txid));
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 5_000_000);
     }
@@ -4205,7 +4184,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(txid));
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].tx_kind, "received");
         assert_eq!(got[0].display_amount, 5_000_000);
     }
@@ -4261,11 +4240,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 1_000_000);
         assert_eq!(got[0].display_pool, "shielded");
-        assert_eq!(got[1].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[1].tx_kind, "received");
         assert_eq!(got[1].display_amount, 1_000_000);
         assert_eq!(got[1].display_pool, "shielded");
@@ -4322,11 +4301,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 1_000_000);
         assert_eq!(got[0].display_pool, "shielded");
-        assert_eq!(got[1].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[1].tx_kind, "received");
         assert_eq!(got[1].display_amount, 1_000_000);
         assert_eq!(got[1].display_pool, "shielded");
@@ -4394,11 +4373,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 1_100_000);
         assert_eq!(got[0].display_pool, "mixed");
-        assert_eq!(got[1].txid_hex, hex::encode(self_tx));
+        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
         assert_eq!(got[1].tx_kind, "received");
         assert_eq!(got[1].display_amount, 1_100_000);
         assert_eq!(got[1].display_pool, "mixed");
@@ -4495,7 +4474,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(shielding_tx));
+        assert_eq!(got[0].txid, TxId::from_bytes(shielding_tx));
         assert_eq!(got[0].tx_kind, "shielded");
         assert_eq!(got[0].display_amount, 10_000_000);
         assert_eq!(got[0].display_pool, "shielded");
@@ -5277,11 +5256,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 3);
-        assert_eq!(got[0].txid_hex, hex::encode(newer_self_send));
+        assert_eq!(got[0].txid, TxId::from_bytes(newer_self_send));
         assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[1].txid_hex, hex::encode(newer_self_send));
+        assert_eq!(got[1].txid, TxId::from_bytes(newer_self_send));
         assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[2].txid_hex, hex::encode(older_failed));
+        assert_eq!(got[2].txid, TxId::from_bytes(older_failed));
         assert!(got[2].expired_unmined);
 
         let limited = history_from_fixture(
@@ -5293,7 +5272,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(limited.len(), 1);
-        assert_eq!(limited[0].txid_hex, hex::encode(newer_self_send));
+        assert_eq!(limited[0].txid, TxId::from_bytes(newer_self_send));
         assert_eq!(limited[0].tx_kind, "sent");
     }
 
@@ -5343,7 +5322,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(pending));
+        assert_eq!(got[0].txid, TxId::from_bytes(pending));
         assert_eq!(got[0].tx_kind, "receiving");
         assert_eq!(got[0].mined_height, 0);
         assert_eq!(got[0].display_amount, 2_000_000);
@@ -5395,7 +5374,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(pending));
+        assert_eq!(got[0].txid, TxId::from_bytes(pending));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].mined_height, 0);
         assert_eq!(got[0].display_amount, 1_000_000);
@@ -5432,7 +5411,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(txid));
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].tx_kind, "sent");
     }
 
@@ -5467,7 +5446,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_hex, hex::encode(txid));
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].tx_kind, "sent");
         assert_eq!(got[0].display_amount, 10_000_000);
         assert_eq!(got[0].mined_height, 0);
