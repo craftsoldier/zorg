@@ -48,6 +48,14 @@ pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
     mnemonic_to_seed_with_passphrase(phrase, "")
 }
 
+/// Convert stored UTF-8 mnemonic bytes, optionally followed by a newline and
+/// the BIP39 passphrase, to a 64-byte seed.
+pub fn mnemonic_bytes_to_seed(phrase: &[u8]) -> Result<SecretVec<u8>, String> {
+    let phrase = std::str::from_utf8(phrase).map_err(|_| "Mnemonic is not valid UTF-8")?;
+    let (mnemonic, bip39_passphrase) = phrase.split_once('\n').unwrap_or((phrase, ""));
+    mnemonic_to_seed_with_passphrase(mnemonic, bip39_passphrase)
+}
+
 /// Parse network string to wallet network enum.
 pub fn parse_network(network: &str) -> Result<WalletNetwork, String> {
     network.parse()
