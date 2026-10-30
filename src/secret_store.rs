@@ -11,14 +11,11 @@ pub fn seed_from_macos_stored_mnemonic(
 ) -> Result<SecretVec<u8>, String> {
     let account_key = account_mnemonic_key(account_uuid);
 
-    // The payload is now the raw utf-8 mnemonic string stored in the keychain
     let service = mnemonic_store_service_for_network(network);
     let mnemonic_bytes = macos_read_secure_store_value(&service, &account_key)?
         .ok_or_else(|| "Mnemonic not found for account".to_string())?;
 
-    let mnemonic_str = std::str::from_utf8(mnemonic_bytes.as_slice())
-        .map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
-    let seed = keys::mnemonic_to_seed(mnemonic_str)?;
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
     drop(mnemonic_bytes);
     Ok(seed)
 }
@@ -27,12 +24,15 @@ pub fn store_mnemonic_in_macos_keychain(
     network: WalletNetwork,
     account_uuid: &str,
     mnemonic: &str,
+    bip39_passphrase: &str,
 ) -> Result<(), String> {
     let account_key = account_mnemonic_key(account_uuid);
+    let mnemonic = Zeroizing::new(mnemonic.split_whitespace().collect::<Vec<_>>().join(" "));
+    let payload = Zeroizing::new(format!("{}\n{bip39_passphrase}", *mnemonic));
     macos_write_secure_store_value(
         &mnemonic_store_service_for_network(network),
         &account_key,
-        mnemonic.as_bytes(),
+        payload.as_bytes(),
     )
 }
 
@@ -68,7 +68,7 @@ mod tests {
         let key = account_mnemonic_key(&account_uuid);
 
         if let Err(error) =
-            store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic)
+            store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic, "")
         {
             if keychain_is_unavailable(&error) && std::env::var_os("CI").is_none() {
                 eprintln!("Skipping keychain round-trip: {error}");
