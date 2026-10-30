@@ -56,24 +56,24 @@ hex = "0.4"
 
 # Zcash core
 [dependencies.zcash_primitives]
-version = "0.31.0-pre.2"
+version = "0.31.0"
 
 [dependencies.zcash_address]
-version = "0.14.0-pre.2"
+version = "0.14.0"
 
 [dependencies.zcash_keys]
-version = "0.17.0-pre.2"
+version = "0.17.0"
 features = ["orchard"]
 
 [dependencies.zcash_protocol]
-version = "0.11.0-pre.1"
+version = "0.11.0"
 
 [dependencies.transparent]
 package = "zcash_transparent"
-version = "0.11.0-pre.2"
+version = "0.11.0"
 
 [dependencies.zcash_client_backend]
-version = "0.25.0-pre.2"
+version = "0.25.0"
 features = [
     "orchard",
     "transparent-inputs",
@@ -83,7 +83,7 @@ features = [
 ]
 
 [dependencies.zcash_client_sqlite]
-version = "0.23.0-pre.2"
+version = "0.23.0"
 features = ["orchard", "transparent-inputs", "unstable", "serde"]
 
 # Keep Orchard aligned with the released librustzcash family
