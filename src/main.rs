@@ -11,7 +11,7 @@ USAGE:
 
 COMMANDS:
     create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100)
-    import <mnemonic>                                   Import from mnemonic
+    import [--birthday <height>]                        Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
     address [--account <n>]                             Show receive address
@@ -311,14 +311,13 @@ fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
 }
 
 fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
-    let positional: Vec<&String> = opts.iter().filter(|a| !a.starts_with("--")).collect();
-    let mnemonic = positional.first().ok_or("Usage: zorg import <mnemonic>")?;
     let birthday = flag_u64(opts, "--birthday");
-    let seed = keys::mnemonic_to_seed(mnemonic)?;
+    let mnemonic = read_mnemonic()?;
+    let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday)?;
     #[cfg(target_os = "macos")]
     if let Err(e) =
-        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, mnemonic)
+        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
     {
         log::warn!("Failed to store mnemonic in keychain: {e}");
     }
@@ -685,12 +684,15 @@ fn load_seed(
             }
         }
     }
-    eprint!("Enter mnemonic: ");
-    let mut mnemonic = String::new();
-    std::io::stdin()
-        .read_line(&mut mnemonic)
-        .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
-    keys::mnemonic_to_seed(mnemonic.trim())
+    let mnemonic = read_mnemonic()?;
+    keys::mnemonic_to_seed(&mnemonic)
+}
+
+/// Read the 24-word mnemonic from the terminal without echoing it.
+fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
+    rpassword::prompt_password("Enter your 24-word recovery phrase: ")
+        .map(zeroize::Zeroizing::new)
+        .map_err(|e| format!("Failed to read mnemonic: {e}"))
 }
 
 #[cfg(test)]

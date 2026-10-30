@@ -31,6 +31,7 @@ shardtree = "0.8"
 # Security
 secrecy = "0.8"
 zeroize = "1"
+rpassword = "7"
 blake2b_simd = "1"
 
 # Random number generation
