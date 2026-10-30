@@ -25,8 +25,7 @@ impl log::Log for StderrLogger {
 
 static LOGGER: StderrLogger = StderrLogger;
 
-/// Install stderr logging and the rustls crypto provider.
-/// Call once before any TLS connection (lightwalletd sync).
+/// Install stderr logging.
 pub fn init() {
     let configured_level = std::env::var("RUST_LOG")
         .ok()
@@ -40,7 +39,6 @@ pub fn init() {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(configured_level);
     }
-    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn parse_log_level(value: &str) -> Option<log::LevelFilter> {
