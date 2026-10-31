@@ -65,10 +65,6 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--db" => return Err(
-                "Choose an account with --account <name>; database paths are managed in zorg_index.db"
-                    .into(),
-            ),
             "--network" | "--lwd" => {
                 let flag = &args[i];
                 i += 1;
@@ -782,7 +778,6 @@ mod tests {
         assert!(command(&["balance"]).unwrap_err().contains("unavailable"));
         command(&["balance", "--account", "Savings"]).unwrap();
         std::fs::rename(offline, second_db).unwrap();
-        assert!(command(&["--db", second_db, "accounts"]).is_err());
     }
 
     #[test]
