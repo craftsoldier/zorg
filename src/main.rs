@@ -179,27 +179,36 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         let targets: Vec<_> = selected
             .map(|a| vec![a])
             .unwrap_or_else(|| visible.iter().collect());
-        let mut seen = std::collections::HashSet::new();
+        let mut databases: Vec<&zorg::account::AccountInfo> = Vec::new();
         for account in targets {
-            if !seen.insert(&account.db_path) {
-                continue;
-            }
-            let url = endpoint(lwd.as_deref(), &account.network, cmd);
-            println!("{}:", account.name);
-            if cmd == "sync" {
-                sync::run_full_sync_blocking(&account.db_path, &url, account.network.as_str())?;
-                println!("Sync complete.");
-            } else {
-                let p = sync::get_sync_progress(&account.db_path, account.network)?;
-                let tip = zorg::sync_engine::fetch_chain_tip(&url).ok();
-                let verified = zorg::sync_engine::last_completed_sync_at(&account.db_path)?;
-                println!(
-                    "{}",
-                    render_sync_status(p.scanned_height, tip, verified, unix_now())
-                );
+            if !databases.iter().any(|a| a.db_path == account.db_path) {
+                databases.push(account);
             }
         }
-        return Ok(());
+        let mut failed = 0;
+        for account in &databases {
+            let names: Vec<&str> = visible
+                .iter()
+                .filter(|a| a.db_path == account.db_path)
+                .map(|a| a.name.as_str())
+                .collect();
+            println!("{}:", names.join(", "));
+            let url = endpoint(lwd.as_deref(), &account.network, cmd);
+            let result = if cmd == "sync" {
+                sync_database(&account.db_path, account.network, &url)
+            } else {
+                print_database_status(&account.db_path, account.network, &url)
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                failed += 1;
+            }
+        }
+        return if failed == 0 {
+            Ok(())
+        } else {
+            Err(format!("{failed} of {} databases failed", databases.len()))
+        };
     }
     let selected = selected.ok_or("Choose an account")?;
     let db = &selected.db_path;
@@ -225,6 +234,25 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     };
     zorg::account::secure_wallet_db_file(std::path::Path::new(db))?;
     result
+}
+
+/// Syncs one wallet database with the chain.
+fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
+    sync::run_full_sync_blocking(db_path, lwd_url, net.as_str())?;
+    println!("Sync complete.");
+    Ok(())
+}
+
+/// Prints one wallet database's sync progress against the chain tip.
+fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
+    let p = sync::get_sync_progress(db_path, net)?;
+    let tip = zorg::sync_engine::fetch_chain_tip(lwd_url).ok();
+    let verified = zorg::sync_engine::last_completed_sync_at(db_path)?;
+    println!(
+        "{}",
+        render_sync_status(p.scanned_height, tip, verified, unix_now())
+    );
+    Ok(())
 }
 
 fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> String {
