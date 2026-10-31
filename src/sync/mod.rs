@@ -328,8 +328,7 @@ pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send
 // ======================== Re-exports from send.rs ========================
 pub(crate) use send::resubmit_pending_transactions;
 pub use send::{
-    estimate_fee, execute_proposal, execute_proposal_with_seed_loader, propose_send,
-    ExecuteProposalResult,
+    estimate_fee, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult,
 };
 
 // ======================== Sync State & Orchestration ========================

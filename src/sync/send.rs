@@ -357,27 +357,6 @@ pub fn estimate_fee(
 
 // ======================== Execute ========================
 
-pub async fn execute_proposal(
-    db_path: &str,
-    lightwalletd_url: &str,
-    proposal_id: u64,
-    send_flow_id: &str,
-    seed: SecretVec<u8>,
-    spend_params: Option<&str>,
-    output_params: Option<&str>,
-) -> Result<ExecuteProposalResult, String> {
-    let stored = consume_stored_proposal(proposal_id, send_flow_id, "Proposal not found")?;
-    execute_stored(
-        db_path,
-        lightwalletd_url,
-        stored,
-        seed,
-        spend_params,
-        output_params,
-    )
-    .await
-}
-
 pub async fn execute_proposal_with_seed_loader<F>(
     db_path: &str,
     lightwalletd_url: &str,
