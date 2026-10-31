@@ -236,20 +236,6 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
     Ok(accounts)
 }
 
-/// Set an account's display name without changing its keys or derivation index.
-pub fn rename_account(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-    name: &str,
-) -> Result<(), String> {
-    with_wallet_db_write_lock("keys.rename_account", || {
-        open_wallet_db_for_mutation(db_path, network)?
-            .set_account_name(parse_account_uuid(account_uuid)?, name)
-            .map_err(|e| format!("Failed to rename account: {e}"))
-    })
-}
-
 /// The Keychain entry shared by the seed-derived accounts in this database.
 pub fn seed_keychain_reference(db_path: &str) -> Result<String, String> {
     open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?

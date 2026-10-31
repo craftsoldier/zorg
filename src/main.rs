@@ -8,247 +8,171 @@ use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
 
-struct DatabaseIndex {
-    root: PathBuf,
-    databases: Vec<PathBuf>,
-}
-
 struct LocatedAccount {
     db: String,
     network: WalletNetwork,
     account: AccountInfo,
 }
 
-impl DatabaseIndex {
-    fn home() -> Result<PathBuf, String> {
-        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-        let home = PathBuf::from(home);
-        Ok(if cfg!(target_os = "macos") {
-            home.join("Library/Application Support/zorg")
-        } else {
-            home.join(".zorg")
-        })
-    }
+fn wallet_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let home = PathBuf::from(home);
+    Ok(if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/zorg")
+    } else {
+        home.join(".zorg")
+    })
+}
 
-    fn lock(root: &Path) -> Result<File, String> {
-        ensure_private_wallet_dir(root)?;
-        let path = root.join("index.lock");
-        let file = private_options()
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| format!("Could not open database index lock: {e}"))?;
-        secure_wallet_db_file(&path)?;
-        file.lock()
-            .map_err(|e| format!("Could not lock database index: {e}"))?;
-        Ok(file)
-    }
+fn lock_index(root: &Path) -> Result<File, String> {
+    ensure_private_wallet_dir(root)?;
+    let path = root.join("index.lock");
+    let file = private_options()
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("Could not open database index lock: {e}"))?;
+    secure_wallet_db_file(&path)?;
+    file.lock()
+        .map_err(|e| format!("Could not lock database index: {e}"))?;
+    Ok(file)
+}
 
-    fn load(root: PathBuf) -> Result<Self, String> {
-        let index = root.join("index.toml");
-        let mut databases = Vec::new();
-        match fs::read_to_string(&index) {
-            Ok(text) => {
-                let table: toml::Table = text
-                    .parse()
-                    .map_err(|e| format!("Invalid database index {}: {e}", index.display()))?;
-                if table.keys().any(|key| key != "databases") {
-                    return Err("Unknown field in database index".into());
-                }
-                if let Some(entries) = table.get("databases") {
-                    for entry in entries.as_array().ok_or("databases must be a list")? {
-                        let entry = entry.as_table().ok_or("Database entry must be a table")?;
-                        if entry.len() != 1 {
-                            return Err("Each database entry must contain only path".into());
-                        }
-                        let path = PathBuf::from(
-                            entry
-                                .get("path")
-                                .and_then(|p| p.as_str())
-                                .ok_or("Each database entry needs a path string")?,
-                        );
-                        if !path.is_absolute() {
-                            return Err("Database index paths must be absolute".into());
-                        }
-                        if !databases.contains(&path) {
-                            databases.push(path);
-                        }
+fn read_database_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let index = root.join("index.toml");
+    let mut databases = Vec::new();
+    match fs::read_to_string(&index) {
+        Ok(text) => {
+            let table: toml::Table = text
+                .parse()
+                .map_err(|e| format!("Invalid database index {}: {e}", index.display()))?;
+            if table.keys().any(|key| key != "databases") {
+                return Err("Unknown field in database index".into());
+            }
+            if let Some(entries) = table.get("databases") {
+                for entry in entries.as_array().ok_or("databases must be a list")? {
+                    let entry = entry.as_table().ok_or("Database entry must be a table")?;
+                    if entry.len() != 1 {
+                        return Err("Each database entry must contain only path".into());
+                    }
+                    let path = PathBuf::from(
+                        entry
+                            .get("path")
+                            .and_then(|p| p.as_str())
+                            .ok_or("Each database entry needs a path string")?,
+                    );
+                    if !path.is_absolute() {
+                        return Err("Database index paths must be absolute".into());
+                    }
+                    if !databases.contains(&path) {
+                        databases.push(path);
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Could not read database index: {e}")),
         }
-        Ok(Self { root, databases })
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Could not read database index: {e}")),
     }
+    Ok(databases)
+}
 
-    fn save(&self) -> Result<(), String> {
-        let entries: Result<Vec<_>, String> = self
-            .databases
-            .iter()
-            .map(|path| {
-                let mut entry = toml::Table::new();
-                entry.insert(
-                    "path".into(),
-                    toml::Value::String(
-                        path.to_str()
-                            .ok_or("Database path must be UTF-8")?
-                            .to_string(),
-                    ),
-                );
-                Ok(toml::Value::Table(entry))
-            })
-            .collect();
-        let mut table = toml::Table::new();
-        table.insert("databases".into(), toml::Value::Array(entries?));
-        let text = toml::to_string(&table).map_err(|e| e.to_string())?;
-        let pending = self
-            .root
-            .join(format!("index.{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| {
-            let mut file = private_options()
-                .create_new(true)
-                .open(&pending)
-                .map_err(|e| format!("Could not create database index: {e}"))?;
-            file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
-            fs::rename(&pending, self.root.join("index.toml")).map_err(|e| e.to_string())?;
-            File::open(&self.root)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&pending);
-        }
-        result
+fn write_database_paths(root: &Path, databases: &[PathBuf]) -> Result<(), String> {
+    let entries: Result<Vec<_>, String> = databases
+        .iter()
+        .map(|path| {
+            let mut entry = toml::Table::new();
+            entry.insert(
+                "path".into(),
+                toml::Value::String(
+                    path.to_str()
+                        .ok_or("Database path must be UTF-8")?
+                        .to_string(),
+                ),
+            );
+            Ok(toml::Value::Table(entry))
+        })
+        .collect();
+    let mut table = toml::Table::new();
+    table.insert("databases".into(), toml::Value::Array(entries?));
+    let text = toml::to_string(&table).map_err(|e| e.to_string())?;
+    let pending = root.join(format!("index.{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = private_options()
+            .create_new(true)
+            .open(&pending)
+            .map_err(|e| format!("Could not create database index: {e}"))?;
+        file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(&pending, root.join("index.toml")).map_err(|e| e.to_string())?;
+        File::open(root)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&pending);
     }
+    result
+}
 
-    fn accounts(
-        &self,
-        network: Option<WalletNetwork>,
-    ) -> Result<(Vec<LocatedAccount>, Vec<String>), String> {
-        let mut result = Vec::new();
-        let mut unavailable = Vec::new();
-        let mut seen_paths = std::collections::HashSet::new();
-        for path in &self.databases {
-            let canonical = match path.canonicalize() {
-                Ok(path) => path,
-                Err(e) => {
-                    unavailable.push(format!("Database unavailable: {} ({e})", path.display()));
-                    continue;
-                }
-            };
-            if !seen_paths.insert(canonical) {
+fn accounts_from_databases(
+    databases: &[PathBuf],
+) -> Result<(Vec<LocatedAccount>, Vec<String>), String> {
+    let mut result = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    for path in databases {
+        let canonical = match path.canonicalize() {
+            Ok(path) => path,
+            Err(e) => {
+                unavailable.push(format!("Database unavailable: {} ({e})", path.display()));
                 continue;
             }
-            let path = path.to_str().ok_or("Database path must be UTF-8")?;
-            let net = network_in_wallet_db(path)?;
-            let conn = rusqlite::Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .map_err(|e| e.to_string())?;
-            let wrong_seed: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM accounts WHERE hd_seed_fingerprint IS NULL OR hd_seed_fingerprint != (SELECT seed_fingerprint FROM zorg_seed WHERE singleton = 1))",
-                [], |row| row.get(0),
-            ).map_err(|e| format!("Could not verify database seed: {e}"))?;
-            if wrong_seed {
-                return Err(format!(
-                    "Database {path} must contain accounts from exactly one seed"
-                ));
-            }
-            if network.is_some_and(|n| n != net) {
-                continue;
-            }
-            ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
-            secure_wallet_db_file(Path::new(path))?;
-            let accounts = zorg::account::list_accounts(path, net)?;
-            for account in accounts {
-                result.push(LocatedAccount {
-                    db: path.to_string(),
-                    network: net,
-                    account,
-                });
-            }
-        }
-        Ok((result, unavailable))
-    }
-
-    fn ensure_new_seed(
-        &self,
-        seed: &secrecy::SecretVec<u8>,
-        network: WalletNetwork,
-    ) -> Result<(), String> {
-        use secrecy::ExposeSecret;
-        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
-            .ok_or("Invalid seed length")?;
-        for path in &self.databases {
-            let conn = rusqlite::Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .map_err(|e| e.to_string())?;
-            let present: bool = conn.query_row(
-                "SELECT seed_fingerprint = ?1 AND network = ?2 FROM zorg_seed WHERE singleton = 1",
-                rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
-            if present {
-                return Err("This recovery phrase is already registered on this network; run `zorg accounts`".into());
-            }
-        }
-        Ok(())
-    }
-
-    fn register(&mut self, path: &Path) -> Result<(), String> {
-        let path = path
-            .canonicalize()
-            .map_err(|e| format!("Could not locate database: {e}"))?;
-        if !path.is_file() {
-            return Err("Database path must point to a file".into());
-        }
-        if self
-            .databases
-            .iter()
-            .any(|p| p.canonicalize().ok().as_ref() == Some(&path))
-        {
-            return Ok(());
-        }
-        let mut candidate = Self {
-            root: self.root.clone(),
-            databases: self.databases.clone(),
         };
-        candidate.databases.push(path);
-        let (accounts, unavailable) = candidate.accounts(None)?;
-        require_available(&unavailable)?;
-        let mut names = std::collections::HashSet::new();
-        for account in accounts {
-            validate_name(&account.account.name)?;
-            if !names.insert(account.account.name.clone()) {
-                return Err(format!("Account name {:?} already exists; give accounts unique names before registering the database", account.account.name));
-            }
+        if !seen_paths.insert(canonical) {
+            continue;
         }
-        let mut seeds = std::collections::HashSet::new();
-        for path in &candidate.databases {
-            let conn = rusqlite::Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        let path = path.to_str().ok_or("Database path must be UTF-8")?;
+        let net = network_in_wallet_db(path)?;
+        ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
+        secure_wallet_db_file(Path::new(path))?;
+        let accounts = zorg::account::list_accounts(path, net)?;
+        for account in accounts {
+            result.push(LocatedAccount {
+                db: path.to_string(),
+                network: net,
+                account,
+            });
+        }
+    }
+    Ok((result, unavailable))
+}
+
+fn ensure_new_seed(
+    databases: &[PathBuf],
+    seed: &secrecy::SecretVec<u8>,
+    network: WalletNetwork,
+) -> Result<(), String> {
+    use secrecy::ExposeSecret;
+    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
+        .ok_or("Invalid seed length")?;
+    for path in databases {
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| e.to_string())?;
+        let present: bool = conn
+            .query_row(
+                "SELECT seed_fingerprint = ?1 AND network = ?2 FROM zorg_seed WHERE singleton = 1",
+                rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()],
+                |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
-            let identity: (Vec<u8>, String) = conn
-                .query_row(
-                    "SELECT seed_fingerprint, network FROM zorg_seed WHERE singleton = 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|e| e.to_string())?;
-            if !seeds.insert(identity) {
-                return Err("This seed already has a registered database on this network".into());
-            }
+        if present {
+            return Err(
+                "This recovery phrase is already known on this network; run `zorg accounts`".into(),
+            );
         }
-        candidate.save()?;
-        self.databases = candidate.databases;
-        Ok(())
     }
+    Ok(())
 }
 
 fn require_available(unavailable: &[String]) -> Result<(), String> {
@@ -256,7 +180,7 @@ fn require_available(unavailable: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Reconnect unavailable databases before changing account names or adding accounts:\n{}",
+            "Reconnect unavailable databases before adding accounts:\n{}",
             unavailable.join("\n")
         ))
     }
@@ -319,8 +243,6 @@ COMMANDS:
     accounts                                           List named accounts (also the default)
     create [name]                                      Create an account with a new recovery phrase
     import [name] [--birthday <height>]                 Import a recovery phrase at account index 0
-    register <path>                                    Remember an existing database location
-    rename <new-name> --account <name>                  Rename an account
     balance [--account <name>]                         Show balance
     address [--account <name>]                         Show receive address
     sync [--account <name>]                            Sync all accounts, or the chosen account's database
@@ -331,7 +253,7 @@ COMMANDS:
     validate <address>                                 Validate a Zcash address
     delete --account <name> [--yes]                     Delete an account (asks to confirm)
 
-Names are case-sensitive and unique across registered databases. With one account
+Names are case-sensitive and unique across known databases. With one account
 --account can be omitted, except for delete. Create/import ask for a name if omitted.
 Each database holds one recovery phrase and may contain multiple derived accounts.
 
@@ -372,7 +294,7 @@ fn run(args: &[String]) -> Result<(), String> {
         print!("{USAGE}");
         return Ok(());
     }
-    run_in(DatabaseIndex::home()?, args)
+    run_in(wallet_dir()?, args)
 }
 
 fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
@@ -413,19 +335,13 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
-    let _index_lock = if matches!(cmd, "create" | "import" | "register" | "rename") {
-        Some(DatabaseIndex::lock(&root)?)
+    let _index_lock = if matches!(cmd, "create" | "import") {
+        Some(lock_index(&root)?)
     } else {
         None
     };
-    let mut index = DatabaseIndex::load(root)?;
-    if cmd == "register" {
-        let path = opts.first().ok_or("Usage: zorg register <path>")?;
-        index.register(std::path::Path::new(path))?;
-        println!("Database registered. Run `zorg accounts` to see its accounts.");
-        return Ok(());
-    }
-    let (accounts, unavailable) = index.accounts(None)?;
+    let mut databases = read_database_paths(&root)?;
+    let (accounts, unavailable) = accounts_from_databases(&databases)?;
     for message in &unavailable {
         eprintln!("{message}");
     }
@@ -435,24 +351,24 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
             Some(name) => name.clone(),
             None => read_account_name()?,
         };
-        ensure_unique_name(&accounts, &name, None)?;
+        ensure_unique_name(&accounts, &name)?;
         let net = network.unwrap_or(WalletNetwork::Main);
-        let db_path = index.root.join(format!("{}.db", uuid::Uuid::new_v4()));
+        let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
         reserve_wallet_file(&db_path)?;
         let result = if cmd == "create" {
             let url = endpoint(lwd.as_deref(), &net, cmd);
             cmd_create(db, net, &url, &name)
         } else {
-            cmd_import(db, net, opts, &name, &index)
+            cmd_import(db, net, opts, &name, &databases)
         };
         if let Err(e) = result {
             remove_wallet_files(db);
             return Err(e);
         }
         secure_wallet_db_file(&db_path)?;
-        index.databases.push(db_path.clone());
-        return index.save().map_err(|e| {
+        databases.push(db_path.clone());
+        return write_database_paths(&root, &databases).map_err(|e| {
             format!(
                 "Account created in {}; could not update index: {e}",
                 db_path.display()
@@ -479,15 +395,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     }
     if !matches!(
         cmd,
-        "balance"
-            | "address"
-            | "sync"
-            | "status"
-            | "send"
-            | "history"
-            | "recovery"
-            | "delete"
-            | "rename"
+        "balance" | "address" | "sync" | "status" | "send" | "history" | "recovery" | "delete"
     ) {
         return Err(format!("Unknown command: {cmd}"));
     }
@@ -550,18 +458,6 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
             }
             cmd_delete(db, net, &selected.account, opts)
         }
-        "rename" => {
-            require_available(&unavailable)?;
-            let new_name = positional_args(opts)?
-                .first()
-                .cloned()
-                .ok_or("Usage: zorg rename <new-name> --account <name>")?;
-            let (all_accounts, _) = index.accounts(None)?;
-            ensure_unique_name(&all_accounts, &new_name, Some(uuid))?;
-            zorg::account::rename_account(db, net, uuid, &new_name)?;
-            println!("Account renamed to {new_name}.");
-            Ok(())
-        }
         _ => unreachable!(),
     };
     secure_wallet_db_file(std::path::Path::new(db))?;
@@ -574,16 +470,9 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> String {
         .unwrap_or_else(|| resolve_default_lwd_url(net, cmd))
 }
 
-fn ensure_unique_name(
-    accounts: &[LocatedAccount],
-    name: &str,
-    except_uuid: Option<&str>,
-) -> Result<(), String> {
+fn ensure_unique_name(accounts: &[LocatedAccount], name: &str) -> Result<(), String> {
     validate_name(name)?;
-    if accounts
-        .iter()
-        .any(|a| a.account.name == name && except_uuid != Some(a.account.uuid.as_str()))
-    {
+    if accounts.iter().any(|a| a.account.name == name) {
         Err(format!(
             "Account name {name:?} already exists; choose another name"
         ))
@@ -775,12 +664,12 @@ fn cmd_import(
     net: WalletNetwork,
     opts: &[String],
     name: &str,
-    index: &DatabaseIndex,
+    databases: &[PathBuf],
 ) -> Result<(), String> {
     let birthday = flag_u64(opts, "--birthday");
     let mnemonic = read_mnemonic()?;
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
-    index.ensure_new_seed(&seed, net)?;
+    ensure_new_seed(databases, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
     #[cfg(target_os = "macos")]
     zorg::secret_store::store_mnemonic_in_macos_keychain(
@@ -1181,31 +1070,23 @@ mod tests {
     fn missing_index_is_empty_and_does_not_adopt_old_databases() {
         let root = tempfile::tempdir().unwrap();
         fixture(root.path(), "wallet.db", "Old");
-        let index = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        assert!(index.databases.is_empty());
+        assert!(read_database_paths(root.path()).unwrap().is_empty());
         assert!(!root.path().join("index.toml").exists());
     }
 
     #[test]
-    fn index_round_trips_paths_and_register_deduplicates_symlinks() {
+    fn index_round_trips_database_paths() {
         let root = tempfile::tempdir().unwrap();
         let db = fixture(root.path(), "a space.db", "Daily");
-        let _lock = DatabaseIndex::lock(root.path()).unwrap();
-        let mut index = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        index.register(Path::new(&db)).unwrap();
-        index.register(Path::new(&db)).unwrap();
-        #[cfg(unix)]
-        {
-            let alias = root.path().join("alias.db");
-            std::os::unix::fs::symlink(&db, &alias).unwrap();
-            index.register(&alias).unwrap();
-        }
-        let reloaded = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        assert_eq!(reloaded.databases.len(), 1);
+        let _lock = lock_index(root.path()).unwrap();
+        write_database_paths(root.path(), &[PathBuf::from(&db)]).unwrap();
+        assert_eq!(
+            read_database_paths(root.path()).unwrap(),
+            [PathBuf::from(&db)]
+        );
         let text = fs::read_to_string(root.path().join("index.toml")).unwrap();
         assert!(text.contains("[[databases]]"));
         assert!(!text.contains("Daily"));
-        assert!(!text.contains("selected"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1231,10 +1112,7 @@ mod tests {
             "[[databases]]\npath = '/tmp/a'\nname = 'Daily'",
         ] {
             fs::write(root.path().join("index.toml"), text).unwrap();
-            assert!(
-                DatabaseIndex::load(root.path().to_path_buf()).is_err(),
-                "{text}"
-            );
+            assert!(read_database_paths(root.path()).is_err(), "{text}");
             assert_eq!(
                 fs::read_to_string(root.path().join("index.toml")).unwrap(),
                 text
@@ -1243,68 +1121,34 @@ mod tests {
     }
 
     #[test]
-    fn accounts_are_resolved_by_name_across_databases_and_survive_rename() {
+    fn accounts_are_resolved_by_name_across_databases() {
         let root = tempfile::tempdir().unwrap();
         let first = fixture(root.path(), "first.db", "Daily");
         let second = fixture(root.path(), "second.db", "Savings");
-        let mut index = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        let _lock = DatabaseIndex::lock(root.path()).unwrap();
-        index.register(Path::new(&first)).unwrap();
-        index.register(Path::new(&second)).unwrap();
-        let (accounts, unavailable) = index.accounts(None).unwrap();
+        let (accounts, unavailable) =
+            accounts_from_databases(&[first.into(), second.clone().into()]).unwrap();
         assert!(unavailable.is_empty());
         assert_eq!(accounts.len(), 2);
         assert!(select(&accounts, None).is_err());
         let savings = select(&accounts, Some("Savings")).unwrap();
         assert_eq!(savings.db, second);
         assert_eq!(savings.account.account_index, 0);
-        let uuid = savings.account.uuid.clone();
-        let address = savings.account.unified_address.clone();
-        account::rename_account(&second, WalletNetwork::Regtest, &uuid, "Travel").unwrap();
-        let (accounts, _) = index.accounts(None).unwrap();
-        assert!(select(&accounts, Some("Savings")).is_err());
-        let renamed = select(&accounts, Some("Travel")).unwrap();
-        assert_eq!(renamed.account.uuid, uuid);
-        assert_eq!(renamed.account.unified_address, address);
-        assert_eq!(renamed.account.account_index, 0);
-    }
-
-    #[test]
-    fn register_rejects_duplicate_names_without_changing_index() {
-        let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "first.db", "Daily");
-        let second = fixture(root.path(), "second.db", "Daily");
-        let _lock = DatabaseIndex::lock(root.path()).unwrap();
-        let mut index = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        index.register(Path::new(&first)).unwrap();
-        let before = fs::read(root.path().join("index.toml")).unwrap();
-        assert!(index
-            .register(Path::new(&second))
-            .unwrap_err()
-            .contains("already exists"));
-        assert_eq!(before, fs::read(root.path().join("index.toml")).unwrap());
     }
 
     #[test]
     fn unavailable_databases_remain_indexed_and_are_never_recreated() {
         let root = tempfile::tempdir().unwrap();
         let db = fixture(root.path(), "offline.db", "Offline");
-        let _lock = DatabaseIndex::lock(root.path()).unwrap();
-        let mut index = DatabaseIndex::load(root.path().to_path_buf()).unwrap();
-        index.register(Path::new(&db)).unwrap();
+        let _lock = lock_index(root.path()).unwrap();
+        let databases = vec![PathBuf::from(&db)];
+        write_database_paths(root.path(), &databases).unwrap();
         fs::rename(&db, root.path().join("unmounted.db")).unwrap();
-        let (accounts, unavailable) = index.accounts(None).unwrap();
+        let (accounts, unavailable) = accounts_from_databases(&databases).unwrap();
         assert!(accounts.is_empty());
         assert_eq!(unavailable.len(), 1);
         assert!(require_available(&unavailable).is_err());
         assert!(!Path::new(&db).exists());
-        assert_eq!(
-            DatabaseIndex::load(root.path().to_path_buf())
-                .unwrap()
-                .databases
-                .len(),
-            1
-        );
+        assert_eq!(read_database_paths(root.path()).unwrap().len(), 1);
     }
 
     #[test]
@@ -1312,11 +1156,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = fixture(root.path(), "first.db", "Daily");
         let second = fixture(root.path(), "second.db", "Daily");
-        let index = DatabaseIndex {
-            root: root.path().to_path_buf(),
-            databases: vec![first.into(), second.into()],
-        };
-        let (accounts, _) = index.accounts(None).unwrap();
+        let databases = vec![first.into(), second.into()];
+        let (accounts, _) = accounts_from_databases(&databases).unwrap();
         assert!(select(&accounts, Some("Daily")).is_err());
         assert!(select(&accounts, Some("daily")).is_err());
     }
@@ -1362,15 +1203,15 @@ mod tests {
             args.extend(["--network".into(), "regtest".into()]);
             super::run_in(index_root.clone(), &args)
         };
-        command(&["register", first_db]).unwrap();
-        command(&["register", second_db]).unwrap();
+        {
+            let _lock = lock_index(root.path()).unwrap();
+            write_database_paths(root.path(), &[first_db.into(), second_db.into()]).unwrap();
+        }
         command(&[]).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("--account"));
         command(&["address", "--account", "Savings"]).unwrap();
         command(&["balance", "--account", "Travel"]).unwrap();
         command(&["history", "--account", "Daily"]).unwrap();
-        command(&["rename", "Reserve", "--account", "Savings"]).unwrap();
-        assert!(command(&["rename", "Daily", "--account", "Reserve"]).is_err());
         command(&["delete", "--account", "Daily"]).unwrap();
         assert_eq!(
             zorg::account::list_accounts(first_db, WalletNetwork::Regtest)
@@ -1388,11 +1229,11 @@ mod tests {
         assert_eq!(remaining[0].uuid, second.uuid);
         assert_ne!(remaining[0].uuid, first.uuid);
         assert_eq!(remaining[0].account_index, 1);
-        command(&["balance", "--account", "Reserve"]).unwrap();
+        command(&["balance", "--account", "Savings"]).unwrap();
         let offline = root.path().join("offline.db");
         std::fs::rename(second_db, &offline).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("unavailable"));
-        command(&["balance", "--account", "Reserve"]).unwrap();
+        command(&["balance", "--account", "Savings"]).unwrap();
         std::fs::rename(offline, second_db).unwrap();
         assert!(command(&["--db", second_db, "accounts"]).is_err());
     }

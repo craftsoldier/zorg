@@ -21,11 +21,9 @@ Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 
 | Command | Description |
 |---|---|
-| `zorg` / `zorg accounts` | List named accounts across registered databases |
+| `zorg` / `zorg accounts` | List named accounts across known databases |
 | `zorg create [name]` | Create a new account and recovery phrase |
 | `zorg import [name] [--birthday <height>]` | Restore an account from a recovery phrase (index 0) |
-| `zorg register <path>` | Register an existing database location |
-| `zorg rename <new-name> --account <name>` | Rename an account |
 | `zorg balance [--account <name>]` | Show spendable, pending, and locked balances |
 | `zorg address [--account <name>]` | Get a unified receiving address |
 | `zorg sync [--account <name>]` | Sync all databases, or the chosen account's database |

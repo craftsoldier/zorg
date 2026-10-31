@@ -19,8 +19,8 @@ seed and may contain multiple named accounts. Account names live in the
 databases, and phrases are stored once per database in Keychain.
 The database itself is not encrypted.
 Running zorg without a command lists accounts across all known databases.
-Names are case-sensitive and unique across registered databases.
-Missing databases remain registered and are reported as unavailable.
+Names are case-sensitive and unique across known databases.
+Missing databases remain in the index and are reported as unavailable.
 There is no migration of legacy databases or Keychain entries.
 .SH GLOBAL FLAGS
 Recognized before or after the command:
@@ -50,21 +50,12 @@ and is printed with the address.
 .TP
 .BI zorg\ import " [name] [\-\-birthday\ height]"
 Import a phrase at derivation index 0 into a new database. Ask for a name if
-omitted. Reject a phrase already registered on the same network. Higher
+omitted. Reject a phrase already known on the same network. Higher
 account-index discovery is not implemented.
 .TP
 .B zorg\ accounts
-List all accounts across registered databases. Each line shows the account
+List all accounts across known databases. Each line shows the account
 name, network, and unified address.
-.TP
-.BI zorg\ register " path"
-Remember an existing database location. The parent directory must be private
-(0700). Databases must use the new seed metadata layout and have unique
-account names. Reconnect unavailable databases before registering another.
-.TP
-.BI zorg\ rename " new-name \-\-account name"
-Change the account name without changing its keys, address, or derivation index.
-Reconnect unavailable databases before renaming accounts.
 .TP
 .BI zorg\ balance " [\-\-account\ name]"
 Print spendable, pending, and locked balances for the account
@@ -74,10 +65,10 @@ Print spendable, pending, and locked balances for the account
 Print the account's unified receiving address.
 .TP
 .BI zorg\ sync " [\-\-account\ name]"
-Sync every registered database once, or the chosen account's database.
+Sync every known database once, or the chosen account's database.
 .TP
 .BI zorg\ status " [\-\-account\ name]"
-Print scan progress for every registered database, or the chosen account's database.
+Print scan progress for every known database, or the chosen account's database.
 .TP
 .BI zorg\ send " to\ amount [\-\-memo\ text] [\-\-account\ name]"
 Propose, authorize, and broadcast a shielded transfer of
