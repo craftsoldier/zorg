@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -527,6 +528,269 @@ fn current_receive_address(
 
     let address = last.unwrap_or(default);
     Ok(address.encode(&network))
+}
+
+pub fn wallet_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let home = PathBuf::from(home);
+    Ok(if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/zorg")
+    } else {
+        home.join(".zorg")
+    })
+}
+
+/// Opens `zorg_index.db` and holds its write lock until `COMMIT`.
+pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String> {
+    ensure_private_wallet_dir(root)?;
+    let path = root.join("zorg_index.db");
+    let conn = rusqlite::Connection::open(&path)
+        .map_err(|e| format!("Could not open database index: {e}"))?;
+    secure_wallet_db_file(&path)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS databases (db_path TEXT PRIMARY KEY NOT NULL);
+         BEGIN IMMEDIATE;",
+    )
+    .map_err(|e| format!("Could not lock database index: {e}"))?;
+    Ok(conn)
+}
+
+/// The database paths in an open `zorg_index.db`, in the order they were added.
+pub fn database_paths(conn: &rusqlite::Connection) -> Result<Vec<PathBuf>, String> {
+    let mut stmt = conn
+        .prepare("SELECT db_path FROM databases ORDER BY rowid")
+        .map_err(|e| format!("Could not read database index: {e}"))?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| format!("Could not read database index: {e}"))?;
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// The database paths in `zorg_index.db`, or none when it does not exist.
+pub fn read_database_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let path = root.join("zorg_index.db");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Could not open database index: {e}"))?;
+    database_paths(&conn)
+}
+
+/// Adds a database path to an open `zorg_index.db`.
+pub fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), String> {
+    let path = path.to_str().ok_or("Database path must be UTF-8")?;
+    conn.execute("INSERT INTO databases (db_path) VALUES (?1)", [path])
+        .map_err(|e| format!("Could not update database index: {e}"))?;
+    Ok(())
+}
+
+pub fn accounts_from_databases(
+    databases: &[PathBuf],
+) -> Result<(Vec<AccountInfo>, Vec<String>), String> {
+    let mut result = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    for path in databases {
+        let canonical = match path.canonicalize() {
+            Ok(path) => path,
+            Err(e) => {
+                unavailable.push(format!("Database unavailable: {} ({e})", path.display()));
+                continue;
+            }
+        };
+        if !seen_paths.insert(canonical) {
+            continue;
+        }
+        let path = path.to_str().ok_or("Database path must be UTF-8")?;
+        let Some(net) = network_in_wallet_db(path)? else {
+            continue;
+        };
+        ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
+        secure_wallet_db_file(Path::new(path))?;
+        result.extend(list_accounts(path, net)?);
+    }
+    Ok((result, unavailable))
+}
+
+pub fn ensure_new_seed(
+    databases: &[PathBuf],
+    seed: &secrecy::SecretVec<u8>,
+    network: WalletNetwork,
+) -> Result<(), String> {
+    for path in databases {
+        let path = path.to_str().ok_or("Database path must be UTF-8")?;
+        if network_in_wallet_db(path)? == Some(network) && seed_is_in_wallet(path, network, seed)? {
+            return Err(
+                "This recovery phrase is already known on this network; run `zorg accounts`".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn require_available(unavailable: &[String]) -> Result<(), String> {
+    if unavailable.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Reconnect unavailable databases before adding accounts:\n{}",
+            unavailable.join("\n")
+        ))
+    }
+}
+
+pub fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        Err(
+            "Account name must be nonempty, with no surrounding whitespace or control characters"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+pub fn select<'a>(
+    accounts: &'a [AccountInfo],
+    name: Option<&str>,
+) -> Result<&'a AccountInfo, String> {
+    match name {
+        Some(name) => {
+            let mut matches = accounts.iter().filter(|a| a.name == name);
+            let account = matches
+                .next()
+                .ok_or_else(|| format!("No account named {name:?}; run `zorg accounts`"))?;
+            if matches.next().is_some() {
+                return Err(format!(
+                    "Multiple accounts named {name:?}; give them unique names before selecting one"
+                ));
+            }
+            Ok(account)
+        }
+        None if accounts.len() == 1 => Ok(&accounts[0]),
+        None if accounts.is_empty() => {
+            Err("No accounts found. Run `zorg create` or `zorg import`.".into())
+        }
+        None => Err("Choose an account with --account <name>; run `zorg accounts`".into()),
+    }
+}
+
+pub fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), String> {
+    validate_name(name)?;
+    if accounts.iter().any(|a| a.name == name) {
+        Err(format!(
+            "Account name {name:?} already exists; choose another name"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("Failed to create wallet directory: {e}"))?;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("Failed to secure wallet directory: {e}"))
+}
+
+#[cfg(unix)]
+pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("Failed to create wallet directory: {e}"))?;
+
+    let mode = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to inspect wallet directory: {e}"))?
+        .permissions()
+        .mode();
+    if mode & 0o077 == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Wallet database directory {} is accessible by other users; use a private directory with permissions 0700",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
+}
+
+#[cfg(not(unix))]
+pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
+}
+
+#[cfg(unix)]
+pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.exists() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure wallet database: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+pub fn network_in_wallet_db(db_path: &str) -> Result<Option<WalletNetwork>, String> {
+    if !std::path::Path::new(db_path).exists() {
+        return Ok(None);
+    }
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Could not inspect wallet database network: {e}"))?;
+    let has_accounts: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists != 0)
+        .map_err(|e| format!("Could not inspect wallet database schema: {e}"))?;
+    if !has_accounts {
+        return Ok(None);
+    }
+    let encoded_key = conn
+        .query_row(
+            "SELECT uivk FROM accounts WHERE uivk IS NOT NULL AND uivk != '' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read wallet database network: {e}"))?;
+    let Some(encoded_key) = encoded_key else {
+        return Ok(None);
+    };
+    use zcash_address::unified::Encoding as _;
+    let (network, _, _) = zcash_address::unified::Uivk::decode(&encoded_key).map_err(|e| {
+        format!("Could not determine wallet database network from account key: {e}")
+    })?;
+    use zcash_protocol::consensus::NetworkType;
+    Ok(Some(match network {
+        NetworkType::Main => WalletNetwork::Main,
+        NetworkType::Test => WalletNetwork::Test,
+        NetworkType::Regtest => WalletNetwork::Regtest,
+    }))
 }
 
 #[cfg(test)]
