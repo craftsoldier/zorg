@@ -10,7 +10,7 @@ USAGE:
     zorg <command> [options]
 
 COMMANDS:
-    create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100)
+    create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100, rounded down to 100)
     import [--birthday <height>]                        Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
@@ -272,6 +272,7 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
         .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
     println!("Account number: {}", created.number);
     println!("Address: {}", created.unified_address);
+    println!("Wallet birthday: {birthday}");
     Ok(())
 }
 
@@ -303,7 +304,7 @@ fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
             "Could not determine wallet birthday: lightwalletd returned an empty chain".into(),
         );
     }
-    Ok(tip.saturating_sub(100).max(1))
+    Ok((tip.saturating_sub(100) / 100 * 100).max(1))
 }
 
 fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
@@ -768,6 +769,12 @@ mod tests {
             "explicit birthday must not fetch the chain tip"
         );
         assert_eq!(resolve_create_birthday(None, || Ok(1_000)).unwrap(), 900);
+        assert_eq!(resolve_create_birthday(None, || Ok(1_099)).unwrap(), 900);
+        assert_eq!(
+            resolve_create_birthday(None, || Ok(4_562_637)).unwrap(),
+            4_562_500
+        );
+        assert_eq!(resolve_create_birthday(None, || Ok(199)).unwrap(), 1);
         assert_eq!(resolve_create_birthday(None, || Ok(100)).unwrap(), 1);
         assert!(resolve_create_birthday(None, || Ok(0)).is_err());
         assert!(resolve_create_birthday(None, || Err("offline".into()))

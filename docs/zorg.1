@@ -45,8 +45,9 @@ Environment equivalents:
 .BI zorg\ create " [\-\-name\ n] [\-\-birthday\ height]"
 Create a new wallet and print its mnemonic. The name defaults to
 "Account 1". The wallet birthday defaults to the current chain tip
-(resolved via the lightwalletd endpoint); pass an explicit height to
-scan from earlier.
+(resolved via the lightwalletd endpoint) minus 100, rounded down to a
+multiple of 100, and is printed with the address; pass an explicit
+height to scan from earlier.
 .TP
 .BI zorg\ import " [\-\-birthday\ height]"
 Import an existing wallet from its mnemonic and reconstruct its
