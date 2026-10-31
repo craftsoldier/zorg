@@ -5,6 +5,9 @@ use crate::{keys, network::WalletNetwork};
 
 const ACCOUNT_MNEMONIC_KEY_PREFIX: &str = "zorg_wallet_";
 
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
 pub fn seed_from_macos_stored_mnemonic(
     network: WalletNetwork,
     account_uuid: &str,
@@ -52,85 +55,49 @@ fn account_mnemonic_key(account_uuid: &str) -> String {
     format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{account_uuid}")
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-    use secrecy::ExposeSecret;
-
-    #[test]
-    fn keychain_round_trips_through_production_read_path() {
-        use security_framework::passwords::delete_generic_password;
-
-        let account_uuid = uuid::Uuid::new_v4().to_string();
-        let mnemonic = keys::generate_mnemonic();
-        let expected = keys::mnemonic_to_seed(&mnemonic).unwrap();
-        let service = mnemonic_store_service_for_network(WalletNetwork::Regtest);
-        let key = account_mnemonic_key(&account_uuid);
-
-        if let Err(error) =
-            store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic)
-        {
-            if keychain_is_unavailable(&error) && std::env::var_os("CI").is_none() {
-                eprintln!("Skipping keychain round-trip: {error}");
-                return;
-            }
-            panic!("failed to write test mnemonic: {error}");
-        }
-        let actual =
-            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &account_uuid).unwrap();
-        assert_eq!(actual.expose_secret(), expected.expose_secret());
-
-        delete_generic_password(&service, &key).unwrap();
-    }
-
-    fn keychain_is_unavailable(error: &str) -> bool {
-        error.contains("No keychain is available")
-            || error.contains("One or more parameters passed to a function were not valid")
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn macos_read_secure_store_value(
     service: &str,
     key: &str,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    use security_framework::passwords::{generic_password, PasswordOptions};
 
-    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-
-    let mut search = ItemSearchOptions::new();
-    search
-        .class(ItemClass::generic_password())
-        .service(service)
-        .account(key)
-        .load_data(true);
-
-    match search.search() {
-        Ok(results) => {
-            if results.is_empty() {
-                return Ok(None);
-            }
-            match results.into_iter().next() {
-                Some(SearchResult::Data(data)) => Ok(Some(Zeroizing::new(data))),
-                Some(other) => Err(format!(
-                    "Unexpected keychain search result for service={service} key={key}: {other:?}"
-                )),
-                None => Ok(None),
-            }
-        }
+    let mut options = PasswordOptions::new_generic_password(service, key);
+    options.use_protected_keychain();
+    match generic_password(options) {
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-        Err(error) => Err(format!(
-            "Keychain read failed for service={service} key={key}: {error}"
-        )),
+        Err(error) => Err(format!("Keychain read failed: {error}")),
     }
 }
 
 #[cfg(target_os = "macos")]
 fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Result<(), String> {
-    use security_framework::passwords::set_generic_password;
+    use security_framework::{
+        access_control::{ProtectionMode, SecAccessControl},
+        passwords::{
+            delete_generic_password_options, set_generic_password_options, AccessControlOptions,
+            PasswordOptions,
+        },
+    };
 
-    set_generic_password(service, key, value)
-        .map_err(|e| format!("Failed to write to keychain for service={service} key={key}: {e}"))
+    let access = SecAccessControl::create_with_protection(
+        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+        AccessControlOptions::USER_PRESENCE.bits(),
+    )
+    .map_err(|error| format!("Create Keychain access control: {error}"))?;
+    let mut existing = PasswordOptions::new_generic_password(service, key);
+    existing.use_protected_keychain();
+    match delete_generic_password_options(existing) {
+        Ok(()) => {}
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
+        Err(error) => return Err(format!("Failed to replace Keychain entry: {error}")),
+    }
+    let mut options = PasswordOptions::new_generic_password(service, key);
+    options.use_protected_keychain();
+    options.set_access_control(access);
+    set_generic_password_options(value, options)
+        .map_err(|error| format!("Failed to write protected mnemonic to Keychain: {error}"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -144,4 +111,31 @@ fn macos_read_secure_store_value(
 #[cfg(not(target_os = "macos"))]
 fn macos_write_secure_store_value(_service: &str, _key: &str, _value: &[u8]) -> Result<(), String> {
     Err("macOS stored mnemonic path is unsupported on this platform".to_string())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a signed test bundle and interactive Keychain authentication"]
+    fn keychain_round_trips_through_production_read_path() {
+        use secrecy::ExposeSecret;
+        use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
+
+        let account_uuid = uuid::Uuid::new_v4().to_string();
+        let mnemonic = keys::generate_mnemonic();
+        let expected = keys::mnemonic_to_seed(&mnemonic).unwrap();
+        let service = mnemonic_store_service_for_network(WalletNetwork::Regtest);
+        let key = account_mnemonic_key(&account_uuid);
+
+        store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic).unwrap();
+        let actual =
+            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &account_uuid).unwrap();
+
+        let mut options = PasswordOptions::new_generic_password(&service, &key);
+        options.use_protected_keychain();
+        delete_generic_password_options(options).unwrap();
+        assert_eq!(actual.expose_secret(), expected.expose_secret());
+    }
 }

@@ -266,14 +266,10 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
-    #[cfg(target_os = "macos")]
-    if let Err(e) =
-        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
-
     println!("Mnemonic (save this!): {mnemonic}");
+    #[cfg(target_os = "macos")]
+    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
+        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
     println!("Account number: {}", created.number);
     println!("Address: {}", created.unified_address);
     Ok(())
@@ -316,11 +312,8 @@ fn cmd_import(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday)?;
     #[cfg(target_os = "macos")]
-    if let Err(e) =
-        zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
-    {
-        log::warn!("Failed to store mnemonic in keychain: {e}");
-    }
+    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
+        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
 
     println!("Account number: {}", created.number);
     println!("Address: {}", created.unified_address);
@@ -387,14 +380,13 @@ fn cmd_send(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Res
     )?;
     println!("Fee: {}", fmt_zec(proposal.fee_zatoshi, net));
 
-    let seed = load_seed(db, net, &uuid)?;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(sync::execute_proposal(
+    let result = rt.block_on(sync::execute_proposal_with_seed_loader(
         db,
         lwd_url,
         proposal.proposal_id,
         &send_flow_id,
-        seed,
+        |network, account| load_seed(db, network, &account.expose_uuid().to_string()),
         None,
         None,
     ))?;
@@ -677,15 +669,14 @@ fn load_seed(
 ) -> Result<secrecy::SecretVec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
-        match zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid) {
-            Ok(seed) => return Ok(seed),
-            Err(error) => {
-                eprintln!("Keychain unavailable ({error}); falling back to manual mnemonic entry.")
-            }
-        }
+        zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid)
     }
-    let mnemonic = read_mnemonic()?;
-    keys::mnemonic_to_seed(&mnemonic)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (net, account_uuid);
+        let mnemonic = read_mnemonic()?;
+        keys::mnemonic_to_seed(&mnemonic)
+    }
 }
 
 /// Read the 24-word mnemonic from the terminal without echoing it.
