@@ -42,12 +42,11 @@ Environment equivalents:
 .B ZORG_LIGHTWALLETD_URL\fR.
 .SH COMMANDS
 .TP
-.BI zorg\ create " [\-\-name\ n] [\-\-birthday\ height]"
+.B zorg\ create
 Create a new wallet and print its mnemonic. The name defaults to
-"Account 1". The wallet birthday defaults to the current chain tip
-(resolved via the lightwalletd endpoint) minus 100, rounded down to a
-multiple of 100, and is printed with the address; pass an explicit
-height to scan from earlier.
+"Account 1". The wallet birthday is the current chain tip (resolved via
+the lightwalletd endpoint) minus 100, rounded down to a multiple of 100,
+and is printed with the address.
 .TP
 .BI zorg\ import " [\-\-birthday\ height]"
 Import an existing wallet from its mnemonic and reconstruct its
