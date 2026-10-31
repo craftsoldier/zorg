@@ -530,6 +530,7 @@ fn current_receive_address(
     Ok(address.encode(&network))
 }
 
+/// zorg's data directory: `~/Library/Application Support/zorg` on macOS.
 pub fn wallet_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let home = PathBuf::from(home);
@@ -587,6 +588,7 @@ pub fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(),
     Ok(())
 }
 
+/// The accounts in the given databases, and a message for each database that is unavailable.
 pub fn accounts_from_databases(
     databases: &[PathBuf],
 ) -> Result<(Vec<AccountInfo>, Vec<String>), String> {
@@ -615,6 +617,7 @@ pub fn accounts_from_databases(
     Ok((result, unavailable))
 }
 
+/// Fails when one of `databases` already holds accounts from `seed` on `network`.
 pub fn ensure_new_seed(
     databases: &[PathBuf],
     seed: &secrecy::SecretVec<u8>,
@@ -631,6 +634,7 @@ pub fn ensure_new_seed(
     Ok(())
 }
 
+/// Fails when any database is unavailable.
 pub fn require_available(unavailable: &[String]) -> Result<(), String> {
     if unavailable.is_empty() {
         Ok(())
@@ -642,6 +646,7 @@ pub fn require_available(unavailable: &[String]) -> Result<(), String> {
     }
 }
 
+/// Fails unless `name` is nonempty, with no surrounding whitespace or control characters.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
         Err(
@@ -653,6 +658,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// The account named `name`.
 pub fn select<'a>(
     accounts: &'a [AccountInfo],
     name: Option<&str>,
@@ -678,6 +684,7 @@ pub fn select<'a>(
     }
 }
 
+/// Fails when `name` is invalid or already used by one of `accounts`.
 pub fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), String> {
     validate_name(name)?;
     if accounts.iter().any(|a| a.name == name) {
@@ -689,6 +696,7 @@ pub fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), St
     }
 }
 
+/// Creates `path` if needed and sets its permissions to 0700.
 #[cfg(unix)]
 pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -703,6 +711,7 @@ pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to secure wallet directory: {e}"))
 }
 
+/// Creates `path` if needed and fails when other users can access it.
 #[cfg(unix)]
 pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -737,6 +746,7 @@ pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
 }
 
+/// Sets an existing wallet file's permissions to 0600.
 #[cfg(unix)]
 pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -753,6 +763,7 @@ pub fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The network of the wallet database at `db_path`, or none when it has no accounts.
 pub fn network_in_wallet_db(db_path: &str) -> Result<Option<WalletNetwork>, String> {
     if !std::path::Path::new(db_path).exists() {
         return Ok(None);
