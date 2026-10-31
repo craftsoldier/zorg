@@ -7,12 +7,6 @@ use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
 
-struct LocatedAccount {
-    db: String,
-    network: WalletNetwork,
-    account: AccountInfo,
-}
-
 fn wallet_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let home = PathBuf::from(home);
@@ -72,7 +66,7 @@ fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), Str
 
 fn accounts_from_databases(
     databases: &[PathBuf],
-) -> Result<(Vec<LocatedAccount>, Vec<String>), String> {
+) -> Result<(Vec<AccountInfo>, Vec<String>), String> {
     let mut result = Vec::new();
     let mut unavailable = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
@@ -93,14 +87,7 @@ fn accounts_from_databases(
         };
         ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
         secure_wallet_db_file(Path::new(path))?;
-        let accounts = zorg::account::list_accounts(path, net)?;
-        for account in accounts {
-            result.push(LocatedAccount {
-                db: path.to_string(),
-                network: net,
-                account,
-            });
-        }
+        result.extend(zorg::account::list_accounts(path, net)?);
     }
     Ok((result, unavailable))
 }
@@ -145,13 +132,10 @@ fn validate_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn select<'a>(
-    accounts: &'a [LocatedAccount],
-    name: Option<&str>,
-) -> Result<&'a LocatedAccount, String> {
+fn select<'a>(accounts: &'a [AccountInfo], name: Option<&str>) -> Result<&'a AccountInfo, String> {
     match name {
         Some(name) => {
-            let mut matches = accounts.iter().filter(|a| a.account.name == name);
+            let mut matches = accounts.iter().filter(|a| a.name == name);
             let account = matches
                 .next()
                 .ok_or_else(|| format!("No account named {name:?}; run `zorg accounts`"))?;
@@ -329,12 +313,12 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         if visible.is_empty() {
             println!("No accounts found. Run `zorg create` or `zorg import`.");
         }
-        for located in &visible {
+        for account in &visible {
             println!(
                 "  {:<20} {:<7} {}",
-                located.account.name,
-                located.network.as_str(),
-                located.account.unified_address
+                account.name,
+                account.network.as_str(),
+                account.unified_address
             );
         }
         return Ok(());
@@ -365,18 +349,18 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
             .unwrap_or_else(|| visible.iter().collect());
         let mut seen = std::collections::HashSet::new();
         for account in targets {
-            if !seen.insert(&account.db) {
+            if !seen.insert(&account.db_path) {
                 continue;
             }
             let url = endpoint(lwd.as_deref(), &account.network, cmd);
-            println!("{}:", account.account.name);
+            println!("{}:", account.name);
             if cmd == "sync" {
-                sync::run_full_sync_blocking(&account.db, &url, account.network.as_str())?;
+                sync::run_full_sync_blocking(&account.db_path, &url, account.network.as_str())?;
                 println!("Sync complete.");
             } else {
-                let p = sync::get_sync_progress(&account.db, account.network)?;
+                let p = sync::get_sync_progress(&account.db_path, account.network)?;
                 let tip = zorg::sync_engine::fetch_chain_tip(&url).ok();
-                let verified = zorg::sync_engine::last_completed_sync_at(&account.db)?;
+                let verified = zorg::sync_engine::last_completed_sync_at(&account.db_path)?;
                 println!(
                     "{}",
                     render_sync_status(p.scanned_height, tip, verified, unix_now())
@@ -386,23 +370,23 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let selected = selected.ok_or("Choose an account")?;
-    let db = &selected.db;
+    let db = &selected.db_path;
     let net = selected.network;
-    let uuid = &selected.account.uuid;
+    let uuid = &selected.uuid;
     let result = match cmd {
         "address" => {
-            println!("{}", selected.account.unified_address);
+            println!("{}", selected.unified_address);
             Ok(())
         }
         "balance" => cmd_balance(db, net, uuid),
         "send" => cmd_send(db, net, &endpoint(lwd.as_deref(), &net, cmd), opts, uuid),
         "history" => cmd_history(db, net, opts, uuid),
-        "recovery" => cmd_recovery(net, &selected.account),
+        "recovery" => cmd_recovery(net, selected),
         "delete" => {
             if name.is_none() {
                 return Err("Usage: zorg delete --account <name> [--yes]".into());
             }
-            cmd_delete(db, net, &selected.account, opts)
+            cmd_delete(db, net, selected, opts)
         }
         _ => unreachable!(),
     };
@@ -416,9 +400,9 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> String {
         .unwrap_or_else(|| resolve_default_lwd_url(net, cmd))
 }
 
-fn ensure_unique_name(accounts: &[LocatedAccount], name: &str) -> Result<(), String> {
+fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), String> {
     validate_name(name)?;
-    if accounts.iter().any(|a| a.account.name == name) {
+    if accounts.iter().any(|a| a.name == name) {
         Err(format!(
             "Account name {name:?} already exists; choose another name"
         ))
@@ -1067,8 +1051,8 @@ mod tests {
         assert_eq!(accounts.len(), 2);
         assert!(select(&accounts, None).is_err());
         let savings = select(&accounts, Some("Savings")).unwrap();
-        assert_eq!(savings.db, second);
-        assert_eq!(savings.account.account_index, 0);
+        assert_eq!(savings.db_path, second);
+        assert_eq!(savings.account_index, 0);
     }
 
     #[test]

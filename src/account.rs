@@ -40,6 +40,8 @@ pub struct AccountInfo {
     pub unified_address: String,
     pub account_index: u32,
     pub birthday_height: u32, // scan-from height
+    pub db_path: String,
+    pub network: WalletNetwork,
 }
 
 fn open_wallet_db_for_init(
@@ -227,6 +229,8 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
             unified_address: address,
             account_index: u32::from(derivation.account_index()),
             birthday_height: u32::from(account.birthday_height()),
+            db_path: db_path.to_string(),
+            network,
         });
     }
 
