@@ -236,17 +236,6 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
     Ok(accounts)
 }
 
-/// The Keychain entry shared by the seed-derived accounts in this database.
-pub fn seed_keychain_reference(db_path: &str) -> Result<String, String> {
-    open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?
-        .query_row(
-            "SELECT keychain_reference FROM zorg_seed WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Failed to read seed reference: {e}"))
-}
-
 fn initialize_seed_reference(
     db_path: &str,
     seed: &SecretVec<u8>,
@@ -258,19 +247,14 @@ fn initialize_seed_reference(
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS zorg_seed (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        keychain_reference TEXT NOT NULL,
         seed_fingerprint BLOB NOT NULL,
         network TEXT NOT NULL
     )",
     )
     .map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT OR IGNORE INTO zorg_seed VALUES (1, ?1, ?2, ?3)",
-        rusqlite::params![
-            uuid::Uuid::new_v4().to_string(),
-            fingerprint.to_bytes().as_slice(),
-            network.as_str()
-        ],
+        "INSERT OR IGNORE INTO zorg_seed VALUES (1, ?1, ?2)",
+        rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()],
     )
     .map_err(|e| e.to_string())?;
     validate_seed(db_path, seed, network)

@@ -451,7 +451,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         "balance" => cmd_balance(db, net, uuid),
         "send" => cmd_send(db, net, &endpoint(lwd.as_deref(), &net, cmd), opts, uuid),
         "history" => cmd_history(db, net, opts, uuid),
-        "recovery" => cmd_recovery(db, net, &selected.account),
+        "recovery" => cmd_recovery(net, &selected.account),
         "delete" => {
             if name.is_none() {
                 return Err("Usage: zorg delete --account <name> [--yes]".into());
@@ -576,12 +576,7 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, name: &str) -> Result
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
     #[cfg(target_os = "macos")]
-    store_and_verify_mnemonic(
-        net,
-        &zorg::account::seed_keychain_reference(db)?,
-        &mnemonic,
-        &seed,
-    )?;
+    store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     print!("{}", recovery_phrase_text(&mnemonic, birthday));
     println!("Account: {name}");
     println!("Address: {}", created.unified_address);
@@ -672,12 +667,8 @@ fn cmd_import(
     ensure_new_seed(databases, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
     #[cfg(target_os = "macos")]
-    zorg::secret_store::store_mnemonic_in_macos_keychain(
-        net,
-        &zorg::account::seed_keychain_reference(db)?,
-        &mnemonic,
-    )
-    .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
+    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
+        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
 
     println!("Account: {name}");
     println!("Address: {}", created.unified_address);
@@ -704,13 +695,8 @@ fn cmd_delete(
 }
 
 #[cfg(target_os = "macos")]
-fn cmd_recovery(
-    db: &str,
-    net: WalletNetwork,
-    account: &zorg::account::AccountInfo,
-) -> Result<(), String> {
-    let reference = zorg::account::seed_keychain_reference(db)?;
-    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain(net, &reference)?;
+fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Result<(), String> {
+    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain(net, &account.uuid)?;
     print!(
         "{}",
         recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
@@ -719,11 +705,7 @@ fn cmd_recovery(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn cmd_recovery(
-    _db: &str,
-    _net: WalletNetwork,
-    _account: &zorg::account::AccountInfo,
-) -> Result<(), String> {
+fn cmd_recovery(_net: WalletNetwork, _account: &zorg::account::AccountInfo) -> Result<(), String> {
     Err("zorg recovery needs the macOS Keychain; on this platform zorg never stores the recovery phrase".into())
 }
 
@@ -783,7 +765,7 @@ fn cmd_send(
         lwd_url,
         proposal.proposal_id,
         &send_flow_id,
-        |network, account| load_seed(db, network, &account.expose_uuid().to_string()),
+        |network, account| load_seed(network, &account.expose_uuid().to_string()),
         None,
         None,
     ))?;
@@ -1022,22 +1004,14 @@ fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
     first_alive.to_string()
 }
 
-fn load_seed(
-    db: &str,
-    net: WalletNetwork,
-    account_uuid: &str,
-) -> Result<secrecy::SecretVec<u8>, String> {
+fn load_seed(net: WalletNetwork, account_uuid: &str) -> Result<secrecy::SecretVec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
-        let _ = account_uuid;
-        zorg::secret_store::seed_from_macos_stored_mnemonic(
-            net,
-            &zorg::account::seed_keychain_reference(db)?,
-        )
+        zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (db, net, account_uuid);
+        let _ = (net, account_uuid);
         let mnemonic = read_mnemonic()?;
         keys::mnemonic_to_seed(&mnemonic)
     }
@@ -1197,7 +1171,6 @@ mod tests {
             "Travel",
         )
         .unwrap();
-        let seed_reference = zorg::account::seed_keychain_reference(first_db).unwrap();
         let command = |args: &[&str]| {
             let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
             args.extend(["--network".into(), "regtest".into()]);
@@ -1220,10 +1193,6 @@ mod tests {
             2
         );
         command(&["delete", "--account", "Daily", "--yes"]).unwrap();
-        assert_eq!(
-            zorg::account::seed_keychain_reference(first_db).unwrap(),
-            seed_reference
-        );
         let remaining = zorg::account::list_accounts(first_db, WalletNetwork::Regtest).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].uuid, second.uuid);
