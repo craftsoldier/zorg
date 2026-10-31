@@ -89,8 +89,10 @@ Check whether
 .I address
 is a valid Zcash address.
 .TP
-.BI zorg\ delete " \-\-account\ name [\-\-yes]"
-Delete an account from the wallet database.
+.BI zorg\ delete " \-\-account\ name"
+Delete an account and its Keychain entry after a warning, Enter, and Touch ID
+or the login password. Deleting a database's last account also deletes the
+database.
 .SH AUTHORS
 Julian Abraham (github.com/craftsoldier)
 .SH LICENSE

@@ -22,7 +22,7 @@ COMMANDS:
     history [--limit <n>] [--account <name>]             Show transaction history
     recovery [--account <name>]                        Show the recovery phrase
     validate <address>                                 Validate a Zcash address
-    delete --account <name> [--yes]                     Delete an account
+    delete --account <name>                            Delete an account
 
 OPTIONS:
     --network <net>      main | test | regtest
@@ -92,15 +92,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
-    let index = if matches!(cmd, "create" | "import") {
-        Some(zorg::account::open_index_for_write(&root)?)
-    } else {
-        None
-    };
-    let databases = match &index {
-        Some(conn) => zorg::account::database_paths(conn)?,
-        None => zorg::account::read_database_paths(&root)?,
-    };
+    let databases = zorg::account::read_database_paths(&root)?;
     let (accounts, unavailable) = zorg::account::accounts_from_databases(&databases)?;
     for message in &unavailable {
         eprintln!("{message}");
@@ -113,6 +105,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
         let net = network.unwrap_or(WalletNetwork::Main);
+        zorg::account::ensure_private_wallet_dir(&root)?;
         let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
         reserve_wallet_file(&db_path)?;
@@ -122,24 +115,27 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         } else {
             cmd_import(db, net, opts, &name, &databases)
         };
-        if let Err(e) = result {
-            remove_wallet_files(db);
+        let created = match result {
+            Ok(created) => created,
+            Err(e) => {
+                zorg::account::remove_wallet_files(db);
+                return Err(e);
+            }
+        };
+        if let Err(e) = zorg::account::secure_wallet_db_file(&db_path).and_then(|()| {
+            zorg::account::index_new_database(&root, &db_path, &name, &created.seed, net)
+        }) {
+            zorg::account::remove_wallet_files(db);
+            #[cfg(target_os = "macos")]
+            let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
             return Err(e);
         }
-        zorg::account::secure_wallet_db_file(&db_path)?;
-        let index = index.ok_or("Database index is not open")?;
-        return zorg::account::add_database_path(&index, &db_path)
-            .and_then(|()| {
-                index
-                    .execute_batch("COMMIT")
-                    .map_err(|e| format!("Could not update database index: {e}"))
-            })
-            .map_err(|e| {
-                format!(
-                    "Account created in {}; could not update index: {e}",
-                    db_path.display()
-                )
-            });
+        if let Some(birthday) = created.birthday {
+            print!("{}", recovery_phrase_text(&created.mnemonic, birthday));
+        }
+        println!("Account: {name}");
+        println!("Address: {}", created.unified_address);
+        return Ok(());
     }
     let visible: Vec<_> = accounts
         .into_iter()
@@ -220,9 +216,10 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
             if name.is_none() {
-                return Err("Usage: zorg delete --account <name> [--yes]".into());
+                return Err("Usage: zorg delete --account <name>".into());
             }
-            cmd_delete(db, net, selected, opts)
+            let last = visible.iter().filter(|a| a.db_path == *db).count() == 1;
+            cmd_delete(&root, selected, last)
         }
         _ => unreachable!(),
     };
@@ -261,17 +258,35 @@ fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("Could not create wallet database: {e}"))
 }
 
-fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, name: &str) -> Result<(), String> {
+/// A created or imported account that is not yet in `zorg_index.db`.
+struct NewAccount {
+    uuid: String,
+    unified_address: String,
+    mnemonic: zeroize::Zeroizing<String>,
+    seed: secrecy::SecretVec<u8>,
+    /// The birthday to show with the recovery phrase; `None` for imports.
+    birthday: Option<u64>,
+}
+
+fn cmd_create(
+    db: &str,
+    net: WalletNetwork,
+    lwd_url: &str,
+    name: &str,
+) -> Result<NewAccount, String> {
     let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
-    let mnemonic = keys::generate_mnemonic();
+    let mnemonic = zeroize::Zeroizing::new(keys::generate_mnemonic());
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
     #[cfg(target_os = "macos")]
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
-    print!("{}", recovery_phrase_text(&mnemonic, birthday));
-    println!("Account: {name}");
-    println!("Address: {}", created.unified_address);
-    Ok(())
+    Ok(NewAccount {
+        uuid: created.uuid,
+        unified_address: created.unified_address,
+        mnemonic,
+        seed,
+        birthday: Some(birthday),
+    })
 }
 
 /// Stores the mnemonic in the protected Keychain, then reads it back (which
@@ -301,13 +316,6 @@ fn store_and_verify_mnemonic(
         let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, account_uuid);
     }
     verified
-}
-
-/// Removes a wallet database and its SQLite side files, ignoring missing ones.
-fn remove_wallet_files(db: &str) {
-    for path in [db.to_string(), format!("{db}-wal"), format!("{db}-shm")] {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 /// The recovery phrase as numbered words, followed by the wallet birthday and
@@ -351,7 +359,7 @@ fn cmd_import(
     opts: &[String],
     name: &str,
     databases: &[PathBuf],
-) -> Result<(), String> {
+) -> Result<NewAccount, String> {
     let birthday = flag_u64(opts, "--birthday");
     let mnemonic = read_mnemonic()?;
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
@@ -360,27 +368,46 @@ fn cmd_import(
     #[cfg(target_os = "macos")]
     zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
         .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
-
-    println!("Account: {name}");
-    println!("Address: {}", created.unified_address);
-    Ok(())
+    Ok(NewAccount {
+        uuid: created.uuid,
+        unified_address: created.unified_address,
+        mnemonic,
+        seed,
+        birthday: None,
+    })
 }
 
 fn cmd_delete(
-    db: &str,
-    net: WalletNetwork,
+    root: &std::path::Path,
     account: &zorg::account::AccountInfo,
-    opts: &[String],
+    last_in_database: bool,
 ) -> Result<(), String> {
-    if !opts.iter().any(|a| a == "--yes") {
+    use std::io::Write;
+    println!(
+        "This deletes account {:?} ({}).",
+        account.name, account.unified_address
+    );
+    if last_in_database {
         println!(
-            "This deletes account {:?} ({}).",
-            account.name, account.unified_address
+            "It is the last account in its wallet database, so the database is deleted too. \
+             Keep the written-down recovery phrase: zorg can't show it again."
         );
-        println!("Re-run with --yes to confirm.");
-        return Ok(());
     }
-    zorg::account::delete_account(db, net, &account.uuid)?;
+    print!("Press Enter to continue, or Ctrl-C to cancel: ");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut String::new())
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    zorg::secret_store::mnemonic_from_macos_keychain(account.network, &account.uuid)?;
+    zorg::account::delete_account_and_empty_database(
+        root,
+        &account.db_path,
+        account.network,
+        &account.uuid,
+    )?;
+    #[cfg(target_os = "macos")]
+    zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
     println!("Account {:?} deleted.", account.name);
     Ok(())
 }
@@ -527,7 +554,6 @@ fn positional_args(opts: &[String]) -> Result<Vec<String>, String> {
                     return Err(format!("{} requires a value", opts[i - 1]));
                 }
             }
-            "--yes" => {}
             value if value.starts_with("--") => return Err(format!("Unknown option: {value}")),
             value => result.push(value.to_string()),
         }
@@ -759,14 +785,13 @@ mod tests {
         command(&["address", "--account", "Savings"]).unwrap();
         command(&["balance", "--account", "Travel"]).unwrap();
         command(&["history", "--account", "Daily"]).unwrap();
-        command(&["delete", "--account", "Daily"]).unwrap();
-        assert_eq!(
-            zorg::account::list_accounts(first_db, WalletNetwork::Regtest)
-                .unwrap()
-                .len(),
-            2
-        );
-        command(&["delete", "--account", "Daily", "--yes"]).unwrap();
+        assert!(!zorg::account::delete_account_and_empty_database(
+            root.path(),
+            first_db,
+            WalletNetwork::Regtest,
+            &first.uuid
+        )
+        .unwrap());
         let remaining = zorg::account::list_accounts(first_db, WalletNetwork::Regtest).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].uuid, second.uuid);
@@ -778,6 +803,19 @@ mod tests {
         assert!(command(&["balance"]).unwrap_err().contains("unavailable"));
         command(&["balance", "--account", "Savings"]).unwrap();
         std::fs::rename(offline, second_db).unwrap();
+        let travel = &zorg::account::list_accounts(second_db, WalletNetwork::Regtest).unwrap()[0];
+        assert!(zorg::account::delete_account_and_empty_database(
+            root.path(),
+            second_db,
+            WalletNetwork::Regtest,
+            &travel.uuid
+        )
+        .unwrap());
+        assert!(!std::path::Path::new(second_db).exists());
+        assert_eq!(
+            zorg::account::read_database_paths(root.path()).unwrap(),
+            [PathBuf::from(first_db)]
+        );
     }
 
     #[test]

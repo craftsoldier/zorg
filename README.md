@@ -32,7 +32,7 @@ Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 | `zorg history [--account <name>] [--limit <n>]` | View transaction history |
 | `zorg recovery [--account <name>]` | Show the recovery phrase |
 | `zorg validate <address>` | Validate a Zcash address |
-| `zorg delete --account <name> [--yes]` | Delete an account after confirmation |
+| `zorg delete --account <name>` | Delete an account after confirmation |
 
 Create and import ask for a name if omitted.
 

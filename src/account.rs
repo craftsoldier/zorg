@@ -588,6 +588,63 @@ pub fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(),
     Ok(())
 }
 
+/// Removes a database path from an open `zorg_index.db`.
+pub fn remove_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), String> {
+    let path = path.to_str().ok_or("Database path must be UTF-8")?;
+    conn.execute("DELETE FROM databases WHERE db_path = ?1", [path])
+        .map_err(|e| format!("Could not update database index: {e}"))?;
+    Ok(())
+}
+
+/// Adds a new wallet database to `zorg_index.db` after checking that its
+/// account name and seed are still unused.
+pub fn index_new_database(
+    root: &Path,
+    db_path: &Path,
+    name: &str,
+    seed: &SecretVec<u8>,
+    network: WalletNetwork,
+) -> Result<(), String> {
+    let index = open_index_for_write(root)?;
+    let databases = database_paths(&index)?;
+    let (accounts, unavailable) = accounts_from_databases(&databases)?;
+    require_available(&unavailable)?;
+    ensure_unique_name(&accounts, name)?;
+    ensure_new_seed(&databases, seed, network)?;
+    add_database_path(&index, db_path)?;
+    index
+        .execute_batch("COMMIT")
+        .map_err(|e| format!("Could not update database index: {e}"))
+}
+
+/// Deletes an account, and its wallet database and index row when it was the
+/// database's last account. Returns whether the database was deleted.
+pub fn delete_account_and_empty_database(
+    root: &Path,
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<bool, String> {
+    delete_account(db_path, network, account_uuid)?;
+    if !list_accounts(db_path, network)?.is_empty() {
+        return Ok(false);
+    }
+    let index = open_index_for_write(root)?;
+    remove_database_path(&index, Path::new(db_path))?;
+    index
+        .execute_batch("COMMIT")
+        .map_err(|e| format!("Could not update database index: {e}"))?;
+    remove_wallet_files(db_path);
+    Ok(true)
+}
+
+/// Removes a wallet database and its SQLite side files, ignoring missing ones.
+pub fn remove_wallet_files(db: &str) {
+    for path in [db.to_string(), format!("{db}-wal"), format!("{db}-shm")] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The accounts in the given databases, and a message for each database that is unavailable.
 pub fn accounts_from_databases(
     databases: &[PathBuf],
