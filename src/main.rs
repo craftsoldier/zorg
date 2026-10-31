@@ -1,6 +1,4 @@
 use rusqlite::OptionalExtension;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use zorg::account::AccountInfo;
@@ -25,94 +23,51 @@ fn wallet_dir() -> Result<PathBuf, String> {
     })
 }
 
-fn lock_index(root: &Path) -> Result<File, String> {
+/// Opens `zorg_index.db` and holds its write lock until `COMMIT`.
+fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String> {
     ensure_private_wallet_dir(root)?;
-    let path = root.join("index.lock");
-    let file = private_options()
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| format!("Could not open database index lock: {e}"))?;
+    let path = root.join("zorg_index.db");
+    let conn = rusqlite::Connection::open(&path)
+        .map_err(|e| format!("Could not open database index: {e}"))?;
     secure_wallet_db_file(&path)?;
-    file.lock()
-        .map_err(|e| format!("Could not lock database index: {e}"))?;
-    Ok(file)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS databases (db_path TEXT PRIMARY KEY NOT NULL);
+         BEGIN IMMEDIATE;",
+    )
+    .map_err(|e| format!("Could not lock database index: {e}"))?;
+    Ok(conn)
 }
 
+/// The database paths in an open `zorg_index.db`, in the order they were added.
+fn database_paths(conn: &rusqlite::Connection) -> Result<Vec<PathBuf>, String> {
+    let mut stmt = conn
+        .prepare("SELECT db_path FROM databases ORDER BY rowid")
+        .map_err(|e| format!("Could not read database index: {e}"))?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| format!("Could not read database index: {e}"))?;
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// The database paths in `zorg_index.db`, or none when it does not exist.
 fn read_database_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let index = root.join("index.toml");
-    let mut databases = Vec::new();
-    match fs::read_to_string(&index) {
-        Ok(text) => {
-            let table: toml::Table = text
-                .parse()
-                .map_err(|e| format!("Invalid database index {}: {e}", index.display()))?;
-            if table.keys().any(|key| key != "databases") {
-                return Err("Unknown field in database index".into());
-            }
-            if let Some(entries) = table.get("databases") {
-                for entry in entries.as_array().ok_or("databases must be a list")? {
-                    let entry = entry.as_table().ok_or("Database entry must be a table")?;
-                    if entry.len() != 1 {
-                        return Err("Each database entry must contain only path".into());
-                    }
-                    let path = PathBuf::from(
-                        entry
-                            .get("path")
-                            .and_then(|p| p.as_str())
-                            .ok_or("Each database entry needs a path string")?,
-                    );
-                    if !path.is_absolute() {
-                        return Err("Database index paths must be absolute".into());
-                    }
-                    if !databases.contains(&path) {
-                        databases.push(path);
-                    }
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Could not read database index: {e}")),
+    let path = root.join("zorg_index.db");
+    if !path.exists() {
+        return Ok(Vec::new());
     }
-    Ok(databases)
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Could not open database index: {e}"))?;
+    database_paths(&conn)
 }
 
-fn write_database_paths(root: &Path, databases: &[PathBuf]) -> Result<(), String> {
-    let entries: Result<Vec<_>, String> = databases
-        .iter()
-        .map(|path| {
-            let mut entry = toml::Table::new();
-            entry.insert(
-                "path".into(),
-                toml::Value::String(
-                    path.to_str()
-                        .ok_or("Database path must be UTF-8")?
-                        .to_string(),
-                ),
-            );
-            Ok(toml::Value::Table(entry))
-        })
-        .collect();
-    let mut table = toml::Table::new();
-    table.insert("databases".into(), toml::Value::Array(entries?));
-    let text = toml::to_string(&table).map_err(|e| e.to_string())?;
-    let pending = root.join(format!("index.{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = private_options()
-            .create_new(true)
-            .open(&pending)
-            .map_err(|e| format!("Could not create database index: {e}"))?;
-        file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&pending, root.join("index.toml")).map_err(|e| e.to_string())?;
-        File::open(root)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&pending);
-    }
-    result
+/// Adds a database path to an open `zorg_index.db`.
+fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), String> {
+    let path = path.to_str().ok_or("Database path must be UTF-8")?;
+    conn.execute("INSERT INTO databases (db_path) VALUES (?1)", [path])
+        .map_err(|e| format!("Could not update database index: {e}"))?;
+    Ok(())
 }
 
 fn accounts_from_databases(
@@ -215,17 +170,6 @@ fn select<'a>(
     }
 }
 
-fn private_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true).read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-}
-
 const USAGE: &str = "\
 zorg — a modern Zcash CLI wallet
 
@@ -251,8 +195,8 @@ Names are case-sensitive and unique across known databases. With one account
 Each database holds one recovery phrase and may contain multiple derived accounts.
 
 STORAGE:
-    macOS: ~/Library/Application Support/zorg/index.toml and account databases
-    Other platforms: ~/.zorg/index.toml and account databases
+    macOS: ~/Library/Application Support/zorg/zorg_index.db and account databases
+    Other platforms: ~/.zorg/zorg_index.db and account databases
     The index contains database paths; account names live in their databases.
     Recovery phrases are stored once per database in the macOS Keychain.
 
@@ -298,7 +242,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     while i < args.len() {
         match args[i].as_str() {
             "--db" => return Err(
-                "Choose an account with --account <name>; database paths are managed in index.toml"
+                "Choose an account with --account <name>; database paths are managed in zorg_index.db"
                     .into(),
             ),
             "--network" | "--lwd" => {
@@ -328,12 +272,15 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
-    let _index_lock = if matches!(cmd, "create" | "import") {
-        Some(lock_index(&root)?)
+    let index = if matches!(cmd, "create" | "import") {
+        Some(open_index_for_write(&root)?)
     } else {
         None
     };
-    let mut databases = read_database_paths(&root)?;
+    let databases = match &index {
+        Some(conn) => database_paths(conn)?,
+        None => read_database_paths(&root)?,
+    };
     let (accounts, unavailable) = accounts_from_databases(&databases)?;
     for message in &unavailable {
         eprintln!("{message}");
@@ -360,13 +307,19 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
             return Err(e);
         }
         secure_wallet_db_file(&db_path)?;
-        databases.push(db_path.clone());
-        return write_database_paths(&root, &databases).map_err(|e| {
-            format!(
-                "Account created in {}; could not update index: {e}",
-                db_path.display()
-            )
-        });
+        let index = index.ok_or("Database index is not open")?;
+        return add_database_path(&index, &db_path)
+            .and_then(|()| {
+                index
+                    .execute_batch("COMMIT")
+                    .map_err(|e| format!("Could not update database index: {e}"))
+            })
+            .map_err(|e| {
+                format!(
+                    "Account created in {}; could not update index: {e}",
+                    db_path.display()
+                )
+            });
     }
     let visible: Vec<_> = accounts
         .into_iter()
@@ -1046,6 +999,7 @@ fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use zorg::account;
 
     fn fixture(root: &Path, filename: &str, name: &str) -> String {
@@ -1064,51 +1018,40 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fixture(root.path(), "wallet.db", "Old");
         assert!(read_database_paths(root.path()).unwrap().is_empty());
-        assert!(!root.path().join("index.toml").exists());
+        assert!(!root.path().join("zorg_index.db").exists());
+    }
+
+    fn set_database_paths(root: &Path, paths: &[PathBuf]) {
+        let index = open_index_for_write(root).unwrap();
+        for path in paths {
+            add_database_path(&index, path).unwrap();
+        }
+        index.execute_batch("COMMIT").unwrap();
     }
 
     #[test]
     fn index_round_trips_database_paths() {
         let root = tempfile::tempdir().unwrap();
         let db = fixture(root.path(), "a space.db", "Daily");
-        let _lock = lock_index(root.path()).unwrap();
-        write_database_paths(root.path(), &[PathBuf::from(&db)]).unwrap();
+        set_database_paths(root.path(), &[PathBuf::from(&db)]);
         assert_eq!(
             read_database_paths(root.path()).unwrap(),
             [PathBuf::from(&db)]
         );
-        let text = fs::read_to_string(root.path().join("index.toml")).unwrap();
-        assert!(text.contains("[[databases]]"));
-        assert!(!text.contains("Daily"));
+        let index = open_index_for_write(root.path()).unwrap();
+        assert!(add_database_path(&index, Path::new(&db)).is_err());
+        drop(index);
+        assert_eq!(read_database_paths(root.path()).unwrap().len(), 1);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                fs::metadata(root.path().join("index.toml"))
+                fs::metadata(root.path().join("zorg_index.db"))
                     .unwrap()
                     .permissions()
                     .mode()
                     & 0o777,
                 0o600
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_indexes_fail_without_being_overwritten() {
-        let root = tempfile::tempdir().unwrap();
-        for text in [
-            "not toml",
-            "[[databases]]\npath = 'relative.db'",
-            "databases = 7",
-            "selected_database = 1",
-            "[[databases]]\npath = '/tmp/a'\nname = 'Daily'",
-        ] {
-            fs::write(root.path().join("index.toml"), text).unwrap();
-            assert!(read_database_paths(root.path()).is_err(), "{text}");
-            assert_eq!(
-                fs::read_to_string(root.path().join("index.toml")).unwrap(),
-                text
             );
         }
     }
@@ -1132,9 +1075,8 @@ mod tests {
     fn unavailable_databases_remain_indexed_and_are_never_recreated() {
         let root = tempfile::tempdir().unwrap();
         let db = fixture(root.path(), "offline.db", "Offline");
-        let _lock = lock_index(root.path()).unwrap();
         let databases = vec![PathBuf::from(&db)];
-        write_database_paths(root.path(), &databases).unwrap();
+        set_database_paths(root.path(), &databases);
         fs::rename(&db, root.path().join("unmounted.db")).unwrap();
         let (accounts, unavailable) = accounts_from_databases(&databases).unwrap();
         assert!(accounts.is_empty());
@@ -1195,10 +1137,7 @@ mod tests {
             args.extend(["--network".into(), "regtest".into()]);
             super::run_in(index_root.clone(), &args)
         };
-        {
-            let _lock = lock_index(root.path()).unwrap();
-            write_database_paths(root.path(), &[first_db.into(), second_db.into()]).unwrap();
-        }
+        set_database_paths(root.path(), &[first_db.into(), second_db.into()]);
         command(&[]).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("--account"));
         command(&["address", "--account", "Savings"]).unwrap();
