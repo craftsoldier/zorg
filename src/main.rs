@@ -110,8 +110,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
         reserve_wallet_file(&db_path)?;
         let result = if cmd == "create" {
-            let url = endpoint(lwd.as_deref(), &net, cmd);
-            cmd_create(db, net, &url, &name)
+            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
             cmd_import(db, net, opts, &name, &databases)
         };
@@ -193,12 +192,13 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
                 .map(|a| a.name.as_str())
                 .collect();
             println!("{}:", names.join(", "));
-            let url = endpoint(lwd.as_deref(), &account.network, cmd);
-            let result = if cmd == "sync" {
-                sync_database(&account.db_path, account.network, &url)
-            } else {
-                print_database_status(&account.db_path, account.network, &url)
-            };
+            let result = endpoint(lwd.as_deref(), &account.network, cmd).and_then(|url| {
+                if cmd == "sync" {
+                    sync_database(&account.db_path, account.network, &url)
+                } else {
+                    print_database_status(&account.db_path, account.network, &url)
+                }
+            });
             if let Err(e) = result {
                 eprintln!("Error: {e}");
                 failed += 1;
@@ -220,7 +220,9 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "balance" => cmd_balance(db, net, uuid),
-        "send" => cmd_send(db, net, &endpoint(lwd.as_deref(), &net, cmd), opts, uuid),
+        "send" => {
+            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_send(db, net, &url, opts, uuid))
+        }
         "history" => cmd_history(db, net, opts, uuid),
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
@@ -255,10 +257,22 @@ fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Re
     Ok(())
 }
 
-fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> String {
-    explicit
-        .map(str::to_string)
-        .unwrap_or_else(|| resolve_default_lwd_url(net, cmd))
+/// The lightwalletd endpoint for `net`: the explicit one, which must not serve
+/// a different network, or a default one.
+fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<String, String> {
+    let Some(url) = explicit else {
+        return Ok(resolve_default_lwd_url(net, cmd));
+    };
+    // Zebra reports regtest as "test", so only mainnet versus the rest is checked.
+    if let Ok(chain) = zorg::sync_engine::get_lightwalletd_chain_name(url) {
+        if (chain == "main") != (*net == WalletNetwork::Main) {
+            return Err(format!(
+                "{url} serves the {chain} network, but this database is on {}",
+                net.as_str()
+            ));
+        }
+    }
+    Ok(url.to_string())
 }
 
 fn read_account_name() -> Result<String, String> {
