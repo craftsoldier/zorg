@@ -10,7 +10,7 @@ USAGE:
     zorg <command> [options]
 
 COMMANDS:
-    create [--birthday <height>]                        Create a wallet
+    create                                              Create a wallet
     import [--birthday <height>]                        Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
@@ -127,7 +127,7 @@ fn run(args: &[String]) -> Result<(), String> {
     };
 
     let result = match cmd {
-        "create" => cmd_create(&db, net, &lwd_url, opts),
+        "create" => cmd_create(&db, net, &lwd_url),
         "import" => cmd_import(&db, net, opts),
         "accounts" => {
             let accounts = zorg::account::list_accounts(&db, net)?;
@@ -252,19 +252,8 @@ fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> Result<(), String> {
-    let birthday_arg = opts
-        .iter()
-        .position(|arg| arg == "--birthday")
-        .map(|index| {
-            opts.get(index + 1)
-                .cloned()
-                .ok_or("--birthday requires a block height")
-        })
-        .transpose()?;
-    let birthday = resolve_create_birthday(birthday_arg.as_deref(), || {
-        zorg::sync_engine::get_latest_block_height(lwd_url)
-    })?;
+fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
+    let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     #[cfg(target_os = "macos")]
@@ -340,26 +329,10 @@ fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> String {
     text
 }
 
-fn resolve_create_birthday(
-    birthday_arg: Option<&str>,
-    fetch_tip: impl FnOnce() -> Result<u64, String>,
-) -> Result<u64, String> {
-    match birthday_arg {
-        Some(height) => {
-            let height = height
-                .parse::<u64>()
-                .map_err(|_| "Invalid --birthday height; expected a positive block height")?;
-            if height == 0 {
-                return Err("Invalid --birthday height; block heights start at 1".into());
-            }
-            Ok(height)
-        }
-        None => {
-            let tip = fetch_tip()
-                .map_err(|e| format!("Could not determine wallet birthday from chain tip: {e}"))?;
-            birthday_from_chain_tip(tip)
-        }
-    }
+fn resolve_create_birthday(fetch_tip: impl FnOnce() -> Result<u64, String>) -> Result<u64, String> {
+    let tip = fetch_tip()
+        .map_err(|e| format!("Could not determine wallet birthday from chain tip: {e}"))?;
+    birthday_from_chain_tip(tip)
 }
 
 fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
@@ -865,30 +838,17 @@ mod tests {
     }
 
     #[test]
-    fn wallet_birthday_override_is_offline_and_default_uses_chain_tip() {
-        let mut fetched_tip = false;
+    fn wallet_birthday_uses_chain_tip() {
+        assert_eq!(resolve_create_birthday(|| Ok(1_000)).unwrap(), 900);
+        assert_eq!(resolve_create_birthday(|| Ok(1_099)).unwrap(), 900);
         assert_eq!(
-            resolve_create_birthday(Some("123"), || {
-                fetched_tip = true;
-                Ok(1_000)
-            })
-            .unwrap(),
-            123
-        );
-        assert!(
-            !fetched_tip,
-            "explicit birthday must not fetch the chain tip"
-        );
-        assert_eq!(resolve_create_birthday(None, || Ok(1_000)).unwrap(), 900);
-        assert_eq!(resolve_create_birthday(None, || Ok(1_099)).unwrap(), 900);
-        assert_eq!(
-            resolve_create_birthday(None, || Ok(4_562_637)).unwrap(),
+            resolve_create_birthday(|| Ok(4_562_637)).unwrap(),
             4_562_500
         );
-        assert_eq!(resolve_create_birthday(None, || Ok(199)).unwrap(), 1);
-        assert_eq!(resolve_create_birthday(None, || Ok(100)).unwrap(), 1);
-        assert!(resolve_create_birthday(None, || Ok(0)).is_err());
-        assert!(resolve_create_birthday(None, || Err("offline".into()))
+        assert_eq!(resolve_create_birthday(|| Ok(199)).unwrap(), 1);
+        assert_eq!(resolve_create_birthday(|| Ok(100)).unwrap(), 1);
+        assert!(resolve_create_birthday(|| Ok(0)).is_err());
+        assert!(resolve_create_birthday(|| Err("offline".into()))
             .unwrap_err()
             .contains("Could not determine wallet birthday"));
     }
