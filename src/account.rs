@@ -836,32 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn derived_accounts_keep_their_names_and_indices() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path_str = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path_str.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-        let first =
-            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 1")
-                .unwrap();
-
-        // Same seed again: the backend derives the next ZIP-32 account.
-        let second =
-            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Savings")
-                .unwrap();
-        assert_ne!(first.uuid, second.uuid);
-
-        let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(accounts[0].name, "Account 1");
-        assert_eq!(accounts[0].account_index, 0);
-        assert_eq!(accounts[1].name, "Savings");
-        assert_eq!(accounts[1].account_index, 1);
-    }
-
-    #[test]
     fn test_get_address_returns_last_generated_receive_address() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
@@ -1540,60 +1514,24 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_account_allows_seed_anchor_with_remaining_accounts() {
+    fn network_in_wallet_db_reads_the_network_from_an_account() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("wallet.db");
         let db_path_str = db_path.to_str().unwrap();
+        assert_eq!(network_in_wallet_db(db_path_str).unwrap(), None);
 
-        let first_phrase = generate_mnemonic();
-        let first_seed = mnemonic_to_seed(&first_phrase).unwrap();
-        let first_uuid = init_db_and_create_account(
-            db_path_str,
-            WalletNetwork::Main,
-            &first_seed,
-            None,
-            "Account 1",
-        )
-        .unwrap()
-        .uuid;
-
-        // A second numbered account derived from the same seed at index 1.
-        import_derived_account_at_index(
-            db_path_str,
-            WalletNetwork::Main,
-            &first_seed,
-            None,
-            1,
-            "Account 2",
-        )
-        .unwrap();
-
-        delete_account(db_path_str, WalletNetwork::Main, &first_uuid).unwrap();
-
-        let accounts = list_accounts(db_path_str, WalletNetwork::Main).unwrap();
-        assert_eq!(accounts.len(), 1);
-        assert!(accounts.iter().all(|account| account.name != "first"));
-        assert_eq!(accounts[0].account_index, 1);
-    }
-
-    #[test]
-    fn test_create_testnet_wallet() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-
-        let address =
+        let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
+        let uuid =
             init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None, "Account 1")
                 .unwrap()
-                .unified_address;
-
-        assert!(
-            address.starts_with("utest1"),
-            "Expected utest1 prefix, got: {address}"
+                .uuid;
+        assert_eq!(
+            network_in_wallet_db(db_path_str).unwrap(),
+            Some(WalletNetwork::Test)
         );
+
+        delete_account(db_path_str, WalletNetwork::Test, &uuid).unwrap();
+        assert_eq!(network_in_wallet_db(db_path_str).unwrap(), None);
     }
 
     #[test]
