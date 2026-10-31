@@ -11,39 +11,29 @@ USAGE:
     zorg [command] [options]
 
 COMMANDS:
-    accounts                                           List named accounts (also the default)
+    accounts                                           List named accounts
     create [name]                                      Create an account with a new recovery phrase
     import [name] [--birthday <height>]                 Import a recovery phrase at account index 0
     balance [--account <name>]                         Show balance
     address [--account <name>]                         Show receive address
     sync [--account <name>]                            Sync all accounts, or the chosen account's database
     status [--account <name>]                          Show sync progress
-    send <to> <amount> [--memo <text>] [--account <name>] Send ZEC (TAZ on testnet)
+    send <to> <amount> [--memo <text>] [--account <name>] Send ZEC
     history [--limit <n>] [--account <name>]             Show transaction history
     recovery [--account <name>]                        Show the recovery phrase
     validate <address>                                 Validate a Zcash address
-    delete --account <name> [--yes]                     Delete an account (asks to confirm)
-
-Names are case-sensitive and unique across known databases. With one account
---account can be omitted, except for delete. Create/import ask for a name if omitted.
-Each database holds one recovery phrase and may contain multiple derived accounts.
-
-STORAGE:
-    macOS: ~/Library/Application Support/zorg/zorg_index.db and account databases
-    Other platforms: ~/.zorg/zorg_index.db and account databases
-    The index contains database paths; account names live in their databases.
-    Recovery phrases are stored once per database in the macOS Keychain.
+    delete --account <name> [--yes]                     Delete an account
 
 OPTIONS:
-    --network <net>      main | test | regtest (filters accounts; default for create/import: main)
-    --lwd <url>          Lightwalletd endpoint (default: trusted public endpoints for each network)
+    --network <net>      main | test | regtest
+    --lwd <url>          Lightwalletd endpoint
     --version, -V        Show version
     --help, -h           Show this help
 
 ENV:
     ZORG_NETWORK         Network
     ZORG_LIGHTWALLETD_URL Lightwalletd endpoint
-    RUST_LOG             Log level: error | warn | info | debug | trace (default: info)
+    RUST_LOG             Log level: error | warn | info | debug | trace
 ";
 
 fn main() {
