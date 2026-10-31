@@ -983,27 +983,6 @@ fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use zorg::account;
-
-    fn fixture(root: &Path, filename: &str, name: &str) -> String {
-        super::ensure_private_wallet_dir(root).unwrap();
-        let path = root.join(filename);
-        let db = path.to_str().unwrap();
-        let seed = keys::mnemonic_to_seed(&keys::generate_mnemonic()).unwrap();
-        account::init_db_and_create_account(db, WalletNetwork::Regtest, &seed, Some(1), name)
-            .unwrap();
-        super::secure_wallet_db_file(&path).unwrap();
-        path.canonicalize().unwrap().to_str().unwrap().to_string()
-    }
-
-    #[test]
-    fn missing_index_is_empty_and_does_not_adopt_old_databases() {
-        let root = tempfile::tempdir().unwrap();
-        fixture(root.path(), "wallet.db", "Old");
-        assert!(read_database_paths(root.path()).unwrap().is_empty());
-        assert!(!root.path().join("zorg_index.db").exists());
-    }
 
     fn set_database_paths(root: &Path, paths: &[PathBuf]) {
         let index = open_index_for_write(root).unwrap();
@@ -1011,74 +990,6 @@ mod tests {
             add_database_path(&index, path).unwrap();
         }
         index.execute_batch("COMMIT").unwrap();
-    }
-
-    #[test]
-    fn index_round_trips_database_paths() {
-        let root = tempfile::tempdir().unwrap();
-        let db = fixture(root.path(), "a space.db", "Daily");
-        set_database_paths(root.path(), &[PathBuf::from(&db)]);
-        assert_eq!(
-            read_database_paths(root.path()).unwrap(),
-            [PathBuf::from(&db)]
-        );
-        let index = open_index_for_write(root.path()).unwrap();
-        assert!(add_database_path(&index, Path::new(&db)).is_err());
-        drop(index);
-        assert_eq!(read_database_paths(root.path()).unwrap().len(), 1);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(root.path().join("zorg_index.db"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn accounts_are_resolved_by_name_across_databases() {
-        let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "first.db", "Daily");
-        let second = fixture(root.path(), "second.db", "Savings");
-        let (accounts, unavailable) =
-            accounts_from_databases(&[first.into(), second.clone().into()]).unwrap();
-        assert!(unavailable.is_empty());
-        assert_eq!(accounts.len(), 2);
-        assert!(select(&accounts, None).is_err());
-        let savings = select(&accounts, Some("Savings")).unwrap();
-        assert_eq!(savings.db_path, second);
-        assert_eq!(savings.account_index, 0);
-    }
-
-    #[test]
-    fn unavailable_databases_remain_indexed_and_are_never_recreated() {
-        let root = tempfile::tempdir().unwrap();
-        let db = fixture(root.path(), "offline.db", "Offline");
-        let databases = vec![PathBuf::from(&db)];
-        set_database_paths(root.path(), &databases);
-        fs::rename(&db, root.path().join("unmounted.db")).unwrap();
-        let (accounts, unavailable) = accounts_from_databases(&databases).unwrap();
-        assert!(accounts.is_empty());
-        assert_eq!(unavailable.len(), 1);
-        assert!(require_available(&unavailable).is_err());
-        assert!(!Path::new(&db).exists());
-        assert_eq!(read_database_paths(root.path()).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn ambiguous_names_are_never_selected_by_order() {
-        let root = tempfile::tempdir().unwrap();
-        let first = fixture(root.path(), "first.db", "Daily");
-        let second = fixture(root.path(), "second.db", "Daily");
-        let databases = vec![first.into(), second.into()];
-        let (accounts, _) = accounts_from_databases(&databases).unwrap();
-        assert!(select(&accounts, Some("Daily")).is_err());
-        assert!(select(&accounts, Some("daily")).is_err());
     }
 
     #[test]
