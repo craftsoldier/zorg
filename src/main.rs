@@ -10,7 +10,7 @@ USAGE:
     zorg <command> [options]
 
 COMMANDS:
-    create [--birthday <height>]                        Create a wallet (default birthday: chain tip − 100, rounded down to 100)
+    create [--birthday <height>]                        Create a wallet
     import [--birthday <height>]                        Import from mnemonic
     accounts                                           List accounts (numbered)
     balance [--account <n>]                             Show balance
