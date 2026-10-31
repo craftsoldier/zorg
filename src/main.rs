@@ -265,15 +265,77 @@ fn cmd_create(db: &str, net: WalletNetwork, lwd_url: &str, opts: &[String]) -> R
     })?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
-    let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
-    println!("Mnemonic (save this!): {mnemonic}");
     #[cfg(target_os = "macos")]
-    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
-        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
+    let db_existed = std::path::Path::new(db).exists();
+    let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday))?;
+    #[cfg(target_os = "macos")]
+    if let Err(e) = store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed) {
+        if !db_existed {
+            remove_wallet_files(db);
+        }
+        return Err(e);
+    }
+    print!("{}", recovery_phrase_text(&mnemonic, birthday));
     println!("Account number: {}", created.number);
     println!("Address: {}", created.unified_address);
-    println!("Wallet birthday: {birthday}");
     Ok(())
+}
+
+/// Stores the mnemonic in the protected Keychain, then reads it back (which
+/// asks for Touch ID or the login password) and checks it yields `seed`. On a
+/// failed read-back the stored entry is removed.
+#[cfg(target_os = "macos")]
+fn store_and_verify_mnemonic(
+    net: WalletNetwork,
+    account_uuid: &str,
+    mnemonic: &str,
+    seed: &secrecy::SecretVec<u8>,
+) -> Result<(), String> {
+    use secrecy::ExposeSecret;
+
+    zorg::secret_store::store_mnemonic_in_macos_keychain(net, account_uuid, mnemonic)
+        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
+    let verified = zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid)
+        .map_err(|e| format!("Failed to read the mnemonic back from keychain: {e}"))
+        .and_then(|stored| {
+            if stored.expose_secret() == seed.expose_secret() {
+                Ok(())
+            } else {
+                Err("Keychain returned a different mnemonic than the one just stored".into())
+            }
+        });
+    if verified.is_err() {
+        let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, account_uuid);
+    }
+    verified
+}
+
+/// Removes a wallet database and its SQLite side files, ignoring missing ones.
+#[cfg(target_os = "macos")]
+fn remove_wallet_files(db: &str) {
+    for path in [db.to_string(), format!("{db}-wal"), format!("{db}-shm")] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The recovery phrase as numbered words, followed by the wallet birthday and
+/// how to keep them.
+fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> String {
+    let mut text = String::from("Recovery phrase (write it down and keep it offline):\n");
+    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    for (row, chunk) in words.chunks(4).enumerate() {
+        let line: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(col, word)| format!("{:>2}. {word:<8}", row * 4 + col + 1))
+            .collect();
+        text.push_str(&format!("  {}\n", line.join("  ").trim_end()));
+    }
+    text.push_str(&format!("Wallet birthday: {birthday}\n"));
+    if cfg!(target_os = "macos") {
+        text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
+    }
+    text
 }
 
 fn resolve_create_birthday(
@@ -690,9 +752,33 @@ fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fmt_zec, parse_zatoshi_amount, render_sync_status, resolve_create_birthday, resolve_network,
+        fmt_zec, parse_zatoshi_amount, recovery_phrase_text, render_sync_status,
+        resolve_create_birthday, resolve_network,
     };
     use zorg::network::WalletNetwork;
+
+    #[test]
+    fn recovery_phrase_is_numbered_in_order_with_birthday() {
+        let mnemonic = zorg::keys::generate_mnemonic();
+        let text = recovery_phrase_text(&mnemonic, 4_562_700);
+        let numbered: Vec<String> = text
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .flat_map(|line| {
+                line.split("  ")
+                    .filter(|cell| cell.contains(". "))
+                    .map(|cell| cell.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let expected: Vec<String> = mnemonic
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, word)| format!("{}. {word}", i + 1))
+            .collect();
+        assert_eq!(numbered, expected);
+        assert!(text.contains("Wallet birthday: 4562700"));
+    }
 
     #[test]
     fn amounts_are_labeled_per_network() {
