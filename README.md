@@ -32,6 +32,7 @@ Accounts are numbered 1, 2, 3… — `--account` takes the number, never a UUID.
 | `zorg status` | Check current sync status (scan height vs chain tip) |
 | `zorg send <to> <amount> [--memo <text>] [--account <n>]` | Send Zcash to an address (TAZ on testnet) |
 | `zorg history [--account <n>] [--limit <n>]` | View transaction history |
+| `zorg recovery [--account <n>]` | Show the recovery phrase |
 | `zorg validate <address>` | Validate a Zcash address |
 | `zorg delete --account <n> [--yes]` | Delete an account (asks to confirm) |
 

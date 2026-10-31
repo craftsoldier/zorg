@@ -12,6 +12,16 @@ pub fn seed_from_macos_stored_mnemonic(
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<SecretVec<u8>, String> {
+    let mnemonic = mnemonic_from_macos_keychain(network, account_uuid)?;
+    keys::mnemonic_to_seed(&mnemonic)
+}
+
+/// The account's recovery phrase from the protected Keychain. Reading it asks
+/// for Touch ID or the login password.
+pub fn mnemonic_from_macos_keychain(
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<Zeroizing<String>, String> {
     let account_key = account_mnemonic_key(account_uuid);
 
     // The payload is now the raw utf-8 mnemonic string stored in the keychain
@@ -21,9 +31,7 @@ pub fn seed_from_macos_stored_mnemonic(
 
     let mnemonic_str = std::str::from_utf8(mnemonic_bytes.as_slice())
         .map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
-    let seed = keys::mnemonic_to_seed(mnemonic_str)?;
-    drop(mnemonic_bytes);
-    Ok(seed)
+    Ok(Zeroizing::new(mnemonic_str.to_string()))
 }
 
 pub fn store_mnemonic_in_macos_keychain(

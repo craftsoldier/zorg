@@ -19,6 +19,7 @@ COMMANDS:
     status                                              Show sync progress
     send <to> <amount> [--memo <text>] [--account <n>]  Send ZEC (TAZ on testnet)
     history [--limit <n>] [--account <n>]               Show transaction history
+    recovery [--account <n>]                            Show the recovery phrase
     validate <address>                                  Validate a Zcash address
     delete --account <n> [--yes]                        Delete an account (asks to confirm)
 
@@ -169,6 +170,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "send" => cmd_send(&db, net, &lwd_url, opts),
         "history" => cmd_history(&db, net, opts),
+        "recovery" => cmd_recovery(&db, net, opts),
         "validate" => {
             let addr = opts.first().ok_or("Usage: zorg validate <address>")?;
             let t = sync::validate_address(addr)?;
@@ -395,6 +397,29 @@ fn cmd_delete(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), Strin
     zorg::account::delete_account_by_number(db, net, number)?;
     println!("Account {number} deleted.");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn cmd_recovery(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
+    let number = account_number_opt(opts)?;
+    let uuid = zorg::account::resolve_account_uuid(db, net, number)?;
+    let accounts = zorg::account::list_accounts(db, net)?;
+    let account = match number {
+        Some(n) => accounts.iter().find(|a| a.account_index + 1 == n),
+        None => accounts.first(),
+    }
+    .ok_or("Account not found")?;
+    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain(net, &uuid)?;
+    print!(
+        "{}",
+        recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_recovery(_db: &str, _net: WalletNetwork, _opts: &[String]) -> Result<(), String> {
+    Err("zorg recovery needs the macOS Keychain; on this platform zorg never stores the recovery phrase".into())
 }
 
 fn cmd_balance(db: &str, net: WalletNetwork, opts: &[String]) -> Result<(), String> {
