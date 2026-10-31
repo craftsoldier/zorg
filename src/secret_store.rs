@@ -10,19 +10,19 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 pub fn seed_from_macos_stored_mnemonic(
     network: WalletNetwork,
-    account_uuid: &str,
+    seed_reference: &str,
 ) -> Result<SecretVec<u8>, String> {
-    let mnemonic = mnemonic_from_macos_keychain(network, account_uuid)?;
+    let mnemonic = mnemonic_from_macos_keychain(network, seed_reference)?;
     keys::mnemonic_to_seed(&mnemonic)
 }
 
-/// The account's recovery phrase from the protected Keychain. Reading it asks
+/// The seed's recovery phrase from the protected Keychain. Reading it asks
 /// for Touch ID or the login password.
 pub fn mnemonic_from_macos_keychain(
     network: WalletNetwork,
-    account_uuid: &str,
+    seed_reference: &str,
 ) -> Result<Zeroizing<String>, String> {
-    let account_key = account_mnemonic_key(account_uuid);
+    let account_key = account_mnemonic_key(seed_reference);
 
     // The payload is now the raw utf-8 mnemonic string stored in the keychain
     let service = mnemonic_store_service_for_network(network);
@@ -36,10 +36,10 @@ pub fn mnemonic_from_macos_keychain(
 
 pub fn store_mnemonic_in_macos_keychain(
     network: WalletNetwork,
-    account_uuid: &str,
+    seed_reference: &str,
     mnemonic: &str,
 ) -> Result<(), String> {
-    let account_key = account_mnemonic_key(account_uuid);
+    let account_key = account_mnemonic_key(seed_reference);
     macos_write_secure_store_value(
         &mnemonic_store_service_for_network(network),
         &account_key,
@@ -47,18 +47,18 @@ pub fn store_mnemonic_in_macos_keychain(
     )
 }
 
-/// Removes the account's mnemonic from the protected Keychain. A missing entry
+/// Removes the seed's mnemonic from the protected Keychain. A missing entry
 /// is not an error.
 #[cfg(target_os = "macos")]
 pub fn delete_mnemonic_from_macos_keychain(
     network: WalletNetwork,
-    account_uuid: &str,
+    seed_reference: &str,
 ) -> Result<(), String> {
     use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
 
     let mut options = PasswordOptions::new_generic_password(
         &mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid),
+        &account_mnemonic_key(seed_reference),
     );
     options.use_protected_keychain();
     match delete_generic_password_options(options) {
@@ -80,8 +80,8 @@ fn mnemonic_store_service_for_network(network: WalletNetwork) -> String {
     format!("{}.mnemonic", secure_store_service_for_network(network))
 }
 
-fn account_mnemonic_key(account_uuid: &str) -> String {
-    format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{account_uuid}")
+fn account_mnemonic_key(seed_reference: &str) -> String {
+    format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{seed_reference}")
 }
 
 #[cfg(target_os = "macos")]
@@ -152,15 +152,16 @@ mod tests {
         use secrecy::ExposeSecret;
         use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
 
-        let account_uuid = uuid::Uuid::new_v4().to_string();
+        let seed_reference = uuid::Uuid::new_v4().to_string();
         let mnemonic = keys::generate_mnemonic();
         let expected = keys::mnemonic_to_seed(&mnemonic).unwrap();
         let service = mnemonic_store_service_for_network(WalletNetwork::Regtest);
-        let key = account_mnemonic_key(&account_uuid);
+        let key = account_mnemonic_key(&seed_reference);
 
-        store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic).unwrap();
+        store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &seed_reference, &mnemonic)
+            .unwrap();
         let actual =
-            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &account_uuid).unwrap();
+            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &seed_reference).unwrap();
 
         let mut options = PasswordOptions::new_generic_password(&service, &key);
         options.use_protected_keychain();
