@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -132,7 +133,9 @@ fn accounts_from_databases(
             continue;
         }
         let path = path.to_str().ok_or("Database path must be UTF-8")?;
-        let net = network_in_wallet_db(path)?;
+        let Some(net) = network_in_wallet_db(path)? else {
+            continue;
+        };
         ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
         secure_wallet_db_file(Path::new(path))?;
         let accounts = zorg::account::list_accounts(path, net)?;
@@ -152,21 +155,11 @@ fn ensure_new_seed(
     seed: &secrecy::SecretVec<u8>,
     network: WalletNetwork,
 ) -> Result<(), String> {
-    use secrecy::ExposeSecret;
-    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
-        .ok_or("Invalid seed length")?;
     for path in databases {
-        let conn =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
-        let present: bool = conn
-            .query_row(
-                "SELECT seed_fingerprint = ?1 AND network = ?2 FROM zorg_seed WHERE singleton = 1",
-                rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if present {
+        let path = path.to_str().ok_or("Database path must be UTF-8")?;
+        if network_in_wallet_db(path)? == Some(network)
+            && zorg::account::seed_is_in_wallet(path, network, seed)?
+        {
             return Err(
                 "This recovery phrase is already known on this network; run `zorg accounts`".into(),
             );
@@ -947,18 +940,44 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
     Ok(zatoshis)
 }
 
-fn network_in_wallet_db(db_path: &str) -> Result<WalletNetwork, String> {
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("Could not inspect wallet database: {e}"))?;
-    let stored: String = conn
+fn network_in_wallet_db(db_path: &str) -> Result<Option<WalletNetwork>, String> {
+    if !std::path::Path::new(db_path).exists() {
+        return Ok(None);
+    }
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Could not inspect wallet database network: {e}"))?;
+    let has_accounts: bool = conn
         .query_row(
-            "SELECT network FROM zorg_seed WHERE singleton = 1",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )
-        .map_err(|e| format!("Could not read database network in {db_path}: {e}"))?;
-    keys::parse_network(&stored)
+        .map(|exists| exists != 0)
+        .map_err(|e| format!("Could not inspect wallet database schema: {e}"))?;
+    if !has_accounts {
+        return Ok(None);
+    }
+    let encoded_key = conn
+        .query_row(
+            "SELECT uivk FROM accounts WHERE uivk IS NOT NULL AND uivk != '' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read wallet database network: {e}"))?;
+    let Some(encoded_key) = encoded_key else {
+        return Ok(None);
+    };
+    use zcash_address::unified::Encoding as _;
+    let (network, _, _) = zcash_address::unified::Uivk::decode(&encoded_key).map_err(|e| {
+        format!("Could not determine wallet database network from account key: {e}")
+    })?;
+    use zcash_protocol::consensus::NetworkType;
+    Ok(Some(match network {
+        NetworkType::Main => WalletNetwork::Main,
+        NetworkType::Test => WalletNetwork::Test,
+        NetworkType::Regtest => WalletNetwork::Regtest,
+    }))
 }
 
 /// Candidate lightwalletd endpoints per network, in priority order.

@@ -16,9 +16,9 @@ use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use crate::{
     db::{
-        open_readonly_conn_with_timeout, open_wallet_db_for_read_with_timeout,
-        open_wallet_db_with_timeout, with_wallet_db_write_lock, WalletDatabase,
-        ACCOUNT_MUTATION_DB_BUSY_TIMEOUT, READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
+        open_wallet_db_for_read_with_timeout, open_wallet_db_with_timeout,
+        with_wallet_db_write_lock, WalletDatabase, ACCOUNT_MUTATION_DB_BUSY_TIMEOUT,
+        READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
     },
     network::WalletNetwork,
 };
@@ -145,7 +145,6 @@ pub fn init_db_and_create_account(
 ) -> Result<CreatedAccount, String> {
     ensure_db_initialized_with_seed(db_path, network, seed)?;
 
-    initialize_seed_reference(db_path, seed, network)?;
     let birthday = make_birthday(network, birthday_height);
 
     let (account_id, usk) = with_wallet_db_write_lock("keys.create_account", || {
@@ -180,7 +179,6 @@ pub fn import_derived_account_at_index(
     account_index: u32,
     name: &str,
 ) -> Result<CreatedAccount, String> {
-    validate_seed(db_path, seed, network)?;
     let birthday = make_birthday(network, birthday_height);
     let account_id = zip32_account_id(account_index)?;
     let address = default_address_for_account(network, seed, account_index)?;
@@ -236,50 +234,20 @@ pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<Accoun
     Ok(accounts)
 }
 
-fn initialize_seed_reference(
+/// True when the wallet database has accounts derived from `seed`.
+pub fn seed_is_in_wallet(
     db_path: &str,
-    seed: &SecretVec<u8>,
     network: WalletNetwork,
-) -> Result<(), String> {
-    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
-        .ok_or("Invalid seed length")?;
-    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS zorg_seed (
-        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        seed_fingerprint BLOB NOT NULL,
-        network TEXT NOT NULL
-    )",
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR IGNORE INTO zorg_seed VALUES (1, ?1, ?2)",
-        rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()],
-    )
-    .map_err(|e| e.to_string())?;
-    validate_seed(db_path, seed, network)
-}
-
-fn validate_seed(
-    db_path: &str,
     seed: &SecretVec<u8>,
-    network: WalletNetwork,
-) -> Result<(), String> {
-    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
-        .ok_or("Invalid seed length")?;
-    let conn = open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))?;
-    let matches: bool = conn
-        .query_row(
-            "SELECT seed_fingerprint = ?1 AND network = ?2 FROM zorg_seed WHERE singleton = 1",
-            rusqlite::params![fingerprint.to_bytes().as_slice(), network.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Failed to read seed identity: {e}"))?;
-    if matches {
-        Ok(())
-    } else {
-        Err("One database holds one seed on one network".into())
-    }
+) -> Result<bool, String> {
+    let db = open_wallet_db_for_read(db_path, network)?;
+    let relevance = db
+        .seed_relevance_to_derived_accounts(seed)
+        .map_err(|e| format!("Failed to check recovery phrase: {e}"))?;
+    Ok(matches!(
+        relevance,
+        zcash_client_backend::data_api::SeedRelevance::Relevant { .. }
+    ))
 }
 
 /// Parse an account UUID string into the backend's AccountUuid.
