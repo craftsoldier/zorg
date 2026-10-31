@@ -107,7 +107,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     }
     if matches!(cmd, "create" | "import") {
         zorg::account::require_available(&unavailable)?;
-        let name = match opts.first().filter(|a| !a.starts_with("--")) {
+        let name = match positional_args(opts)?.first() {
             Some(name) => name.clone(),
             None => read_account_name()?,
         };
