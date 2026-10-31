@@ -39,6 +39,27 @@ pub fn store_mnemonic_in_macos_keychain(
     )
 }
 
+/// Removes the account's mnemonic from the protected Keychain. A missing entry
+/// is not an error.
+#[cfg(target_os = "macos")]
+pub fn delete_mnemonic_from_macos_keychain(
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<(), String> {
+    use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
+
+    let mut options = PasswordOptions::new_generic_password(
+        &mnemonic_store_service_for_network(network),
+        &account_mnemonic_key(account_uuid),
+    );
+    options.use_protected_keychain();
+    match delete_generic_password_options(options) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(format!("Failed to delete Keychain entry: {error}")),
+    }
+}
+
 fn secure_store_service_for_network(network: WalletNetwork) -> String {
     match network {
         WalletNetwork::Main => "org.zorg.cli".to_string(),
