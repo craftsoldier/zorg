@@ -663,15 +663,23 @@ pub fn accounts_from_databases(
         if !seen_paths.insert(canonical) {
             continue;
         }
-        let path = path.to_str().ok_or("Database path must be UTF-8")?;
-        let Some(net) = network_in_wallet_db(path)? else {
-            continue;
-        };
-        ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
-        secure_wallet_db_file(Path::new(path))?;
-        result.extend(list_accounts(path, net)?);
+        match accounts_in_database(path) {
+            Ok(accounts) => result.extend(accounts),
+            Err(e) => unavailable.push(format!("Database unavailable: {} ({e})", path.display())),
+        }
     }
     Ok((result, unavailable))
+}
+
+/// The accounts in one wallet database.
+fn accounts_in_database(path: &Path) -> Result<Vec<AccountInfo>, String> {
+    let path = path.to_str().ok_or("Database path must be UTF-8")?;
+    let Some(net) = network_in_wallet_db(path)? else {
+        return Ok(Vec::new());
+    };
+    ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
+    secure_wallet_db_file(Path::new(path))?;
+    list_accounts(path, net)
 }
 
 /// Fails when one of `databases` already holds accounts from `seed` on `network`.
@@ -1589,6 +1597,30 @@ mod tests {
 
         delete_account(db_path_str, WalletNetwork::Test, &uuid).unwrap();
         assert_eq!(network_in_wallet_db(db_path_str).unwrap(), None);
+    }
+
+    #[test]
+    fn a_broken_database_is_unavailable_without_hiding_the_others() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        ensure_private_wallet_dir(temp_dir.path()).unwrap();
+        let good = temp_dir.path().join("good.db");
+        let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
+        init_db_and_create_account(
+            good.to_str().unwrap(),
+            WalletNetwork::Test,
+            &seed,
+            None,
+            "Daily",
+        )
+        .unwrap();
+        let broken = temp_dir.path().join("broken.db");
+        std::fs::write(&broken, b"not a wallet database").unwrap();
+
+        let (accounts, unavailable) = accounts_from_databases(&[broken, good]).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "Daily");
+        assert_eq!(unavailable.len(), 1);
+        assert!(unavailable[0].contains("broken.db"));
     }
 
     #[test]
