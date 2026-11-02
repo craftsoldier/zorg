@@ -5,7 +5,6 @@ use crate::{keys, network::WalletNetwork};
 
 const ACCOUNT_MNEMONIC_KEY_PREFIX: &str = "zorg_wallet_";
 
-#[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 pub fn seed_from_macos_stored_mnemonic(
@@ -61,7 +60,6 @@ pub fn store_mnemonic_in_macos_keychain(
 
 /// Removes the account's mnemonic from the protected Keychain. A missing entry
 /// is not an error.
-#[cfg(target_os = "macos")]
 pub fn delete_mnemonic_from_macos_keychain(
     network: WalletNetwork,
     account_uuid: &str,
@@ -96,7 +94,6 @@ fn account_mnemonic_key(account_uuid: &str) -> String {
     format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{account_uuid}")
 }
 
-#[cfg(target_os = "macos")]
 fn macos_read_secure_store_value(
     service: &str,
     key: &str,
@@ -112,7 +109,6 @@ fn macos_read_secure_store_value(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Result<(), String> {
     use security_framework::{
         access_control::{ProtectionMode, SecAccessControl},
@@ -141,20 +137,7 @@ fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Res
         .map_err(|error| format!("Failed to write protected mnemonic to Keychain: {error}"))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn macos_read_secure_store_value(
-    _service: &str,
-    _key: &str,
-) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    Err("macOS stored mnemonic path is unsupported on this platform".to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_write_secure_store_value(_service: &str, _key: &str, _value: &[u8]) -> Result<(), String> {
-    Err("macOS stored mnemonic path is unsupported on this platform".to_string())
-}
-
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

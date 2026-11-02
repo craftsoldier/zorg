@@ -40,18 +40,6 @@ jobs:
       - name: Smoke-test CLI
         run: ./target/release/zorg --help
 
-  linux:
-    name: Linux compile check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
-
-      - name: Check all targets compile
-        run: cargo check --locked --all-targets
-
   dependency-audit:
     name: Dependency advisory audit
     runs-on: ubuntu-latest
