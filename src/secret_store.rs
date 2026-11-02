@@ -22,16 +22,28 @@ pub fn mnemonic_from_macos_keychain(
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<Zeroizing<String>, String> {
+    mnemonic_from_macos_keychain_if_present(network, account_uuid)?
+        .ok_or_else(|| "Mnemonic not found for account".to_string())
+}
+
+/// The account's recovery phrase from the protected Keychain, or `None` when
+/// it has no entry. Reading an existing entry asks for Touch ID or the login
+/// password.
+pub fn mnemonic_from_macos_keychain_if_present(
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<Option<Zeroizing<String>>, String> {
     let account_key = account_mnemonic_key(account_uuid);
 
     // The payload is now the raw utf-8 mnemonic string stored in the keychain
     let service = mnemonic_store_service_for_network(network);
-    let mnemonic_bytes = macos_read_secure_store_value(&service, &account_key)?
-        .ok_or_else(|| "Mnemonic not found for account".to_string())?;
+    let Some(mnemonic_bytes) = macos_read_secure_store_value(&service, &account_key)? else {
+        return Ok(None);
+    };
 
     let mnemonic_str = std::str::from_utf8(mnemonic_bytes.as_slice())
         .map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
-    Ok(Zeroizing::new(mnemonic_str.to_string()))
+    Ok(Some(Zeroizing::new(mnemonic_str.to_string())))
 }
 
 pub fn store_mnemonic_in_macos_keychain(

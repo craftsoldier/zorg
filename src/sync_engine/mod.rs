@@ -2379,8 +2379,8 @@ pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {
     })
 }
 
-/// Get the chain name from a lightwalletd endpoint.
-pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, String> {
+/// The Sapling activation height a lightwalletd endpoint reports for its chain.
+pub fn get_lightwalletd_sapling_activation_height(lightwalletd_url: &str) -> Result<u64, String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
         use zcash_client_backend::proto::service::Empty;
@@ -2394,7 +2394,7 @@ pub fn get_lightwalletd_chain_name(lightwalletd_url: &str) -> Result<String, Str
         .await
         .map_err(|_| "get_lightd_info: timed out".to_string())?
         .map_err(|e| format!("get_lightd_info: {e}"))?;
-        Ok(info.into_inner().chain_name)
+        Ok(info.into_inner().sapling_activation_height)
     })
 }
 

@@ -17,37 +17,34 @@ Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provi
 
 ## Commands
 
-| Command | Description |
-|---|---|
-Accounts are numbered 1, 2, 3… — `--account` takes the number, never a UUID.
+Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 
 | Command | Description |
 |---|---|
-| `zorg create` | Create a new Zcash wallet |
-| `zorg import [--birthday <height>]` | Import an existing wallet from its mnemonic |
-| `zorg accounts` | List all accounts (numbered) |
-| `zorg balance [--account <n>]` | Show spendable, pending, and locked balances |
-| `zorg address [--account <n>]` | Get a unified receiving address |
-| `zorg sync` | Sync your wallet with the blockchain |
-| `zorg status` | Check current sync status (scan height vs chain tip) |
-| `zorg send <to> <amount> [--memo <text>] [--account <n>]` | Send Zcash to an address (TAZ on testnet) |
-| `zorg history [--account <n>] [--limit <n>]` | View transaction history |
-| `zorg recovery [--account <n>]` | Show the recovery phrase |
+| `zorg` / `zorg accounts` | List named accounts across known databases |
+| `zorg create [name]` | Create a new account and recovery phrase |
+| `zorg import [name] [--birthday <height>]` | Restore an account from a recovery phrase (index 0) |
+| `zorg balance [--account <name>]` | Show spendable, pending, and locked balances |
+| `zorg address [--account <name>]` | Get a unified receiving address |
+| `zorg sync [--account <name>]` | Sync all databases, or the chosen account's database |
+| `zorg status [--account <name>]` | Check sync status for all databases, or the chosen account's database |
+| `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send Zcash (TAZ on testnet) |
+| `zorg history [--account <name>] [--limit <n>]` | View transaction history |
+| `zorg recovery [--account <name>]` | Show the recovery phrase |
 | `zorg validate <address>` | Validate a Zcash address |
-| `zorg delete --account <n> [--yes]` | Delete an account (asks to confirm) |
+| `zorg delete --account <name>` | Delete an account after confirmation |
+
+Create and import ask for a name if omitted.
 
 ### Global flags
 
-Every flag works on any command:
-
 | Flag | Meaning |
 |---|---|
-| `--network <main\|test>` | Network (defaults to mainnet) |
-| `--db <path>` | Wallet database path |
+| `--network <main\|test\|regtest>` | Filter accounts by network; defaults to main for create/import |
 | `--lwd <url>` | lightwalletd endpoint override |
 | `--help`, `-V` | Show usage / version |
 
-The same values can be set through the environment: `ZORG_NETWORK`, `ZORG_WALLET_DB`, `ZORG_LIGHTWALLETD_URL`.
+Environment equivalents are `ZORG_NETWORK` and `ZORG_LIGHTWALLETD_URL`.
 
 ## Requirements
 - Rust & Cargo
