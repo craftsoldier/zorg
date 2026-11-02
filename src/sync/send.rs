@@ -64,57 +64,51 @@ pub(crate) struct ResubmitStats {
     pub failed: usize,
 }
 
-fn check_hash(path: &str, expected: &str) -> bool {
+/// The file at `path`, opened and rewound, if its BLAKE2b-512 hash is `expected`.
+fn open_verified(path: &std::path::Path, expected: &str) -> Option<std::fs::File> {
     use blake2b_simd::Params;
-    use std::io::Read;
+    use std::io::{Read, Seek};
 
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
+    let mut file = std::fs::File::open(path).ok()?;
     let mut state = Params::new().hash_length(64).to_state();
     let mut buffer = [0; 8192];
     loop {
-        let n = match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => return false,
-        };
+        let n = file.read(&mut buffer).ok()?;
+        if n == 0 {
+            break;
+        }
         state.update(&buffer[..n]);
     }
-
-    let result = state.finalize();
-    hex::encode(result.as_bytes()) == expected
+    if hex::encode(state.finalize().as_bytes()) != expected {
+        return None;
+    }
+    file.rewind().ok()?;
+    Some(file)
 }
 
-fn ensure_param(home: &str, filename: &str, expected_hash: &str) -> Result<String, String> {
-    let dest_dir = format!("{}/Library/Application Support/ZcashParams", home);
-    let dest_path = format!("{}/{}", dest_dir, filename);
-
-    // If it's already there and valid, we are good to go
-    if std::path::Path::new(&dest_path).exists() && check_hash(&dest_path, expected_hash) {
-        return Ok(dest_path);
+/// The Sapling parameter file `filename`, opened from ZcashParams if its hash
+/// matches, otherwise from zorg.app/Contents/Resources.
+fn open_param(home: &str, filename: &str, expected_hash: &str) -> Result<std::fs::File, String> {
+    let user = std::path::Path::new(home)
+        .join("Library/Application Support/ZcashParams")
+        .join(filename);
+    if let Some(file) = open_verified(&user, expected_hash) {
+        return Ok(file);
     }
 
-    // Otherwise, look for it in the Homebrew shares
-    let brew_paths = [
-        format!("/opt/homebrew/share/zorg/params/{}", filename),
-        format!("/usr/local/share/zorg/params/{}", filename),
-    ];
-
-    for path in brew_paths {
-        if std::path::Path::new(&path).exists() && check_hash(&path, expected_hash) {
-            std::fs::create_dir_all(&dest_dir)
-                .map_err(|e| format!("Failed to create {dest_dir}: {e}"))?;
-            std::fs::copy(&path, &dest_path)
-                .map_err(|e| format!("Failed to copy {path} to {dest_path}: {e}"))?;
-            return Ok(dest_path);
+    // Otherwise, use the copy bundled in zorg.app/Contents/Resources
+    let exe = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|e| format!("Failed to locate the zorg executable: {e}"))?;
+    if let Some(contents) = exe.parent().and_then(|macos| macos.parent()) {
+        if let Some(file) = open_verified(&contents.join("Resources").join(filename), expected_hash)
+        {
+            return Ok(file);
         }
     }
 
     Err(format!(
-        "Sapling parameter {} not found in ZcashParams or Homebrew shares, or hash was invalid.",
+        "Sapling parameter {} not found in ZcashParams or the zorg app, or hash was invalid.",
         filename
     ))
 }
@@ -372,16 +366,7 @@ where
     let seed = load_seed(stored.network, stored.account_id).inspect_err(|_| {
         let _ = finish_stored_proposal(proposal_id, send_flow_id, true);
     })?;
-    execute_stored(
-        db_path,
-        lightwalletd_url,
-        stored,
-        seed,
-        on_broadcast,
-        None,
-        None,
-    )
-    .await
+    execute_stored(db_path, lightwalletd_url, stored, seed, on_broadcast).await
 }
 
 async fn execute_stored(
@@ -390,8 +375,6 @@ async fn execute_stored(
     stored: StoredProposal,
     seed: SecretVec<u8>,
     on_broadcast: &dyn Fn(),
-    spend_params: Option<&str>,
-    output_params: Option<&str>,
 ) -> Result<ExecuteProposalResult, String> {
     let network = stored.network;
     let proposal_id = stored.proposal_id;
@@ -438,44 +421,28 @@ async fn execute_stored(
             .map_err(|e| format!("USK: {e:?}"))?;
         drop(seed);
 
-        let (spend_path, output_path) = match (spend_params, output_params) {
-            (Some(sp), Some(op)) if !sp.is_empty() && !op.is_empty() => {
-                (sp.to_string(), op.to_string())
-            }
-            _ => {
-                let home =
-                    std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
-                let sp = ensure_param(
-                    &home,
-                    "sapling-spend.params",
-                    "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c",
-                )?;
-                let op = ensure_param(
-                    &home,
-                    "sapling-output.params",
-                    "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
-                )?;
-                (sp, op)
-            }
-        };
+        let home = std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
+        let spend_file = open_param(
+            &home,
+            "sapling-spend.params",
+            "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c",
+        )?;
+        let output_file = open_param(
+            &home,
+            "sapling-output.params",
+            "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
+        )?;
 
-        let spend_file = std::fs::File::open(&spend_path).map_err(|e| {
-            format!(
-                "Sapling spend params missing! Please place them at {}: {}",
-                spend_path, e
-            )
-        })?;
-        let output_file = std::fs::File::open(&output_path).map_err(|e| {
-            format!(
-                "Sapling output params missing! Please place them at {}: {}",
-                output_path, e
-            )
-        })?;
-
-        let spend_prover = sapling_crypto::circuit::SpendParameters::read(spend_file, false)
-            .map_err(|e| format!("Failed to read sapling-spend.params: {}", e))?;
-        let output_prover = sapling_crypto::circuit::OutputParameters::read(output_file, false)
-            .map_err(|e| format!("Failed to read sapling-output.params: {}", e))?;
+        let spend_prover = sapling_crypto::circuit::SpendParameters::read(
+            std::io::BufReader::new(spend_file),
+            false,
+        )
+        .map_err(|e| format!("Failed to read sapling-spend.params: {}", e))?;
+        let output_prover = sapling_crypto::circuit::OutputParameters::read(
+            std::io::BufReader::new(output_file),
+            false,
+        )
+        .map_err(|e| format!("Failed to read sapling-output.params: {}", e))?;
 
         let txids = create_proposed_transactions::<
             _,

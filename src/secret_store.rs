@@ -7,6 +7,8 @@ const ACCOUNT_MNEMONIC_KEY_PREFIX: &str = "zorg_wallet_";
 
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
+const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
+
 pub fn seed_from_macos_stored_mnemonic(
     network: WalletNetwork,
     account_uuid: &str,
@@ -74,7 +76,7 @@ pub fn delete_mnemonic_from_macos_keychain(
     match delete_generic_password_options(options) {
         Ok(()) => Ok(()),
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-        Err(error) => Err(format!("Failed to delete Keychain entry: {error}")),
+        Err(error) => Err(keychain_error("Failed to delete Keychain entry", error)),
     }
 }
 
@@ -105,7 +107,7 @@ fn macos_read_secure_store_value(
     match generic_password(options) {
         Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-        Err(error) => Err(format!("Keychain read failed: {error}")),
+        Err(error) => Err(keychain_error("Keychain read failed", error)),
     }
 }
 
@@ -128,13 +130,24 @@ fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Res
     match delete_generic_password_options(existing) {
         Ok(()) => {}
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
-        Err(error) => return Err(format!("Failed to replace Keychain entry: {error}")),
+        Err(error) => return Err(keychain_error("Failed to replace Keychain entry", error)),
     }
     let mut options = PasswordOptions::new_generic_password(service, key);
     options.use_protected_keychain();
     options.set_access_control(access);
     set_generic_password_options(value, options)
-        .map_err(|error| format!("Failed to write protected mnemonic to Keychain: {error}"))
+        .map_err(|error| keychain_error("Failed to write protected mnemonic to Keychain", error))
+}
+
+/// The message for a failed Keychain call: what to do when the binary lacks
+/// zorg's Keychain entitlement, otherwise `context` and the error.
+fn keychain_error(context: &str, error: security_framework::base::Error) -> String {
+    if error.code() == ERR_SEC_MISSING_ENTITLEMENT {
+        return "This zorg binary isn't the signed zorg app, so macOS won't let it use the \
+                Keychain for recovery phrases. Install and run the signed zorg app."
+            .to_string();
+    }
+    format!("{context}: {error}")
 }
 
 #[cfg(test)]
