@@ -112,7 +112,7 @@ fn command_spec(
             &["--account", "--limit"],
             0..=0,
         ),
-        "validate" => ("<address>", &[], 1..=1),
+        "validate" => ("<address>", &[], 0..=1),
         _ => return None,
     })
 }
@@ -180,7 +180,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let lwd = option("--lwd");
     let cmd = args.command.as_str();
     if cmd == "validate" {
-        println!("Valid: {}", sync::validate_address(&args.positional[0])?);
+        let address = match args.positional.first() {
+            Some(address) => address.clone(),
+            None if terminal::interactive() => terminal::ask("Address", false, |_| Ok(()))?,
+            None => return Err("Usage: zorg validate <address>".into()),
+        };
+        println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
