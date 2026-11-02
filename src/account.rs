@@ -625,11 +625,11 @@ pub fn delete_account_and_empty_database(
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<bool, String> {
+    let index = open_index_for_write(root)?;
     delete_account(db_path, network, account_uuid)?;
     if !list_accounts(db_path, network)?.is_empty() {
         return Ok(false);
     }
-    let index = open_index_for_write(root)?;
     remove_database_path(&index, Path::new(db_path))?;
     index
         .execute_batch("COMMIT")
