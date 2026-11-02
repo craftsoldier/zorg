@@ -814,14 +814,15 @@ fn cmd_send(
                     return Err("Cancelled".into());
                 }
             }
-            load_seed(network, &account.expose_uuid().to_string(), missing_phrase)
-        },
-        &|stage| {
+            let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
             if interactive {
-                progress.show(match stage {
-                    sync::SendStage::Building => "Building the transaction…",
-                    sync::SendStage::Broadcasting => "Broadcasting…",
-                });
+                progress.show("Building the transaction…");
+            }
+            Ok(seed)
+        },
+        &|| {
+            if interactive {
+                progress.show("Broadcasting…");
             }
         },
     ));
