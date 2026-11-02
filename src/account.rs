@@ -7,10 +7,11 @@ use std::{
 use rusqlite::{named_params, OptionalExtension};
 use secrecy::{ExposeSecret, SecretVec};
 
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use zcash_client_backend::data_api::{
     chain::ChainState, Account as _, AccountBirthday, WalletRead, WalletWrite,
 };
-use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
+use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
@@ -18,8 +19,8 @@ use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use crate::{
     db::{
         open_wallet_db_for_read_with_timeout, open_wallet_db_with_timeout,
-        with_wallet_db_write_lock, WalletDatabase, ACCOUNT_MUTATION_DB_BUSY_TIMEOUT,
-        READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
+        open_wallet_raw_conn_with_timeout, with_wallet_db_write_lock, WalletDatabase,
+        ACCOUNT_MUTATION_DB_BUSY_TIMEOUT, READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
     },
     network::WalletNetwork,
 };
@@ -269,141 +270,26 @@ pub fn delete_account(
 ) -> Result<(), String> {
     let account_id = parse_account_uuid(account_uuid)?;
     with_wallet_db_write_lock("keys.delete_account", || {
-        let db = open_wallet_db_for_mutation(db_path, network)?;
-        db.get_account(account_id)
-            .map_err(|e| format!("Failed to load account: {e}"))?
-            .ok_or_else(|| format!("Account not found: {}", account_id.expose_uuid()))?;
-
-        // zcash_client_sqlite 0.19.5 has a named-parameter bug in
-        // wallet::delete_account: the sent_notes rewrite binds `:address`
-        // while the SQL expects `:to_address`. Keep this local copy aligned
-        // with upstream except for that binding until the dependency is fixed.
-        drop(db);
-        delete_account_rows(db_path, account_id)?;
-        Ok(())
-    })
-}
-
-fn delete_account_rows(db_path: &str, account_id: AccountUuid) -> Result<(), String> {
-    let mut conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Failed to open wallet DB: {e}"))?;
-    conn.busy_timeout(ACCOUNT_MUTATION_DB_BUSY_TIMEOUT)
-        .map_err(|e| format!("Failed to configure wallet DB busy timeout: {e}"))?;
-    rusqlite::vtab::array::load_module(&conn)
-        .map_err(|e| format!("Failed to load SQLite array module: {e}"))?;
-    conn.execute("PRAGMA foreign_keys = ON", [])
-        .map_err(|e| format!("Failed to enable SQLite foreign keys: {e}"))?;
-
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("Failed to begin account delete transaction: {e}"))?;
-    let account_uuid = account_id.expose_uuid();
-    let account_uuid_bytes = account_uuid.as_bytes().as_slice();
-
-    {
-        let mut to_account_tx = tx
-            .prepare(
-                r#"
-                SELECT
-                    sn.id AS sent_note_id,
-                    COALESCE(addresses.address, addresses.cached_transparent_receiver_address) AS to_address
-                FROM sent_notes sn
-                JOIN v_received_outputs ro ON ro.sent_note_id = sn.id
-                JOIN addresses ON addresses.id = ro.address_id
-                JOIN accounts ta ON ta.id = sn.to_account_id
-                WHERE ta.uuid = :account_uuid
-                "#,
-            )
-            .map_err(|e| format!("Failed to prepare sent note rewrite query: {e}"))?;
-
-        let mut update_sent_note = tx
-            .prepare(
-                r#"
-                UPDATE sent_notes
-                SET to_address = :to_address, to_account_id = NULL
-                WHERE id = :sent_note_id
-                "#,
-            )
-            .map_err(|e| format!("Failed to prepare sent note rewrite update: {e}"))?;
-
-        let mut rows = to_account_tx
-            .query(named_params![":account_uuid": account_uuid_bytes])
-            .map_err(|e| format!("Failed to query sent notes for account deletion: {e}"))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("Failed to read sent notes for account deletion: {e}"))?
-        {
-            if let Some(address) = row
-                .get::<_, Option<String>>("to_address")
-                .map_err(|e| format!("Failed to read sent note destination address: {e}"))?
-            {
-                update_sent_note
-                    .execute(named_params![
-                        ":sent_note_id": row
-                            .get::<_, i64>("sent_note_id")
-                            .map_err(|e| format!("Failed to read sent note id: {e}"))?,
-                        ":to_address": address,
-                    ])
-                    .map_err(|e| format!("Failed to rewrite sent note destination: {e}"))?;
-            }
-        }
-    }
-
-    tx.execute(
-        r#"
-        WITH account_transactions AS (
-            SELECT ro.transaction_id
-            FROM v_received_outputs ro
-            JOIN accounts a ON a.id = ro.account_id
-            WHERE a.uuid = :account_uuid
-            UNION
-            SELECT ros.transaction_id
-            FROM v_received_output_spends ros
-            JOIN accounts sa ON sa.id = ros.account_id
-            WHERE sa.uuid = :account_uuid
-        ),
-        non_account_transactions AS (
-            SELECT ro.transaction_id
-            FROM v_received_outputs ro
-            JOIN accounts a ON a.id = ro.account_id
-            WHERE a.uuid != :account_uuid
-            UNION
-            SELECT ros.transaction_id
-            FROM v_received_output_spends ros
-            JOIN accounts sa ON sa.id = ros.account_id
-            WHERE sa.uuid != :account_uuid
-        )
-        DELETE FROM transactions WHERE id_tx IN (
-            SELECT transaction_id FROM account_transactions
-            EXCEPT
-            SELECT transaction_id FROM non_account_transactions
-        )
-        "#,
-        named_params![":account_uuid": account_uuid_bytes],
-    )
-    .map_err(|e| format!("Failed to delete account-only transactions: {e}"))?;
-
-    tx.execute(
-        "DELETE FROM accounts WHERE uuid = :account_uuid",
-        named_params![":account_uuid": account_uuid_bytes],
-    )
-    .map_err(|e| format!("Failed to delete account: {e}"))?;
-
+        let conn = open_wallet_raw_conn_with_timeout(db_path, ACCOUNT_MUTATION_DB_BUSY_TIMEOUT)?;
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .map_err(|e| format!("Failed to enable SQLite foreign keys: {e}"))?;
+        let mut db = WalletDb::from_connection(conn, network, SystemClock, UnwrapErr(SysRng));
+        db.delete_account(account_id)
+            .map_err(|e| format!("Failed to delete account: {e}"))
+    })?;
     // Restore the "below the wallet birthday = Ignored" invariant for any
     // historical scan range that only the just-deleted account required. See
     // `prune_orphaned_scan_ranges_in_conn` for the full rationale (VZR-89).
-    prune_orphaned_scan_ranges_in_conn(&tx)
+    prune_orphaned_scan_ranges(db_path)
         .map_err(|e| format!("Failed to prune orphaned scan ranges after deletion: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit account deletion: {e}"))
+    Ok(())
 }
 
 /// Demote orphaned historical scan ranges that lie below the remaining
 /// accounts' minimum birthday back to `Ignored`.
 ///
 /// librustzcash never garbage-collects `scan_queue` when an account is deleted
-/// (neither upstream `delete_account` nor our `delete_account_rows`), and
+/// (upstream `delete_account` leaves it in place), and
 /// importing an account with an old birthday force-rescans the whole chain,
 /// demoting already-`Scanned` history to `Historic`. When that imported account
 /// is later removed, the historical range it required is left pending in
