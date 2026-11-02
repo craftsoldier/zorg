@@ -562,19 +562,15 @@ fn cmd_delete(
         return Err("Cancelled".into());
     }
     #[cfg(target_os = "macos")]
-    {
-        zorg::secret_store::mnemonic_from_macos_keychain_if_present(
-            account.network,
-            &account.uuid,
-        )?;
-        zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
-    }
+    zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
     zorg::account::delete_account_and_empty_database(
         root,
         &account.db_path,
         account.network,
         &account.uuid,
     )?;
+    #[cfg(target_os = "macos")]
+    zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
     println!("Account {:?} deleted.", account.name);
     Ok(())
 }
