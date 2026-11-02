@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
+mod terminal;
+
 use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
@@ -41,7 +43,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = run(&args[1..]);
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        if e == terminal::INTERRUPTED {
+            std::process::exit(130);
+        }
+        if e != terminal::REPORTED {
+            eprintln!("Error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -296,15 +303,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let memo = option("--memo");
             let missing = missing_phrase_error(selected);
             endpoint(lwd.as_deref(), &net, cmd).and_then(|url| {
-                cmd_send(
-                    db,
-                    net,
-                    &url,
-                    &args.positional,
-                    memo.as_deref(),
-                    uuid,
-                    &missing,
-                )
+                cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
             })
         }
         "history" => {
@@ -520,18 +519,58 @@ fn cmd_import(
 }
 
 fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> Result<(), String> {
-    println!(
-        "This deletes account {:?} ({}).",
-        account.name, account.unified_address
-    );
-    println!("Keep the written-down recovery phrase: zorg can't show it again.");
-    if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
-        return Err("Cancelled".into());
+    let interactive = terminal::interactive();
+    if interactive {
+        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+            .map(|b| b.total)
+            .unwrap_or(0);
+        let unit = zec_unit(account.network);
+        let card = |full: bool| {
+            vec![
+                format!("Delete account {}", console::style(&account.name).bold()),
+                terminal::row(
+                    "address",
+                    7,
+                    terminal::address(&account.unified_address, full),
+                ),
+                terminal::row(
+                    "balance",
+                    7,
+                    format!("{} {unit}", terminal::zec(balance, 2)),
+                ),
+                String::new(),
+                format!(
+                    "{} zorg can't show the recovery phrase again. Keep your written copy.",
+                    console::style("!").yellow().bold()
+                ),
+            ]
+        };
+        match terminal::confirm("delete", account.unified_address.len(), card) {
+            Ok(()) => {}
+            Err(e) if e == terminal::CANCELLED => {
+                terminal::note("Cancelled. Nothing was deleted.");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        println!(
+            "This deletes account {:?} ({}).",
+            account.name, account.unified_address
+        );
+        println!("Keep the written-down recovery phrase: zorg can't show it again.");
+        if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
+            return Err("Cancelled".into());
+        }
     }
     zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
     zorg::account::delete_account(root, account)?;
     zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
-    println!("Account {:?} deleted.", account.name);
+    if interactive {
+        terminal::success(&format!("Deleted account {}", account.name));
+    } else {
+        println!("Account {:?} deleted.", account.name);
+    }
     Ok(())
 }
 
@@ -584,14 +623,17 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
 }
 
 fn cmd_send(
-    db: &str,
-    net: WalletNetwork,
+    account: &zorg::account::AccountInfo,
     lwd_url: &str,
     positional: &[String],
     memo: Option<&str>,
-    uuid: &str,
     missing_phrase: &str,
 ) -> Result<(), String> {
+    let (db, net, uuid) = (
+        account.db_path.as_str(),
+        account.network,
+        account.uuid.as_str(),
+    );
     let [to, amount] = positional else {
         return Err("Usage: zorg send <to> <amount> [--memo <text>]".into());
     };
@@ -599,7 +641,40 @@ fn cmd_send(
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
     let proposal = sync::propose_send(db, net, uuid, &send_flow_id, to, amount_zat, memo)?;
-    let summary = send_summary(to, amount_zat, proposal.fee_zatoshi, memo, net);
+    let fee = proposal.fee_zatoshi;
+    let summary = send_summary(to, amount_zat, fee, memo, net);
+    let interactive = terminal::interactive();
+    let unit = zec_unit(net);
+    let kind = sync::validate_address(to).unwrap_or_default();
+    let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
+    let card = |full: bool| {
+        let total = amount_zat + fee;
+        let mut lines = vec![
+            format!(
+                "Send {} {unit}   {}",
+                console::style(terminal::zec(amount_zat, 0)).bold(),
+                terminal::privacy_tag(&kind)
+            ),
+            terminal::row(
+                "from",
+                5,
+                format!(
+                    "{}  {} → {} {unit}",
+                    account.name,
+                    terminal::zec(balance, 2),
+                    console::style(terminal::zec(balance.saturating_sub(total), 2)).bold()
+                ),
+            ),
+            terminal::row("to", 5, terminal::address(to, full)),
+            terminal::row("fee", 5, format!("{} {unit}", terminal::zec(fee, 0))),
+            terminal::row("total", 5, format!("{} {unit}", terminal::zec(total, 0))),
+        ];
+        if let Some(memo) = memo {
+            lines.push(terminal::row("memo", 5, format!("{memo:?}")));
+        }
+        lines
+    };
+    let progress = terminal::Progress::hidden();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(sync::execute_proposal_with_seed_loader(
@@ -609,19 +684,64 @@ fn cmd_send(
         &send_flow_id,
         |network, account| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
-            print!("{summary}");
-            if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
-                return Err("Cancelled".into());
+            if interactive {
+                terminal::confirm("send", to.len(), card)?;
+                progress.show("Waiting for Touch ID…");
+            } else {
+                print!("{summary}");
+                if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
+                    return Err("Cancelled".into());
+                }
             }
             load_seed(network, &account.expose_uuid().to_string(), missing_phrase)
         },
-        None,
-        None,
-    ))?;
-    for txid in &result.txids {
-        println!("Broadcasted: {txid}");
+        &|stage| {
+            if interactive {
+                progress.show(match stage {
+                    sync::SendStage::Building => "Building the transaction…",
+                    sync::SendStage::Broadcasting => "Broadcasting…",
+                });
+            }
+        },
+    ));
+    progress.clear();
+    match result {
+        Ok(result) if interactive => {
+            terminal::success(&format!(
+                "Sent {} {unit} to {}",
+                terminal::zec(amount_zat, 0),
+                terminal::short_address(to)
+            ));
+            for txid in &result.txids {
+                println!("  {txid}");
+            }
+            terminal::note("  Pending · confirms in about a minute · zorg history");
+            Ok(())
+        }
+        Ok(result) => {
+            for txid in &result.txids {
+                println!("Broadcasted: {txid}");
+            }
+            Ok(())
+        }
+        Err(e) if interactive && e == terminal::CANCELLED => {
+            terminal::note("Cancelled. Nothing was sent.");
+            Ok(())
+        }
+        Err(e) if interactive && e != terminal::INTERRUPTED => {
+            terminal::failure(&format!("Not sent: {e}"));
+            Err(terminal::REPORTED.into())
+        }
+        Err(e) => Err(e),
     }
-    Ok(())
+}
+
+/// "ZEC" on mainnet, "TAZ" on test networks.
+fn zec_unit(net: WalletNetwork) -> &'static str {
+    match net {
+        WalletNetwork::Main => "ZEC",
+        WalletNetwork::Test | WalletNetwork::Regtest => "TAZ",
+    }
 }
 
 /// The amount, recipient, fee and memo of a send, shown before it is authorized.

@@ -49,6 +49,15 @@ pub struct ProposalResult {
     pub fee_zatoshi: u64,
 }
 
+/// A stage of executing a send, reported as it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStage {
+    /// Proving and signing the transaction.
+    Building,
+    /// Sending the transaction to lightwalletd.
+    Broadcasting,
+}
+
 pub struct ExecuteProposalResult {
     pub txids: Vec<TxId>,
     pub status: String,
@@ -363,8 +372,7 @@ pub async fn execute_proposal_with_seed_loader<F>(
     proposal_id: u64,
     send_flow_id: &str,
     load_seed: F,
-    spend_params: Option<&str>,
-    output_params: Option<&str>,
+    on_stage: &dyn Fn(SendStage),
 ) -> Result<ExecuteProposalResult, String>
 where
     F: FnOnce(WalletNetwork, AccountUuid) -> Result<SecretVec<u8>, String>,
@@ -378,8 +386,9 @@ where
         lightwalletd_url,
         stored,
         seed,
-        spend_params,
-        output_params,
+        on_stage,
+        None,
+        None,
     )
     .await
 }
@@ -389,9 +398,11 @@ async fn execute_stored(
     lightwalletd_url: &str,
     stored: StoredProposal,
     seed: SecretVec<u8>,
+    on_stage: &dyn Fn(SendStage),
     spend_params: Option<&str>,
     output_params: Option<&str>,
 ) -> Result<ExecuteProposalResult, String> {
+    on_stage(SendStage::Building);
     let network = stored.network;
     let proposal_id = stored.proposal_id;
     let send_flow_id = stored.send_flow_id.clone();
@@ -511,6 +522,7 @@ async fn execute_stored(
     };
 
     // Broadcast
+    on_stage(SendStage::Broadcasting);
     let txids: Vec<TxId> = txids.iter().cloned().collect();
     let read_conn = open_readonly_conn(db_path)?;
     let mut broadcast_ok = Vec::new();
