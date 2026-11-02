@@ -97,24 +97,21 @@ fn ensure_param(home: &str, filename: &str, expected_hash: &str) -> Result<Strin
         return Ok(dest_path);
     }
 
-    // Otherwise, look for it in the Homebrew shares
-    let brew_paths = [
-        format!("/opt/homebrew/share/zorg/params/{}", filename),
-        format!("/usr/local/share/zorg/params/{}", filename),
-    ];
-
-    for path in brew_paths {
-        if std::path::Path::new(&path).exists() && check_hash(&path, expected_hash) {
-            std::fs::create_dir_all(&dest_dir)
-                .map_err(|e| format!("Failed to create {dest_dir}: {e}"))?;
-            std::fs::copy(&path, &dest_path)
-                .map_err(|e| format!("Failed to copy {path} to {dest_path}: {e}"))?;
-            return Ok(dest_path);
+    // Otherwise, use the copy bundled in zorg.app/Contents/Resources
+    let exe = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|e| format!("Failed to locate the zorg executable: {e}"))?;
+    if let Some(contents) = exe.parent().and_then(|macos| macos.parent()) {
+        let bundled = contents.join("Resources").join(filename);
+        if let Some(path) = bundled.to_str() {
+            if bundled.exists() && check_hash(path, expected_hash) {
+                return Ok(path.to_string());
+            }
         }
     }
 
     Err(format!(
-        "Sapling parameter {} not found in ZcashParams or Homebrew shares, or hash was invalid.",
+        "Sapling parameter {} not found in ZcashParams or the zorg app, or hash was invalid.",
         filename
     ))
 }
