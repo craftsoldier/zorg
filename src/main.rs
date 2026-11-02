@@ -290,7 +290,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             return Err(e);
         }
         if let Some(birthday) = created.birthday {
-            print!("{}", recovery_phrase_text(&created.mnemonic, birthday));
+            print!("{}", *recovery_phrase_text(&created.mnemonic, birthday));
         }
         println!("Account: {name}");
         println!("Address: {}", created.unified_address);
@@ -513,7 +513,7 @@ fn cmd_create(
     name: &str,
 ) -> Result<NewAccount, String> {
     let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
-    let mnemonic = zeroize::Zeroizing::new(keys::generate_mnemonic());
+    let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
@@ -556,18 +556,24 @@ fn store_and_verify_mnemonic(
 
 /// The recovery phrase as numbered words, followed by the wallet birthday and
 /// how to keep them.
-fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> String {
-    let mut text = String::from("Recovery phrase (write it down and keep it offline):\n");
+fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> zeroize::Zeroizing<String> {
+    use std::fmt::Write;
+
     let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(256 + 16 * words.len()));
+    text.push_str("Recovery phrase (write it down and keep it offline):\n");
     for (row, chunk) in words.chunks(4).enumerate() {
-        let line: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .map(|(col, word)| format!("{:>2}. {word:<8}", row * 4 + col + 1))
-            .collect();
-        text.push_str(&format!("  {}\n", line.join("  ").trim_end()));
+        for (col, word) in chunk.iter().enumerate() {
+            let number = row * 4 + col + 1;
+            if col + 1 == chunk.len() {
+                let _ = write!(text, "  {number:>2}. {word}");
+            } else {
+                let _ = write!(text, "  {number:>2}. {word:<8}");
+            }
+        }
+        text.push('\n');
     }
-    text.push_str(&format!("Wallet birthday: {birthday}\n"));
+    let _ = writeln!(text, "Wallet birthday: {birthday}");
     text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
     text
 }
@@ -598,8 +604,7 @@ fn cmd_import(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     zorg::account::ensure_new_seed(databases, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
-        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
+    store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -684,7 +689,7 @@ fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Res
         .ok_or_else(|| missing_phrase_error(account))?;
     print!(
         "{}",
-        recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
+        *recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
     );
     Ok(())
 }
