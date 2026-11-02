@@ -185,7 +185,11 @@ pub fn ask(
     );
     let prompt_width = console::measure_text_width(&prompt);
     let width = usize::from(term.size().1).max(1);
-    let rows = |text: &str| (prompt_width + text.chars().count()).div_ceil(width).max(1);
+    let rows = |text: &str| {
+        (prompt_width + console::measure_text_width(text))
+            .div_ceil(width)
+            .max(1)
+    };
     let erase = |shown: usize| -> Result<(), String> {
         term.clear_line().map_err(io)?;
         for _ in 1..shown {

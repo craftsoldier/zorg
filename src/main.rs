@@ -105,7 +105,11 @@ fn command_spec(
         "send" => (
             "<to> <amount> [--memo <text>] [--account <name>]",
             &["--account", "--memo"],
-            0..=2,
+            if terminal::interactive() {
+                0..=2
+            } else {
+                2..=2
+            },
         ),
         "history" => (
             "[--limit <n>] [--account <name>]",
@@ -211,10 +215,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let height = terminal::ask(
                 "Birthday height (Enter to scan from the start)",
                 true,
-                |h| {
-                    h.parse::<u64>()
-                        .map(|_| ())
-                        .map_err(|_| "Enter a block height, like 2500000".to_string())
+                |h| match h.parse::<u32>() {
+                    Ok(height) if height > 0 => Ok(()),
+                    _ => Err("Enter a block height from 1 to 4294967295".to_string()),
                 },
             )?;
             birthday = height.parse().ok();
@@ -609,10 +612,11 @@ fn cmd_import(
 fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> Result<(), String> {
     let interactive = terminal::interactive();
     if interactive {
-        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-            .map(|b| b.total)
-            .unwrap_or(0);
         let unit = zec_unit(account.network);
+        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+            .map_or("unknown".to_string(), |b| {
+                format!("{} {unit}", terminal::zec(b.total, 2))
+            });
         let card = |full: bool| {
             vec![
                 format!("Delete account {}", console::style(&account.name).bold()),
@@ -621,11 +625,7 @@ fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> R
                     7,
                     terminal::address(&account.unified_address, full),
                 ),
-                terminal::row(
-                    "balance",
-                    7,
-                    format!("{} {unit}", terminal::zec(balance, 2)),
-                ),
+                terminal::row("balance", 7, &balance),
                 String::new(),
                 format!(
                     "{} zorg can't show the recovery phrase again. Keep your written copy.",
@@ -723,9 +723,6 @@ fn cmd_send(
         account.uuid.as_str(),
     );
     let interactive = terminal::interactive();
-    if positional.len() < 2 && !interactive {
-        return Err("Usage: zorg send <to> <amount> [--memo <text>]".into());
-    }
     let unit = zec_unit(net);
     let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
     let guided = positional.len() < 2;
@@ -796,6 +793,7 @@ fn cmd_send(
         lines
     };
     let progress = terminal::Progress::hidden();
+    let broadcasting = std::cell::Cell::new(false);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(sync::execute_proposal_with_seed_loader(
@@ -821,6 +819,7 @@ fn cmd_send(
             Ok(seed)
         },
         &|| {
+            broadcasting.set(true);
             if interactive {
                 progress.show("Broadcasting…");
             }
@@ -851,7 +850,14 @@ fn cmd_send(
             Ok(())
         }
         Err(e) if interactive && e != terminal::INTERRUPTED => {
-            terminal::failure(&format!("Not sent: {e}"));
+            if broadcasting.get() {
+                terminal::failure(&format!(
+                    "Broadcast failed: {e}. The transaction is saved and zorg retries it on \
+                     the next sync — check zorg history before sending again."
+                ));
+            } else {
+                terminal::failure(&format!("Not sent: {e}"));
+            }
             Err(terminal::REPORTED.into())
         }
         Err(e) => Err(e),
