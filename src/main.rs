@@ -100,7 +100,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     if matches!(cmd, "create" | "import") {
         zorg::account::require_available(&unavailable)?;
         let name = match positional_args(opts)?.as_slice() {
-            [] => read_account_name()?,
+            [] => prompt_line("Account name: ")?,
             [name] => name.clone(),
             _ => {
                 return Err(format!(
@@ -189,7 +189,12 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
                 databases.push(account);
             }
         }
-        let mut failed = 0;
+        let missing = if selected.is_none() {
+            unavailable.len()
+        } else {
+            0
+        };
+        let mut failed = missing;
         for account in &databases {
             let names: Vec<&str> = visible
                 .iter()
@@ -212,7 +217,10 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         return if failed == 0 {
             Ok(())
         } else {
-            Err(format!("{failed} of {} databases failed", databases.len()))
+            Err(format!(
+                "{failed} of {} databases failed",
+                databases.len() + missing
+            ))
         };
     }
     let selected = selected.ok_or("Choose an account")?;
@@ -280,15 +288,22 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<St
     Ok(url.to_string())
 }
 
-fn read_account_name() -> Result<String, String> {
+/// Prints `prompt` and returns one line from stdin without its line ending.
+/// Fails when stdin is closed.
+fn prompt_line(prompt: &str) -> Result<String, String> {
     use std::io::Write;
-    print!("Account name: ");
+    print!("{prompt}");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
-    let mut name = String::new();
-    std::io::stdin()
-        .read_line(&mut name)
-        .map_err(|e| e.to_string())?;
-    Ok(name.trim_end_matches(['\r', '\n']).to_string())
+    let mut line = String::new();
+    if std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        println!();
+        return Err("Cancelled: no input".into());
+    }
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
@@ -429,7 +444,6 @@ fn cmd_delete(
     account: &zorg::account::AccountInfo,
     last_in_database: bool,
 ) -> Result<(), String> {
-    use std::io::Write;
     println!(
         "This deletes account {:?} ({}).",
         account.name, account.unified_address
@@ -440,11 +454,7 @@ fn cmd_delete(
              Keep the written-down recovery phrase: zorg can't show it again."
         );
     }
-    print!("Press Enter to continue, or Ctrl-C to cancel: ");
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-    std::io::stdin()
-        .read_line(&mut String::new())
-        .map_err(|e| e.to_string())?;
+    prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?;
     #[cfg(target_os = "macos")]
     zorg::secret_store::mnemonic_from_macos_keychain(account.network, &account.uuid)?;
     zorg::account::delete_account_and_empty_database(
@@ -848,6 +858,8 @@ mod tests {
         let offline = root.path().join("offline.db");
         std::fs::rename(second_db, &offline).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("unavailable"));
+        assert_eq!(command(&["status"]).unwrap_err(), "1 of 2 databases failed");
+        command(&["status", "--account", "Savings"]).unwrap();
         command(&["balance", "--account", "Savings"]).unwrap();
         std::fs::rename(offline, second_db).unwrap();
         let travel = &zorg::account::list_accounts(second_db, WalletNetwork::Regtest).unwrap()[0];
