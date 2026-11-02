@@ -199,14 +199,14 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let created = match result {
             Ok(created) => created,
             Err(e) => {
-                zorg::account::remove_wallet_files(db);
+                let _ = zorg::account::remove_wallet_files(db);
                 return Err(e);
             }
         };
         if let Err(e) = zorg::account::secure_wallet_db_file(&db_path).and_then(|()| {
             zorg::account::index_new_database(&root, &db_path, &name, &created.seed, net)
         }) {
-            zorg::account::remove_wallet_files(db);
+            let _ = zorg::account::remove_wallet_files(db);
             let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
             return Err(e);
         }

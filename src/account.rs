@@ -387,18 +387,24 @@ pub fn delete_account(root: &Path, account: &AccountInfo) -> Result<(), String> 
         }
     }
     remove_database_path(&index, Path::new(db_path))?;
+    // Dropping `index` without COMMIT keeps the row when a file can't be deleted.
+    remove_wallet_files(db_path)?;
     index
         .execute_batch("COMMIT")
-        .map_err(|e| format!("Could not update database index: {e}"))?;
-    remove_wallet_files(db_path);
-    Ok(())
+        .map_err(|e| format!("Could not update database index: {e}"))
 }
 
-/// Removes a wallet database and its SQLite side files, ignoring missing ones.
-pub fn remove_wallet_files(db: &str) {
-    for path in [db.to_string(), format!("{db}-wal"), format!("{db}-shm")] {
-        let _ = std::fs::remove_file(path);
+/// Removes a wallet database's SQLite side files and then the database,
+/// treating missing files as removed. Stops at the first other error.
+pub fn remove_wallet_files(db: &str) -> Result<(), String> {
+    for path in [format!("{db}-shm"), format!("{db}-wal"), db.to_string()] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Could not delete {path}: {e}")),
+        }
     }
+    Ok(())
 }
 
 /// The accounts in the given databases, and a message for each database that is unavailable.
@@ -667,6 +673,43 @@ mod tests {
             renewed_address,
             list_accounts(db_path_str, WalletNetwork::Main).unwrap()[0].unified_address
         );
+    }
+
+    #[test]
+    fn delete_keeps_an_account_whose_database_cannot_be_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        ensure_private_wallet_dir(root.path()).unwrap();
+        let db = root.path().join("wallet.db");
+        let db_str = db.to_str().unwrap();
+        let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
+        init_db_and_create_account(db_str, WalletNetwork::Regtest, &seed, Some(1), "A").unwrap();
+        let index = open_index_for_write(root.path()).unwrap();
+        add_database_path(&index, &db).unwrap();
+        index.execute_batch("COMMIT").unwrap();
+        let account = list_accounts(db_str, WalletNetwork::Regtest)
+            .unwrap()
+            .remove(0);
+        let chflags = |flag: &str| {
+            assert!(std::process::Command::new("chflags")
+                .args([flag, db_str])
+                .status()
+                .unwrap()
+                .success());
+        };
+
+        chflags("uchg");
+        let error = delete_account(root.path(), &account);
+        chflags("nouchg");
+        assert!(error.unwrap_err().contains("Could not delete"));
+        assert!(db.exists());
+        assert_eq!(
+            read_database_paths(root.path()).unwrap(),
+            std::slice::from_ref(&db)
+        );
+
+        delete_account(root.path(), &account).unwrap();
+        assert!(!db.exists());
+        assert!(read_database_paths(root.path()).unwrap().is_empty());
     }
 
     #[test]
