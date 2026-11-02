@@ -433,10 +433,16 @@ async fn execute_stored(
             "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
         )?;
 
-        let spend_prover = sapling_crypto::circuit::SpendParameters::read(spend_file, false)
-            .map_err(|e| format!("Failed to read sapling-spend.params: {}", e))?;
-        let output_prover = sapling_crypto::circuit::OutputParameters::read(output_file, false)
-            .map_err(|e| format!("Failed to read sapling-output.params: {}", e))?;
+        let spend_prover = sapling_crypto::circuit::SpendParameters::read(
+            std::io::BufReader::new(spend_file),
+            false,
+        )
+        .map_err(|e| format!("Failed to read sapling-spend.params: {}", e))?;
+        let output_prover = sapling_crypto::circuit::OutputParameters::read(
+            std::io::BufReader::new(output_file),
+            false,
+        )
+        .map_err(|e| format!("Failed to read sapling-output.params: {}", e))?;
 
         let txids = create_proposed_transactions::<
             _,
