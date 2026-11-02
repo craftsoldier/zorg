@@ -276,16 +276,34 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<St
     let Some(url) = explicit else {
         return Ok(resolve_default_lwd_url(net, cmd));
     };
-    // Zebra reports regtest as "test", so only mainnet versus the rest is checked.
-    if let Ok(chain) = zorg::sync_engine::get_lightwalletd_chain_name(url) {
-        if (chain == "main") != (*net == WalletNetwork::Main) {
+    if let Ok(height) = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url) {
+        let served = network_with_sapling_activation_height(height);
+        if served != Some(*net) {
+            let served = served.map_or("an unknown network".into(), |n| {
+                format!("the {} network", n.as_str())
+            });
             return Err(format!(
-                "{url} serves the {chain} network, but this database is on {}",
+                "{url} serves {served}, but this database is on {}",
                 net.as_str()
             ));
         }
     }
     Ok(url.to_string())
+}
+
+/// The network whose Sapling activation height is `height`.
+fn network_with_sapling_activation_height(height: u64) -> Option<WalletNetwork> {
+    use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
+    [
+        WalletNetwork::Main,
+        WalletNetwork::Test,
+        WalletNetwork::Regtest,
+    ]
+    .into_iter()
+    .find(|net| {
+        net.activation_height(NetworkUpgrade::Sapling)
+            .is_some_and(|h| u64::from(u32::from(h)) == height)
+    })
 }
 
 /// Prints `prompt` and returns one line from stdin without its line ending.
@@ -912,6 +930,23 @@ mod tests {
             .unwrap_err()
             .contains("quote"));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn sapling_activation_height_identifies_the_network() {
+        assert_eq!(
+            network_with_sapling_activation_height(419_200),
+            Some(WalletNetwork::Main)
+        );
+        assert_eq!(
+            network_with_sapling_activation_height(280_000),
+            Some(WalletNetwork::Test)
+        );
+        assert_eq!(
+            network_with_sapling_activation_height(1),
+            Some(WalletNetwork::Regtest)
+        );
+        assert_eq!(network_with_sapling_activation_height(5), None);
     }
 
     #[test]
