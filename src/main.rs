@@ -96,8 +96,24 @@ fn command_spec(
 ) -> Option<(&'static str, &'static [&'static str], RangeInclusive<usize>)> {
     Some(match cmd {
         "accounts" => ("", &[], 0..=0),
-        "create" => ("[name]", &[], 0..=1),
-        "import" => ("[name] [--birthday <height>]", &["--birthday"], 0..=1),
+        "create" => (
+            "<name>",
+            &[],
+            if terminal::interactive() {
+                0..=1
+            } else {
+                1..=1
+            },
+        ),
+        "import" => (
+            "<name> [--birthday <height>]",
+            &["--birthday"],
+            if terminal::interactive() {
+                0..=1
+            } else {
+                1..=1
+            },
+        ),
         "balance" | "address" | "sync" | "status" | "recovery" => {
             ("[--account <name>]", &["--account"], 0..=0)
         }
@@ -203,10 +219,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let interactive = terminal::interactive();
         let name = match args.positional.first() {
             Some(name) => name.clone(),
-            None if interactive => terminal::ask("Account name", false, |name| {
+            None => terminal::ask("Account name", false, |name| {
                 zorg::account::ensure_unique_name(&accounts, name)
             })?,
-            None => prompt_line("Account name: ")?,
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
         let mut birthday: Option<u64> = option("--birthday").and_then(|h| h.parse().ok());
@@ -468,24 +483,6 @@ fn network_with_sapling_activation_height(height: u64) -> Option<WalletNetwork> 
     })
 }
 
-/// Prints `prompt` and returns one line from stdin without its line ending.
-/// Fails when stdin is closed.
-fn prompt_line(prompt: &str) -> Result<String, String> {
-    use std::io::Write;
-    print!("{prompt}");
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    if std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?
-        == 0
-    {
-        println!();
-        return Err("Cancelled: no input".into());
-    }
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
-
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -652,9 +649,6 @@ fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> R
             account.name, account.unified_address
         );
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
-        if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
-            return Err("Cancelled".into());
-        }
     }
     zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
     zorg::account::delete_account(root, account)?;
@@ -813,9 +807,6 @@ fn cmd_send(
                 progress.show("Waiting for Touch ID…");
             } else {
                 print!("{summary}");
-                if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
-                    return Err("Cancelled".into());
-                }
             }
             let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
             if interactive {
