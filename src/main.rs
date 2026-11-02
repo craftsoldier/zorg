@@ -855,9 +855,9 @@ fn load_seed(
     }
 }
 
-/// Read the 24-word mnemonic from the terminal without echoing it.
+/// Read a 12- or 24-word mnemonic from the terminal without echoing it.
 fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
-    rpassword::prompt_password("Enter your 24-word recovery phrase: ")
+    rpassword::prompt_password("Enter your 12- or 24-word recovery phrase: ")
         .map(zeroize::Zeroizing::new)
         .map_err(|e| format!("Failed to read mnemonic: {e}"))
 }

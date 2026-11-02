@@ -11,24 +11,19 @@ pub fn generate_mnemonic() -> String {
     mnemonic.phrase().to_string()
 }
 
-/// Return the BIP-39 English word list used for mnemonic validation.
-pub fn mnemonic_word_list() -> Vec<String> {
-    English::WORD_LIST
-        .iter()
-        .map(|word| (*word).to_string())
-        .collect()
-}
-
-fn is_supported_mnemonic_word_count(count: usize) -> bool {
-    count == 24
-}
-
-/// Convert a mnemonic phrase to a 64-byte seed.
+/// Convert a 12- or 24-word mnemonic phrase to a 64-byte seed.
 /// The seed is zeroized from memory when the SecretVec is dropped.
+/// Errors name a bad word by its position, never by its text.
 pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
-    let word_count = phrase.split_whitespace().count();
-    if !is_supported_mnemonic_word_count(word_count) {
-        return Err("Invalid mnemonic word count: expected 24 words".to_string());
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    if !matches!(words.len(), 12 | 24) {
+        return Err(format!(
+            "Recovery phrase has {} words; expected 12 or 24",
+            words.len()
+        ));
+    }
+    if let Some(i) = words.iter().position(|w| !English::WORD_LIST.contains(w)) {
+        return Err(format!("Word {} is not in the BIP 39 word list", i + 1));
     }
 
     let mnemonic =
@@ -87,11 +82,6 @@ pub fn default_address_for_account(
     Ok(ua.encode(&network))
 }
 
-/// Validate a mnemonic phrase.
-pub fn validate_mnemonic(mnemonic: &str) -> bool {
-    mnemonic_to_seed(mnemonic).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use secrecy::ExposeSecret;
@@ -113,31 +103,28 @@ mod tests {
     }
 
     #[test]
-    fn test_mnemonic_to_seed_accepts_supported_word_counts() {
-        let count = Count::Words24;
-        let phrase = Mnemonic::<English>::generate(count).phrase().to_string();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-        assert_eq!(seed.expose_secret().len(), 64);
-    }
-
-    #[test]
-    fn test_mnemonic_to_seed_rejects_unsupported_word_counts() {
-        for count in [11, 12, 13, 25] {
-            let phrase = std::iter::repeat_n("abandon", count)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let error = match mnemonic_to_seed(&phrase) {
-                Ok(_) => panic!("unsupported mnemonic word count should be rejected"),
-                Err(error) => error,
-            };
-            assert!(error.contains("expected 24 words"));
+    fn test_mnemonic_to_seed_accepts_12_and_24_words() {
+        for count in [Count::Words12, Count::Words24] {
+            let phrase = Mnemonic::<English>::generate(count).phrase().to_string();
+            assert_eq!(mnemonic_to_seed(&phrase).unwrap().expose_secret().len(), 64);
         }
     }
 
     #[test]
-    fn test_invalid_mnemonic() {
-        let result = mnemonic_to_seed("invalid words here");
-        assert!(result.is_err());
+    fn test_mnemonic_to_seed_rejects_other_word_counts() {
+        for count in [11, 13, 15, 18, 21, 25] {
+            let phrase = vec!["abandon"; count].join(" ");
+            let error = mnemonic_to_seed(&phrase).err().unwrap();
+            assert!(error.contains("expected 12 or 24"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_mnemonic_to_seed_names_a_bad_word_by_position_only() {
+        let mut words: Vec<String> = generate_mnemonic().split(' ').map(String::from).collect();
+        words[6] = "zorgword".into();
+        let error = mnemonic_to_seed(&words.join(" ")).err().unwrap();
+        assert_eq!(error, "Word 7 is not in the BIP 39 word list");
     }
 
     #[test]
