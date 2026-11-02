@@ -3324,7 +3324,6 @@ dependencies = [
  "hex",
  "incrementalmerkletree",
  "indicatif",
- "libc",
  "log",
  "nonempty",
  "orchard",

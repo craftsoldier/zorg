@@ -1,7 +1,7 @@
 //! zorg's terminal output for a person: confirmation cards and send progress.
 
 use std::io::IsTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use console::{style, Key, Term};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -12,6 +12,10 @@ pub const CANCELLED: &str = "\0cancelled";
 pub const INTERRUPTED: &str = "\0interrupted";
 /// Error for a failure already shown on screen; zorg exits with status 1.
 pub const REPORTED: &str = "\0reported";
+
+/// Keys pressed this soon after a card is drawn are ignored, so keys typed
+/// ahead cannot answer a card that was not yet shown.
+const TYPE_AHEAD_WINDOW: Duration = Duration::from_millis(250);
 
 /// Addresses longer than this are shortened on a card.
 const SHORT_ADDRESS_LEN: usize = 43;
@@ -90,7 +94,8 @@ pub type TabKey<'a> = (&'a str, &'a mut dyn FnMut() -> Result<(), String>);
 /// confirms. Esc or `n` fails with [`CANCELLED`], and Ctrl-C with
 /// [`INTERRUPTED`]. When `address_len` is long, `x` redraws the card with
 /// `full` toggled. With `tab` given as `(label, change)`, Tab runs `change` and
-/// redraws the card. Keys typed before the card appears are discarded.
+/// redraws the card. Keys pressed within 250 ms of the card being drawn are
+/// ignored, so keys typed ahead cannot answer it.
 pub fn confirm(
     action: &str,
     address_len: usize,
@@ -129,10 +134,14 @@ pub fn confirm(
         }
         Ok(rows)
     };
-    let mut keys = Some(KeysOnly::new()?);
     let mut rows = draw(full)?;
+    let mut drawn = Instant::now();
     let answer = loop {
-        match term.read_key_raw().map_err(|e| e.to_string())? {
+        let key = term.read_key_raw().map_err(|e| e.to_string())?;
+        if drawn.elapsed() < TYPE_AHEAD_WINDOW {
+            continue;
+        }
+        match key {
             Key::Enter | Key::Char('y' | 'Y') => break Ok(()),
             Key::Escape | Key::Char('n' | 'N') => break Err(CANCELLED.to_string()),
             Key::CtrlC => break Err(INTERRUPTED.to_string()),
@@ -140,20 +149,19 @@ pub fn confirm(
                 full = !full;
                 term.clear_last_lines(rows).map_err(|e| e.to_string())?;
                 rows = draw(full)?;
+                drawn = Instant::now();
             }
             Key::Tab => {
                 if let Some((_, change)) = tab.as_mut() {
                     term.clear_last_lines(rows).map_err(|e| e.to_string())?;
-                    drop(keys.take());
                     change()?;
-                    keys = Some(KeysOnly::new()?);
                     rows = draw(full)?;
+                    drawn = Instant::now();
                 }
             }
             _ => {}
         }
     };
-    drop(keys);
     let _ = term.clear_last_lines(1);
     let _ = term.show_cursor();
     answer
@@ -186,7 +194,6 @@ pub fn ask(
         }
         Ok(())
     };
-    let _keys = KeysOnly::new()?;
     let mut answer = String::new();
     term.write_str(&prompt).map_err(io)?;
     loop {
@@ -269,39 +276,6 @@ pub fn pick(question: &str, items: &[String], default: usize) -> Result<usize, S
     ))
     .map_err(|e| e.to_string())?;
     Ok(index)
-}
-
-/// Holds stdin in a mode where keys are not echoed, not line-buffered, and
-/// Ctrl-C arrives as a key, from creation until drop. Creation discards keys
-/// typed before it.
-struct KeysOnly(libc::termios);
-
-impl KeysOnly {
-    fn new() -> Result<Self, String> {
-        let mut termios = std::mem::MaybeUninit::uninit();
-        // SAFETY: stdin is a terminal here, and tcgetattr fills `termios` on success.
-        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        // SAFETY: tcgetattr succeeded, so `termios` is initialized.
-        let original = unsafe { termios.assume_init() };
-        let mut keys_only = original;
-        keys_only.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
-        // SAFETY: applies a copy of the current settings with three flags cleared.
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &keys_only);
-        }
-        Ok(Self(original))
-    }
-}
-
-impl Drop for KeysOnly {
-    fn drop(&mut self) {
-        // SAFETY: restores the settings read in `new`.
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0);
-        }
-    }
 }
 
 /// Prints a dimmed line, such as "Cancelled. Nothing was sent."
