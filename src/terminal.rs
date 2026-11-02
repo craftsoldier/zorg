@@ -82,17 +82,24 @@ pub fn row(label: &str, width: usize, value: impl std::fmt::Display) -> String {
     format!("  {}  {value}", style(format!("{label:<width$}")).dim())
 }
 
+/// A card's Tab key: its label on the card, and what it changes before the card
+/// is redrawn.
+pub type TabKey<'a> = (&'a str, &'a mut dyn FnMut() -> Result<(), String>);
+
 /// Shows the card `render(full)` returns and waits for one key. Enter or `y`
 /// confirms. Esc or `n` fails with [`CANCELLED`], and Ctrl-C with
 /// [`INTERRUPTED`]. When `address_len` is long, `x` redraws the card with
-/// `full` toggled. Keys typed before the card appears are discarded.
+/// `full` toggled. With `tab` given as `(label, change)`, Tab runs `change` and
+/// redraws the card. Keys typed before the card appears are discarded.
 pub fn confirm(
     action: &str,
     address_len: usize,
+    mut tab: Option<TabKey<'_>>,
     render: impl Fn(bool) -> Vec<String>,
 ) -> Result<(), String> {
     let term = Term::stdout();
     let expandable = address_len > SHORT_ADDRESS_LEN;
+    let tab_label = tab.as_ref().map(|(label, _)| label.to_string());
     let mut full = false;
     let draw = |full: bool| -> Result<usize, String> {
         let mut lines = render(full);
@@ -110,6 +117,9 @@ pub fn confirm(
             };
             keys.push_str(&format!("   {} {toggle}", style("[x]").bold()));
         }
+        if let Some(label) = &tab_label {
+            keys.push_str(&format!("   {} {label}", style("[Tab]").bold()));
+        }
         lines.push(keys);
         let width = usize::from(term.size().1).max(1);
         let mut rows = 0;
@@ -119,7 +129,7 @@ pub fn confirm(
         }
         Ok(rows)
     };
-    let _keys = KeysOnly::new()?;
+    let mut keys = Some(KeysOnly::new()?);
     let mut rows = draw(full)?;
     let answer = loop {
         match term.read_key_raw().map_err(|e| e.to_string())? {
@@ -131,12 +141,134 @@ pub fn confirm(
                 term.clear_last_lines(rows).map_err(|e| e.to_string())?;
                 rows = draw(full)?;
             }
+            Key::Tab => {
+                if let Some((_, change)) = tab.as_mut() {
+                    term.clear_last_lines(rows).map_err(|e| e.to_string())?;
+                    drop(keys.take());
+                    change()?;
+                    keys = Some(KeysOnly::new()?);
+                    rows = draw(full)?;
+                }
+            }
             _ => {}
         }
     };
+    drop(keys);
     let _ = term.clear_last_lines(1);
     let _ = term.show_cursor();
     answer
+}
+
+/// Asks `question` and reads a typed answer, echoing it. Enter accepts the
+/// answer once `check` approves it; an empty answer is accepted only when
+/// `optional`. A rejected answer shows the reason and asks again. Esc fails with
+/// [`CANCELLED`], and Ctrl-C with [`INTERRUPTED`].
+pub fn ask(
+    question: &str,
+    optional: bool,
+    check: impl Fn(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let term = Term::stdout();
+    let io = |e: std::io::Error| e.to_string();
+    let prompt = format!(
+        "{} {} ",
+        style("?").yellow().bold(),
+        style(format!("{question}:")).bold()
+    );
+    let prompt_width = console::measure_text_width(&prompt);
+    let width = usize::from(term.size().1).max(1);
+    let rows = |text: &str| (prompt_width + text.chars().count()).div_ceil(width).max(1);
+    let erase = |shown: usize| -> Result<(), String> {
+        term.clear_line().map_err(io)?;
+        for _ in 1..shown {
+            term.move_cursor_up(1).map_err(io)?;
+            term.clear_line().map_err(io)?;
+        }
+        Ok(())
+    };
+    let _keys = KeysOnly::new()?;
+    let mut answer = String::new();
+    term.write_str(&prompt).map_err(io)?;
+    loop {
+        let before = rows(&answer);
+        match term.read_key_raw().map_err(io)? {
+            Key::Char(c) if !c.is_control() => answer.push(c),
+            Key::Backspace => {
+                answer.pop();
+            }
+            Key::Enter => {
+                let text = answer.trim();
+                let verdict = match (text.is_empty(), optional) {
+                    (true, true) => Ok(()),
+                    (true, false) => Err("An answer is needed".to_string()),
+                    (false, _) => check(text),
+                };
+                erase(before)?;
+                match verdict {
+                    Ok(()) => {
+                        let shown = if text.is_empty() { "–" } else { text };
+                        term.write_line(&format!(
+                            "{} {} {}",
+                            style("✔").green(),
+                            style(question).bold(),
+                            style(format!("· {shown}")).dim()
+                        ))
+                        .map_err(io)?;
+                        return Ok(text.to_string());
+                    }
+                    Err(reason) => {
+                        term.write_line(&format!("{} {reason}", style("✗").red().bold()))
+                            .map_err(io)?;
+                        answer.clear();
+                        term.write_str(&prompt).map_err(io)?;
+                    }
+                }
+                continue;
+            }
+            Key::Escape => {
+                term.write_line("").map_err(io)?;
+                return Err(CANCELLED.to_string());
+            }
+            Key::CtrlC => {
+                term.write_line("").map_err(io)?;
+                return Err(INTERRUPTED.to_string());
+            }
+            _ => continue,
+        }
+        erase(before)?;
+        term.write_str(&format!("{prompt}{answer}")).map_err(io)?;
+    }
+}
+
+/// Shows `items` as a list to choose from with the arrow keys, starting at
+/// `default`, and returns the chosen index. Esc fails with [`CANCELLED`].
+pub fn pick(question: &str, items: &[String], default: usize) -> Result<usize, String> {
+    let term = Term::stdout();
+    let choice = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt(format!(
+            "{question}  {}",
+            style("↑↓ move · Enter pick · Esc cancel").dim()
+        ))
+        .items(items)
+        .default(default)
+        .report(false)
+        .interact_on_opt(&term)
+        .map_err(|e| e.to_string())?;
+    let Some(index) = choice else {
+        return Err(CANCELLED.to_string());
+    };
+    term.write_line(&format!(
+        "{} {} {}",
+        style("✔").green(),
+        style(question).bold(),
+        style(format!(
+            "· {}",
+            console::strip_ansi_codes(&items[index]).trim()
+        ))
+        .dim()
+    ))
+    .map_err(|e| e.to_string())?;
+    Ok(index)
 }
 
 /// Holds stdin in a mode where keys are not echoed, not line-buffered, and
