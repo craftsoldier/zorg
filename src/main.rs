@@ -599,7 +599,7 @@ fn cmd_send(
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
     let proposal = sync::propose_send(db, net, uuid, &send_flow_id, to, amount_zat, memo)?;
-    println!("Fee: {}", fmt_zec(proposal.fee_zatoshi, net));
+    let summary = send_summary(to, amount_zat, proposal.fee_zatoshi, memo, net);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(sync::execute_proposal_with_seed_loader(
@@ -607,7 +607,14 @@ fn cmd_send(
         lwd_url,
         proposal.proposal_id,
         &send_flow_id,
-        |network, account| load_seed(network, &account.expose_uuid().to_string(), missing_phrase),
+        |network, account| {
+            // A failed seed load releases the proposal's inputs, so cancelling here does too.
+            print!("{summary}");
+            if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
+                return Err("Cancelled".into());
+            }
+            load_seed(network, &account.expose_uuid().to_string(), missing_phrase)
+        },
         None,
         None,
     ))?;
@@ -615,6 +622,25 @@ fn cmd_send(
         println!("Broadcasted: {txid}");
     }
     Ok(())
+}
+
+/// The amount, recipient, fee and memo of a send, shown before it is authorized.
+fn send_summary(
+    to: &str,
+    amount_zat: u64,
+    fee_zat: u64,
+    memo: Option<&str>,
+    net: WalletNetwork,
+) -> String {
+    let mut text = format!(
+        "Send {} to\n  {to}\nFee: {}\n",
+        fmt_zec(amount_zat, net),
+        fmt_zec(fee_zat, net)
+    );
+    if let Some(memo) = memo {
+        text.push_str(&format!("Memo: {memo:?}\n"));
+    }
+    text
 }
 
 fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> Result<(), String> {
@@ -987,6 +1013,22 @@ mod tests {
             .collect();
         assert_eq!(numbered, expected);
         assert!(text.contains("Wallet birthday: 4562700"));
+    }
+
+    #[test]
+    fn send_summary_shows_amount_recipient_fee_and_memo() {
+        let summary = send_summary(
+            "u1dest",
+            150_000_000,
+            10_000,
+            Some("rent"),
+            WalletNetwork::Main,
+        );
+        assert_eq!(
+            summary,
+            "Send 1.50000000 ZEC to\n  u1dest\nFee: 0.00010000 ZEC\nMemo: \"rent\"\n"
+        );
+        assert!(!send_summary("u1dest", 1, 10_000, None, WalletNetwork::Test).contains("Memo"));
     }
 
     #[test]
