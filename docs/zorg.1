@@ -14,9 +14,9 @@ and broadcasts shielded transfers natively from the terminal. The
 mnemonic is stored in the macOS Keychain; wallet state lives in a
 SQLite database. On macOS, zorg_index.db and new databases live in
 .IR ~/Library/Application\ Support/zorg/ .
-The index lists absolute paths to known databases. Each database holds one
-seed and may contain multiple named accounts. Account names live in the
-databases, and each account's phrase is stored in Keychain.
+The index lists absolute paths to known databases. Each account has its own
+database. Account names live in the databases, and each account's phrase is
+stored in Keychain.
 The database itself is not encrypted.
 Running zorg without a command lists accounts across all known databases.
 Names are case-sensitive and unique across known databases.
@@ -87,8 +87,7 @@ is a valid Zcash address.
 .TP
 .BI zorg\ delete " \-\-account\ name"
 Delete an account and its Keychain entry after a warning, Enter, and Touch ID
-or the login password. Deleting a database's last account also deletes the
-database.
+or the login password. Deleting an account deletes its database.
 .SH AUTHORS
 Julian Abraham (github.com/craftsoldier)
 .SH LICENSE
