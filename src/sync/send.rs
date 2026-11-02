@@ -360,8 +360,7 @@ pub async fn execute_proposal_with_seed_loader<F>(
     proposal_id: u64,
     send_flow_id: &str,
     load_seed: F,
-    spend_params: Option<&str>,
-    output_params: Option<&str>,
+    on_broadcast: &dyn Fn(),
 ) -> Result<ExecuteProposalResult, String>
 where
     F: FnOnce(WalletNetwork, AccountUuid) -> Result<SecretVec<u8>, String>,
@@ -375,8 +374,9 @@ where
         lightwalletd_url,
         stored,
         seed,
-        spend_params,
-        output_params,
+        on_broadcast,
+        None,
+        None,
     )
     .await
 }
@@ -386,6 +386,7 @@ async fn execute_stored(
     lightwalletd_url: &str,
     stored: StoredProposal,
     seed: SecretVec<u8>,
+    on_broadcast: &dyn Fn(),
     spend_params: Option<&str>,
     output_params: Option<&str>,
 ) -> Result<ExecuteProposalResult, String> {
@@ -508,6 +509,7 @@ async fn execute_stored(
     };
 
     // Broadcast
+    on_broadcast();
     let txids: Vec<TxId> = txids.iter().cloned().collect();
     let read_conn = open_readonly_conn(db_path)?;
     let mut broadcast_ok = Vec::new();

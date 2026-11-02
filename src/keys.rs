@@ -6,9 +6,8 @@ use zeroize::Zeroizing;
 
 use crate::network::WalletNetwork;
 
-pub fn generate_mnemonic() -> String {
-    let mnemonic = Mnemonic::<English>::generate(Count::Words24);
-    mnemonic.phrase().to_string()
+pub fn generate_mnemonic() -> Zeroizing<String> {
+    Zeroizing::new(Mnemonic::<English>::generate(Count::Words24).into_phrase())
 }
 
 /// Convert a 12- or 24-word mnemonic phrase to a 64-byte seed.
@@ -26,8 +25,8 @@ pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
         return Err(format!("Word {} is not in the BIP 39 word list", i + 1));
     }
 
-    let mnemonic =
-        Mnemonic::<English>::from_phrase(phrase).map_err(|e| format!("Invalid mnemonic: {e}"))?;
+    let mnemonic = Mnemonic::<English>::from_phrase(phrase)
+        .map_err(|_| "Recovery phrase checksum is invalid")?;
     let seed = Zeroizing::new(mnemonic.to_seed(""));
     drop(mnemonic);
     let secret_seed = SecretVec::new(seed.to_vec());
@@ -125,6 +124,13 @@ mod tests {
         words[6] = "zorgword".into();
         let error = mnemonic_to_seed(&words.join(" ")).err().unwrap();
         assert_eq!(error, "Word 7 is not in the BIP 39 word list");
+    }
+
+    #[test]
+    fn test_mnemonic_to_seed_rejects_a_bad_checksum_without_echoing_words() {
+        let phrase = vec!["abandon"; 24].join(" ");
+        let error = mnemonic_to_seed(&phrase).err().unwrap();
+        assert_eq!(error, "Recovery phrase checksum is invalid");
     }
 
     #[test]

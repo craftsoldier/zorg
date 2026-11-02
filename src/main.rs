@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
+mod terminal;
+
 use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
@@ -41,7 +43,16 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = run(&args[1..]);
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        if e == terminal::INTERRUPTED {
+            std::process::exit(130);
+        }
+        if e == terminal::CANCELLED {
+            terminal::note("Cancelled.");
+            return;
+        }
+        if e != terminal::REPORTED {
+            eprintln!("Error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -94,14 +105,18 @@ fn command_spec(
         "send" => (
             "<to> <amount> [--memo <text>] [--account <name>]",
             &["--account", "--memo"],
-            2..=2,
+            if terminal::interactive() {
+                0..=2
+            } else {
+                2..=2
+            },
         ),
         "history" => (
             "[--limit <n>] [--account <name>]",
             &["--account", "--limit"],
             0..=0,
         ),
-        "validate" => ("<address>", &[], 1..=1),
+        "validate" => ("<address>", &[], 0..=1),
         _ => return None,
     })
 }
@@ -169,7 +184,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let lwd = option("--lwd");
     let cmd = args.command.as_str();
     if cmd == "validate" {
-        println!("Valid: {}", sync::validate_address(&args.positional[0])?);
+        let address = match args.positional.first() {
+            Some(address) => address.clone(),
+            None if terminal::interactive() => terminal::ask("Address", false, |_| Ok(()))?,
+            None => return Err("Usage: zorg validate <address>".into()),
+        };
+        println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
@@ -180,12 +200,72 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     if matches!(cmd, "create" | "import") {
         zorg::account::require_available(&unavailable)?;
+        let interactive = terminal::interactive();
         let name = match args.positional.first() {
             Some(name) => name.clone(),
+            None if interactive => terminal::ask("Account name", false, |name| {
+                zorg::account::ensure_unique_name(&accounts, name)
+            })?,
             None => prompt_line("Account name: ")?,
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
-        let net = network.unwrap_or(WalletNetwork::Main);
+        let mut birthday: Option<u64> = option("--birthday").and_then(|h| h.parse().ok());
+        if cmd == "import" && birthday.is_none() && interactive {
+            terminal::note("Scanning from the start takes hours on mainnet.");
+            let height = terminal::ask(
+                "Birthday height (Enter to scan from the start)",
+                true,
+                |h| match h.parse::<u32>() {
+                    Ok(height) if height > 0 => Ok(()),
+                    _ => Err("Enter a block height from 1 to 4294967295".to_string()),
+                },
+            )?;
+            birthday = height.parse().ok();
+        }
+        let net = std::cell::Cell::new(network.unwrap_or(WalletNetwork::Main));
+        if interactive {
+            let (title, action, done) = if cmd == "create" {
+                ("Create", "create", "created")
+            } else {
+                ("Import", "import", "imported")
+            };
+            let network_name = |net: WalletNetwork| match net {
+                WalletNetwork::Main => "mainnet",
+                WalletNetwork::Test => "testnet",
+                WalletNetwork::Regtest => "regtest",
+            };
+            let card = |_full: bool| {
+                let mut lines = vec![
+                    format!("{title} account {}", console::style(&name).bold()),
+                    terminal::row("network", 8, network_name(net.get())),
+                ];
+                if cmd == "import" {
+                    let from = birthday.map_or("the start".to_string(), |h| h.to_string());
+                    lines.push(terminal::row("birthday", 8, from));
+                }
+                lines
+            };
+            let mut switch = || {
+                let networks = [
+                    WalletNetwork::Main,
+                    WalletNetwork::Test,
+                    WalletNetwork::Regtest,
+                ];
+                let names = ["mainnet", "testnet", "regtest"].map(String::from);
+                let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
+                net.set(networks[terminal::pick("Network", &names, current)?]);
+                Ok(())
+            };
+            match terminal::confirm(action, 0, Some(("switch network", &mut switch)), card) {
+                Ok(()) => {}
+                Err(e) if e == terminal::CANCELLED => {
+                    terminal::note(&format!("Cancelled. Nothing was {done}."));
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let net = net.get();
         zorg::account::ensure_private_wallet_dir(&root)?;
         let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
@@ -193,7 +273,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let result = if cmd == "create" {
             endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
-            let birthday = option("--birthday").and_then(|h| h.parse().ok());
             cmd_import(db, net, birthday, &name, &databases)
         };
         let created = match result {
@@ -211,7 +290,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             return Err(e);
         }
         if let Some(birthday) = created.birthday {
-            print!("{}", recovery_phrase_text(&created.mnemonic, birthday));
+            print!("{}", *recovery_phrase_text(&created.mnemonic, birthday));
         }
         println!("Account: {name}");
         println!("Address: {}", created.unified_address);
@@ -236,7 +315,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         return Ok(());
     }
     let name = option("--account");
-    if name.is_none() && !unavailable.is_empty() && !matches!(cmd, "sync" | "status") {
+    let pick_account = terminal::interactive()
+        && name.is_none()
+        && visible.len() > 1
+        && !matches!(cmd, "sync" | "status");
+    if name.is_none()
+        && !pick_account
+        && !unavailable.is_empty()
+        && !matches!(cmd, "sync" | "status")
+    {
         return Err(
             "Some databases are unavailable; choose an account with --account <name>".into(),
         );
@@ -246,6 +333,17 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             return Err("No accounts found. Run `zorg create` or `zorg import`.".into());
         }
         None
+    } else if pick_account {
+        let items: Vec<String> = visible
+            .iter()
+            .map(|a| {
+                let balance = sync::get_wallet_balance(&a.db_path, a.network, &a.uuid)
+                    .map(|b| terminal::zec(b.total, 2))
+                    .unwrap_or_else(|_| "?".into());
+                format!("{:<20} {balance} {}", a.name, zec_unit(a.network))
+            })
+            .collect();
+        Some(&visible[terminal::pick("Which account?", &items, 0)?])
     } else {
         Some(zorg::account::select(&visible, name.as_deref())?)
     };
@@ -296,15 +394,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let memo = option("--memo");
             let missing = missing_phrase_error(selected);
             endpoint(lwd.as_deref(), &net, cmd).and_then(|url| {
-                cmd_send(
-                    db,
-                    net,
-                    &url,
-                    &args.positional,
-                    memo.as_deref(),
-                    uuid,
-                    &missing,
-                )
+                cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
             })
         }
         "history" => {
@@ -313,7 +403,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
-            if name.is_none() {
+            if name.is_none() && !terminal::interactive() {
                 return Err("Usage: zorg delete --account <name>".into());
             }
             cmd_delete(&root, selected)
@@ -423,7 +513,7 @@ fn cmd_create(
     name: &str,
 ) -> Result<NewAccount, String> {
     let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
-    let mnemonic = zeroize::Zeroizing::new(keys::generate_mnemonic());
+    let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
@@ -466,18 +556,24 @@ fn store_and_verify_mnemonic(
 
 /// The recovery phrase as numbered words, followed by the wallet birthday and
 /// how to keep them.
-fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> String {
-    let mut text = String::from("Recovery phrase (write it down and keep it offline):\n");
+fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> zeroize::Zeroizing<String> {
+    use std::fmt::Write;
+
     let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(256 + 16 * words.len()));
+    text.push_str("Recovery phrase (write it down and keep it offline):\n");
     for (row, chunk) in words.chunks(4).enumerate() {
-        let line: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .map(|(col, word)| format!("{:>2}. {word:<8}", row * 4 + col + 1))
-            .collect();
-        text.push_str(&format!("  {}\n", line.join("  ").trim_end()));
+        for (col, word) in chunk.iter().enumerate() {
+            let number = row * 4 + col + 1;
+            if col + 1 == chunk.len() {
+                let _ = write!(text, "  {number:>2}. {word}");
+            } else {
+                let _ = write!(text, "  {number:>2}. {word:<8}");
+            }
+        }
+        text.push('\n');
     }
-    text.push_str(&format!("Wallet birthday: {birthday}\n"));
+    let _ = writeln!(text, "Wallet birthday: {birthday}");
     text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
     text
 }
@@ -508,8 +604,7 @@ fn cmd_import(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     zorg::account::ensure_new_seed(databases, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
-        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
+    store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -520,18 +615,55 @@ fn cmd_import(
 }
 
 fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> Result<(), String> {
-    println!(
-        "This deletes account {:?} ({}).",
-        account.name, account.unified_address
-    );
-    println!("Keep the written-down recovery phrase: zorg can't show it again.");
-    if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
-        return Err("Cancelled".into());
+    let interactive = terminal::interactive();
+    if interactive {
+        let unit = zec_unit(account.network);
+        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+            .map_or("unknown".to_string(), |b| {
+                format!("{} {unit}", terminal::zec(b.total, 2))
+            });
+        let card = |full: bool| {
+            vec![
+                format!("Delete account {}", console::style(&account.name).bold()),
+                terminal::row(
+                    "address",
+                    7,
+                    terminal::address(&account.unified_address, full),
+                ),
+                terminal::row("balance", 7, &balance),
+                String::new(),
+                format!(
+                    "{} zorg can't show the recovery phrase again. Keep your written copy.",
+                    console::style("!").yellow().bold()
+                ),
+            ]
+        };
+        match terminal::confirm("delete", account.unified_address.len(), None, card) {
+            Ok(()) => {}
+            Err(e) if e == terminal::CANCELLED => {
+                terminal::note("Cancelled. Nothing was deleted.");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        println!(
+            "This deletes account {:?} ({}).",
+            account.name, account.unified_address
+        );
+        println!("Keep the written-down recovery phrase: zorg can't show it again.");
+        if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
+            return Err("Cancelled".into());
+        }
     }
     zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
     zorg::account::delete_account(root, account)?;
     zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
-    println!("Account {:?} deleted.", account.name);
+    if interactive {
+        terminal::success(&format!("Deleted account {}", account.name));
+    } else {
+        println!("Account {:?} deleted.", account.name);
+    }
     Ok(())
 }
 
@@ -557,7 +689,7 @@ fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Res
         .ok_or_else(|| missing_phrase_error(account))?;
     print!(
         "{}",
-        recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
+        *recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
     );
     Ok(())
 }
@@ -584,22 +716,89 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
 }
 
 fn cmd_send(
-    db: &str,
-    net: WalletNetwork,
+    account: &zorg::account::AccountInfo,
     lwd_url: &str,
     positional: &[String],
     memo: Option<&str>,
-    uuid: &str,
     missing_phrase: &str,
 ) -> Result<(), String> {
-    let [to, amount] = positional else {
-        return Err("Usage: zorg send <to> <amount> [--memo <text>]".into());
+    let (db, net, uuid) = (
+        account.db_path.as_str(),
+        account.network,
+        account.uuid.as_str(),
+    );
+    let interactive = terminal::interactive();
+    let unit = zec_unit(net);
+    let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
+    let guided = positional.len() < 2;
+    let to = match positional.first() {
+        Some(to) => to.clone(),
+        None => terminal::ask("To", false, |to| {
+            zcash_keys::address::Address::decode(&net, to)
+                .map(|_| ())
+                .ok_or_else(|| format!("Not a valid {} address", net.as_str()))
+        })?,
     };
-    let amount_zat = parse_zatoshi_amount(amount)?;
+    let to = to.as_str();
+    let amount_zat = match positional.get(1) {
+        Some(amount) => parse_zatoshi_amount(amount)?,
+        None => {
+            let amount = terminal::ask(&format!("Amount ({unit})"), false, |amount| {
+                let zat = parse_zatoshi_amount(amount)?;
+                if zat > balance {
+                    return Err(format!(
+                        "You have {} {unit} available",
+                        terminal::zec(balance, 2)
+                    ));
+                }
+                Ok(())
+            })?;
+            parse_zatoshi_amount(&amount)?
+        }
+    };
+    let kind = sync::validate_address(to).unwrap_or_default();
+    let asked_memo;
+    let memo = match memo {
+        None if guided && matches!(kind.as_str(), "unified" | "sapling") => {
+            asked_memo = terminal::ask("Memo (optional)", true, |_| Ok(()))?;
+            (!asked_memo.is_empty()).then_some(asked_memo.as_str())
+        }
+        memo => memo,
+    };
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
     let proposal = sync::propose_send(db, net, uuid, &send_flow_id, to, amount_zat, memo)?;
-    let summary = send_summary(to, amount_zat, proposal.fee_zatoshi, memo, net);
+    let fee = proposal.fee_zatoshi;
+    let summary = send_summary(to, amount_zat, fee, memo, net);
+    let card = |full: bool| {
+        let total = amount_zat + fee;
+        let mut lines = vec![
+            format!(
+                "Send {} {unit}   {}",
+                console::style(terminal::zec(amount_zat, 0)).bold(),
+                terminal::privacy_tag(&kind)
+            ),
+            terminal::row(
+                "from",
+                5,
+                format!(
+                    "{}  {} → {} {unit}",
+                    account.name,
+                    terminal::zec(balance, 2),
+                    console::style(terminal::zec(balance.saturating_sub(total), 2)).bold()
+                ),
+            ),
+            terminal::row("to", 5, terminal::address(to, full)),
+            terminal::row("fee", 5, format!("{} {unit}", terminal::zec(fee, 0))),
+            terminal::row("total", 5, format!("{} {unit}", terminal::zec(total, 0))),
+        ];
+        if let Some(memo) = memo {
+            lines.push(terminal::row("memo", 5, format!("{memo:?}")));
+        }
+        lines
+    };
+    let progress = terminal::Progress::hidden();
+    let broadcasting = std::cell::Cell::new(false);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(sync::execute_proposal_with_seed_loader(
@@ -609,19 +808,73 @@ fn cmd_send(
         &send_flow_id,
         |network, account| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
-            print!("{summary}");
-            if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
-                return Err("Cancelled".into());
+            if interactive {
+                terminal::confirm("send", to.len(), None, card)?;
+                progress.show("Waiting for Touch ID…");
+            } else {
+                print!("{summary}");
+                if !prompt_line("Press Enter to send, or Ctrl-C to cancel: ")?.is_empty() {
+                    return Err("Cancelled".into());
+                }
             }
-            load_seed(network, &account.expose_uuid().to_string(), missing_phrase)
+            let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
+            if interactive {
+                progress.show("Building the transaction…");
+            }
+            Ok(seed)
         },
-        None,
-        None,
-    ))?;
-    for txid in &result.txids {
-        println!("Broadcasted: {txid}");
+        &|| {
+            broadcasting.set(true);
+            if interactive {
+                progress.show("Broadcasting…");
+            }
+        },
+    ));
+    progress.clear();
+    match result {
+        Ok(result) if interactive => {
+            terminal::success(&format!(
+                "Sent {} {unit} to {}",
+                terminal::zec(amount_zat, 0),
+                terminal::short_address(to)
+            ));
+            for txid in &result.txids {
+                println!("  {txid}");
+            }
+            terminal::note("  Pending · confirms in about a minute · zorg history");
+            Ok(())
+        }
+        Ok(result) => {
+            for txid in &result.txids {
+                println!("Broadcasted: {txid}");
+            }
+            Ok(())
+        }
+        Err(e) if interactive && e == terminal::CANCELLED => {
+            terminal::note("Cancelled. Nothing was sent.");
+            Ok(())
+        }
+        Err(e) if interactive && e != terminal::INTERRUPTED => {
+            if broadcasting.get() {
+                terminal::failure(&format!(
+                    "Broadcast failed: {e}. The transaction is saved and zorg retries it on \
+                     the next sync — check zorg history before sending again."
+                ));
+            } else {
+                terminal::failure(&format!("Not sent: {e}"));
+            }
+            Err(terminal::REPORTED.into())
+        }
+        Err(e) => Err(e),
     }
-    Ok(())
+}
+
+/// "ZEC" on mainnet, "TAZ" on test networks.
+fn zec_unit(net: WalletNetwork) -> &'static str {
+    match net {
+        WalletNetwork::Main => "ZEC",
+        WalletNetwork::Test | WalletNetwork::Regtest => "TAZ",
+    }
 }
 
 /// The amount, recipient, fee and memo of a send, shown before it is authorized.
@@ -937,7 +1190,6 @@ mod tests {
         assert!(parse(&["balance", "--acount", "A"]).is_err());
         assert!(parse(&["balance", "--memo", "hi"]).is_err());
         assert!(parse(&["sync", "Savings"]).is_err());
-        assert!(parse(&["send", "to"]).is_err());
         assert!(parse(&["frobnicate"]).is_err());
         assert!(parse(&["create", "My", "Savings"])
             .err()
