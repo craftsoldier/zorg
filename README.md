@@ -44,8 +44,6 @@ Create and import ask for a name if omitted.
 | `--lwd <url>` | lightwalletd endpoint override |
 | `--help`, `-V` | Show usage / version |
 
-Environment equivalents are `ZORG_NETWORK` and `ZORG_LIGHTWALLETD_URL`.
-
 ## Requirements
 - Rust & Cargo
 - macOS (Required for Keychain integration)

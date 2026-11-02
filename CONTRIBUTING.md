@@ -10,7 +10,7 @@ need to know to get a patch merged.
   in the macOS Keychain, and CI builds on macOS.
 - A lightwalletd endpoint is only needed for commands that touch the network
   (`create`, `sync`, `send`). Sensible defaults are built in; override with
-  `--lwd` or `ZORG_LIGHTWALLETD_URL`.
+  `--lwd`.
 
 ## Building and testing
 
@@ -21,8 +21,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs exactly these four checks (plus a Linux compile check and a
-dependency advisory audit) and they must all pass. Running them locally
+CI runs exactly these four checks (plus a dependency advisory audit) and they must all pass. Running them locally
 before pushing saves everyone a round trip.
 
 ## Ground rules

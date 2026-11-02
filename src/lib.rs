@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "macos"))]
+compile_error!("zorg runs only on macOS: it keeps recovery phrases in the macOS Keychain.");
+
 pub mod account;
 pub(crate) mod db;
 pub mod keys;

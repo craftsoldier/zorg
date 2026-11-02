@@ -33,8 +33,6 @@ OPTIONS:
     --help, -h           Show this help
 
 ENV:
-    ZORG_NETWORK         Network
-    ZORG_LIGHTWALLETD_URL Lightwalletd endpoint
     RUST_LOG             Log level: error | warn | info | debug | trace
 ";
 
@@ -167,8 +165,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 
 fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
-    let network = option("--network").or_else(|| std::env::var("ZORG_NETWORK").ok());
-    let lwd = option("--lwd").or_else(|| std::env::var("ZORG_LIGHTWALLETD_URL").ok());
+    let network = option("--network");
+    let lwd = option("--lwd");
     let cmd = args.command.as_str();
     if cmd == "validate" {
         println!("Valid: {}", sync::validate_address(&args.positional[0])?);
@@ -209,7 +207,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             zorg::account::index_new_database(&root, &db_path, &name, &created.seed, net)
         }) {
             zorg::account::remove_wallet_files(db);
-            #[cfg(target_os = "macos")]
             let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
             return Err(e);
         }
@@ -414,11 +411,7 @@ fn prompt_line(prompt: &str) -> Result<String, String> {
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
         .open(path)
         .map(|_| ())
@@ -445,7 +438,6 @@ fn cmd_create(
     let mnemonic = zeroize::Zeroizing::new(keys::generate_mnemonic());
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
-    #[cfg(target_os = "macos")]
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
@@ -459,7 +451,6 @@ fn cmd_create(
 /// Stores the mnemonic in the protected Keychain, then reads it back (which
 /// asks for Touch ID or the login password) and checks it yields `seed`. On a
 /// failed read-back the stored entry is removed.
-#[cfg(target_os = "macos")]
 fn store_and_verify_mnemonic(
     net: WalletNetwork,
     account_uuid: &str,
@@ -499,9 +490,7 @@ fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> String {
         text.push_str(&format!("  {}\n", line.join("  ").trim_end()));
     }
     text.push_str(&format!("Wallet birthday: {birthday}\n"));
-    if cfg!(target_os = "macos") {
-        text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
-    }
+    text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
     text
 }
 
@@ -531,7 +520,6 @@ fn cmd_import(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     zorg::account::ensure_new_seed(databases, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    #[cfg(target_os = "macos")]
     zorg::secret_store::store_mnemonic_in_macos_keychain(net, &created.uuid, &mnemonic)
         .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
     Ok(NewAccount {
@@ -561,7 +549,6 @@ fn cmd_delete(
     if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
         return Err("Cancelled".into());
     }
-    #[cfg(target_os = "macos")]
     zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
     zorg::account::delete_account_and_empty_database(
         root,
@@ -569,7 +556,6 @@ fn cmd_delete(
         account.network,
         &account.uuid,
     )?;
-    #[cfg(target_os = "macos")]
     zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
     println!("Account {:?} deleted.", account.name);
     Ok(())
@@ -592,7 +578,6 @@ fn missing_phrase_error(account: &zorg::account::AccountInfo) -> String {
     )
 }
 
-#[cfg(target_os = "macos")]
 fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Result<(), String> {
     let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, &account.uuid)?
         .ok_or_else(|| missing_phrase_error(account))?;
@@ -601,11 +586,6 @@ fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Res
         recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
     );
     Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn cmd_recovery(_net: WalletNetwork, _account: &zorg::account::AccountInfo) -> Result<(), String> {
-    Err("zorg recovery needs the macOS Keychain; on this platform zorg never stores the recovery phrase".into())
 }
 
 fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
@@ -833,26 +813,16 @@ fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
     first_alive.to_string()
 }
 
-/// The account's seed, from Keychain on macOS; fails with `missing_phrase`
-/// when Keychain has no entry for the account.
+/// The account's seed from Keychain; fails with `missing_phrase` when
+/// Keychain has no entry for the account.
 fn load_seed(
     net: WalletNetwork,
     account_uuid: &str,
     missing_phrase: &str,
 ) -> Result<secrecy::SecretVec<u8>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mnemonic =
-            zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, account_uuid)?
-                .ok_or_else(|| missing_phrase.to_string())?;
-        keys::mnemonic_to_seed(&mnemonic)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (net, account_uuid, missing_phrase);
-        let mnemonic = read_mnemonic()?;
-        keys::mnemonic_to_seed(&mnemonic)
-    }
+    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, account_uuid)?
+        .ok_or_else(|| missing_phrase.to_string())?;
+    keys::mnemonic_to_seed(&mnemonic)
 }
 
 /// Read a 12- or 24-word mnemonic from the terminal without echoing it.

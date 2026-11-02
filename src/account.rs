@@ -530,15 +530,10 @@ fn current_receive_address(
     Ok(address.encode(&network))
 }
 
-/// zorg's data directory: `~/Library/Application Support/zorg` on macOS.
+/// zorg's data directory: `~/Library/Application Support/zorg`.
 pub fn wallet_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    let home = PathBuf::from(home);
-    Ok(if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/zorg")
-    } else {
-        home.join(".zorg")
-    })
+    Ok(PathBuf::from(home).join("Library/Application Support/zorg"))
 }
 
 /// Opens `zorg_index.db` and holds its write lock until `COMMIT`.
@@ -762,7 +757,6 @@ pub fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), St
 }
 
 /// Creates `path` if needed and sets its permissions to 0700.
-#[cfg(unix)]
 pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -777,7 +771,6 @@ pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
 }
 
 /// Creates `path` if needed and fails when other users can access it.
-#[cfg(unix)]
 pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -801,18 +794,7 @@ pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
-pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
-}
-
-#[cfg(not(unix))]
-pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| format!("Failed to create wallet directory: {e}"))
-}
-
 /// Sets an existing wallet file's permissions to 0600.
-#[cfg(unix)]
 pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -820,11 +802,6 @@ pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("Failed to secure wallet database: {e}"))?;
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn secure_wallet_db_file(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
