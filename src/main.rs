@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use zorg::keys;
@@ -47,48 +49,129 @@ fn main() {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+    let args = parse_args(args)?;
+    if args.version {
         println!("zorg {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if args.help {
         print!("{USAGE}");
         return Ok(());
     }
     run_in(zorg::account::wallet_dir()?, args)
 }
 
-fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
-    let mut network = std::env::var("ZORG_NETWORK").ok();
-    let mut lwd = std::env::var("ZORG_LIGHTWALLETD_URL").ok();
-    let mut command_args = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--network" | "--lwd" => {
-                let flag = &args[i];
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| format!("{flag} requires a value"))?;
-                if flag == "--network" {
-                    network = Some(value.clone());
-                } else {
-                    lwd = Some(value.clone());
-                }
-            }
-            _ => command_args.push(args[i].clone()),
+/// Options that take a value. `--network` and `--lwd` apply to every command.
+const VALUE_OPTIONS: [&str; 6] = [
+    "--network",
+    "--lwd",
+    "--account",
+    "--memo",
+    "--limit",
+    "--birthday",
+];
+
+/// A command line parsed by [`parse_args`].
+struct Args {
+    command: String,
+    positional: Vec<String>,
+    options: HashMap<&'static str, String>,
+    help: bool,
+    version: bool,
+}
+
+/// The usage of `cmd`'s arguments, the command-specific options it accepts,
+/// and how many positional arguments it takes.
+fn command_spec(
+    cmd: &str,
+) -> Option<(&'static str, &'static [&'static str], RangeInclusive<usize>)> {
+    Some(match cmd {
+        "accounts" => ("", &[], 0..=0),
+        "create" => ("[name]", &[], 0..=1),
+        "import" => ("[name] [--birthday <height>]", &["--birthday"], 0..=1),
+        "balance" | "address" | "sync" | "status" | "recovery" => {
+            ("[--account <name>]", &["--account"], 0..=0)
         }
-        i += 1;
+        "delete" => ("--account <name>", &["--account"], 0..=0),
+        "send" => (
+            "<to> <amount> [--memo <text>] [--account <name>]",
+            &["--account", "--memo"],
+            2..=2,
+        ),
+        "history" => (
+            "[--limit <n>] [--account <name>]",
+            &["--account", "--limit"],
+            0..=0,
+        ),
+        "validate" => ("<address>", &[], 1..=1),
+        _ => return None,
+    })
+}
+
+/// Parses the command line in one pass. Each value option takes the next
+/// argument as its value. Fails on unknown or repeated options, options the
+/// command does not accept, and a wrong number of positional arguments.
+fn parse_args(args: &[String]) -> Result<Args, String> {
+    let mut words = Vec::new();
+    let mut options = HashMap::new();
+    let (mut help, mut version) = (false, false);
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(arg) = iter.next() {
+        if let Some(&option) = VALUE_OPTIONS.iter().find(|&&o| o == arg) {
+            let value = iter
+                .next()
+                .ok_or_else(|| format!("{option} requires a value"))?;
+            if options.insert(option, value.to_string()).is_some() {
+                return Err(format!("{option} was given more than once"));
+            }
+        } else if arg == "--help" || arg == "-h" {
+            help = true;
+        } else if arg == "--version" || arg == "-V" {
+            version = true;
+        } else if arg.starts_with('-') && arg != "-" {
+            return Err(format!("Unknown option: {arg}"));
+        } else {
+            words.push(arg.to_string());
+        }
     }
-    let cmd = command_args
-        .first()
-        .map(String::as_str)
-        .unwrap_or("accounts");
-    let opts = command_args.get(1..).unwrap_or_default();
+    let mut words = words.into_iter();
+    let command = words.next().unwrap_or_else(|| "accounts".into());
+    let positional: Vec<String> = words.collect();
+    if !(help || version) {
+        let (usage, accepted, count) =
+            command_spec(&command).ok_or_else(|| format!("Unknown command: {command}"))?;
+        if let Some(option) = options
+            .keys()
+            .find(|o| !matches!(**o, "--network" | "--lwd") && !accepted.contains(o))
+        {
+            return Err(format!("{option} is not an option of zorg {command}"));
+        }
+        if !count.contains(&positional.len()) {
+            let hint = if positional.len() > *count.end() {
+                " (quote values that contain spaces)"
+            } else {
+                ""
+            };
+            let usage = format!("Usage: zorg {command} {usage}");
+            return Err(format!("{}{hint}", usage.trim_end()));
+        }
+    }
+    Ok(Args {
+        command,
+        positional,
+        options,
+        help,
+        version,
+    })
+}
+
+fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
+    let option = |name: &str| args.options.get(name).cloned();
+    let network = option("--network").or_else(|| std::env::var("ZORG_NETWORK").ok());
+    let lwd = option("--lwd").or_else(|| std::env::var("ZORG_LIGHTWALLETD_URL").ok());
+    let cmd = args.command.as_str();
     if cmd == "validate" {
-        let addr = opts.first().ok_or("Usage: zorg validate <address>")?;
-        println!("Valid: {}", sync::validate_address(addr)?);
+        println!("Valid: {}", sync::validate_address(&args.positional[0])?);
         return Ok(());
     }
     let network = network.as_deref().map(keys::parse_network).transpose()?;
@@ -99,14 +182,9 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     }
     if matches!(cmd, "create" | "import") {
         zorg::account::require_available(&unavailable)?;
-        let name = match positional_args(opts)?.as_slice() {
-            [] => prompt_line("Account name: ")?,
-            [name] => name.clone(),
-            _ => {
-                return Err(format!(
-                    "Usage: zorg {cmd} [name]; quote a name with spaces"
-                ))
-            }
+        let name = match args.positional.first() {
+            Some(name) => name.clone(),
+            None => prompt_line("Account name: ")?,
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
         let net = network.unwrap_or(WalletNetwork::Main);
@@ -117,7 +195,8 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         let result = if cmd == "create" {
             endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
-            cmd_import(db, net, opts, &name, &databases)
+            let birthday = option("--birthday").and_then(|h| h.parse().ok());
+            cmd_import(db, net, birthday, &name, &databases)
         };
         let created = match result {
             Ok(created) => created,
@@ -159,13 +238,7 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         }
         return Ok(());
     }
-    if !matches!(
-        cmd,
-        "balance" | "address" | "sync" | "status" | "send" | "history" | "recovery" | "delete"
-    ) {
-        return Err(format!("Unknown command: {cmd}"));
-    }
-    let name = account_name_opt(opts)?;
+    let name = option("--account");
     if name.is_none() && !unavailable.is_empty() && !matches!(cmd, "sync" | "status") {
         return Err(
             "Some databases are unavailable; choose an account with --account <name>".into(),
@@ -234,9 +307,14 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
         }
         "balance" => cmd_balance(db, net, uuid),
         "send" => {
-            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_send(db, net, &url, opts, uuid))
+            let memo = option("--memo");
+            endpoint(lwd.as_deref(), &net, cmd)
+                .and_then(|url| cmd_send(db, net, &url, &args.positional, memo.as_deref(), uuid))
         }
-        "history" => cmd_history(db, net, opts, uuid),
+        "history" => {
+            let limit = option("--limit").and_then(|n| n.parse::<u64>().ok());
+            cmd_history(db, net, limit.map(|n| n as u32), uuid)
+        }
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
             if name.is_none() {
@@ -435,11 +513,10 @@ fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
 fn cmd_import(
     db: &str,
     net: WalletNetwork,
-    opts: &[String],
+    birthday: Option<u64>,
     name: &str,
     databases: &[PathBuf],
 ) -> Result<NewAccount, String> {
-    let birthday = flag_u64(opts, "--birthday");
     let mnemonic = read_mnemonic()?;
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     zorg::account::ensure_new_seed(databases, &seed, net)?;
@@ -528,29 +605,17 @@ fn cmd_send(
     db: &str,
     net: WalletNetwork,
     lwd_url: &str,
-    opts: &[String],
+    positional: &[String],
+    memo: Option<&str>,
     uuid: &str,
 ) -> Result<(), String> {
-    let positional = positional_args(opts)?;
-    let to = positional
-        .first()
-        .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
-    let amount_str = positional
-        .get(1)
-        .ok_or("Usage: zorg send <to> <amount> [--memo <text>]")?;
-    let amount_zat = parse_zatoshi_amount(amount_str)?;
-    let memo = flag_str(opts, "--memo");
+    let [to, amount] = positional else {
+        return Err("Usage: zorg send <to> <amount> [--memo <text>]".into());
+    };
+    let amount_zat = parse_zatoshi_amount(amount)?;
     let send_flow_id = uuid::Uuid::new_v4().to_string();
 
-    let proposal = sync::propose_send(
-        db,
-        net,
-        uuid,
-        &send_flow_id,
-        to,
-        amount_zat,
-        memo.as_deref(),
-    )?;
+    let proposal = sync::propose_send(db, net, uuid, &send_flow_id, to, amount_zat, memo)?;
     println!("Fee: {}", fmt_zec(proposal.fee_zatoshi, net));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -569,8 +634,7 @@ fn cmd_send(
     Ok(())
 }
 
-fn cmd_history(db: &str, net: WalletNetwork, opts: &[String], uuid: &str) -> Result<(), String> {
-    let limit = flag_u64(opts, "--limit").map(|n| n as u32);
+fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> Result<(), String> {
     let txs = sync::get_transaction_history(db, net, limit, uuid)?;
     if txs.is_empty() {
         println!("No transactions yet.");
@@ -594,49 +658,6 @@ fn cmd_history(db: &str, net: WalletNetwork, opts: &[String], uuid: &str) -> Res
 }
 
 // ── helpers ──
-
-fn flag_str(opts: &[String], flag: &str) -> Option<String> {
-    let mut iter = opts.iter();
-    while let Some(a) = iter.next() {
-        if a == flag {
-            return iter.next().cloned();
-        }
-    }
-    None
-}
-
-fn flag_u64(opts: &[String], flag: &str) -> Option<u64> {
-    flag_str(opts, flag)?.parse().ok()
-}
-
-fn account_name_opt(opts: &[String]) -> Result<Option<String>, String> {
-    if opts.iter().any(|a| a == "--account") {
-        let name = flag_str(opts, "--account").ok_or("--account requires a name")?;
-        zorg::account::validate_name(&name)?;
-        Ok(Some(name))
-    } else {
-        Ok(None)
-    }
-}
-
-fn positional_args(opts: &[String]) -> Result<Vec<String>, String> {
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < opts.len() {
-        match opts[i].as_str() {
-            "--account" | "--memo" | "--limit" | "--birthday" => {
-                i += 1;
-                if i == opts.len() {
-                    return Err(format!("{} requires a value", opts[i - 1]));
-                }
-            }
-            value if value.starts_with("--") => return Err(format!("Unknown option: {value}")),
-            value => result.push(value.to_string()),
-        }
-        i += 1;
-    }
-    Ok(result)
-}
 
 /// Testnet (and regtest) coins are worthless by design — say so.
 fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
@@ -853,7 +874,7 @@ mod tests {
         let command = |args: &[&str]| {
             let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
             args.extend(["--network".into(), "regtest".into()]);
-            super::run_in(index_root.clone(), &args)
+            parse_args(&args).and_then(|args| super::run_in(index_root.clone(), args))
         };
         set_database_paths(root.path(), &[first_db.into(), second_db.into()]);
         command(&[]).unwrap();
@@ -897,39 +918,45 @@ mod tests {
     }
 
     #[test]
-    fn send_options_are_not_mistaken_for_destination_or_amount() {
-        let args: Vec<String> = [
+    fn options_take_their_values_and_are_checked_per_command() {
+        let parse =
+            |args: &[&str]| parse_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let args = parse(&[
+            "send",
             "--account",
             "Daily",
-            "destination",
+            "to",
             "0.1",
             "--memo",
-            "hello",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+            "--account",
+        ])
+        .unwrap();
+        assert_eq!(args.positional, ["to", "0.1"]);
+        assert_eq!(args.options["--account"], "Daily");
+        assert_eq!(args.options["--memo"], "--account");
         assert_eq!(
-            super::positional_args(&args).unwrap(),
-            ["destination", "0.1"]
+            parse(&["balance", "--account", "--help"]).unwrap().options["--account"],
+            "--help"
         );
-        assert!(super::account_name_opt(&["--account".into()]).is_err());
+        assert_eq!(parse(&[]).unwrap().command, "accounts");
+        assert!(parse(&["balance", "--account"]).is_err());
+        assert!(parse(&["balance", "--account", "A", "--account", "B"]).is_err());
+        assert!(parse(&["balance", "--acount", "A"]).is_err());
+        assert!(parse(&["balance", "--memo", "hi"]).is_err());
+        assert!(parse(&["sync", "Savings"]).is_err());
+        assert!(parse(&["send", "to"]).is_err());
+        assert!(parse(&["frobnicate"]).is_err());
+        assert!(parse(&["create", "My", "Savings"])
+            .err()
+            .unwrap()
+            .contains("quote"));
+        assert!(parse(&["send", "--help"]).unwrap().help);
     }
 
     #[test]
     fn first_run_lists_no_accounts_without_creating_a_database() {
         let root = tempfile::tempdir().unwrap();
-        super::run_in(root.path().to_path_buf(), &[]).unwrap();
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn create_rejects_an_unquoted_multi_word_name() {
-        let root = tempfile::tempdir().unwrap();
-        let args = ["create", "My", "Savings"].map(String::from);
-        assert!(super::run_in(root.path().to_path_buf(), &args)
-            .unwrap_err()
-            .contains("quote"));
+        super::run_in(root.path().to_path_buf(), parse_args(&[]).unwrap()).unwrap();
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
