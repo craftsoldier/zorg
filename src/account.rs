@@ -136,8 +136,7 @@ fn make_birthday(network: WalletNetwork, birthday_height: Option<u64>) -> Accoun
 }
 
 /// Init DB + create the bootstrap software account as Derived.
-/// This pins the DB seed fingerprint for seed-aware initialization, but the
-/// account may later be deleted like any other non-final account.
+/// This pins the DB seed fingerprint for seed-aware initialization.
 /// The account receives the supplied name and the next derivation index.
 pub fn init_db_and_create_account(
     db_path: &str,
