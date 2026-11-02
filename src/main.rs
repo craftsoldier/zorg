@@ -276,17 +276,16 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<St
     let Some(url) = explicit else {
         return Ok(resolve_default_lwd_url(net, cmd));
     };
-    if let Ok(height) = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url) {
-        let served = network_with_sapling_activation_height(height);
-        if served != Some(*net) {
-            let served = served.map_or("an unknown network".into(), |n| {
-                format!("the {} network", n.as_str())
-            });
-            return Err(format!(
-                "{url} serves {served}, but this database is on {}",
-                net.as_str()
-            ));
-        }
+    let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
+    let served = network_with_sapling_activation_height(height);
+    if served != Some(*net) {
+        let served = served.map_or("an unknown network".into(), |n| {
+            format!("the {} network", n.as_str())
+        });
+        return Err(format!(
+            "{url} serves {served}, but this database is on {}",
+            net.as_str()
+        ));
     }
     Ok(url.to_string())
 }
