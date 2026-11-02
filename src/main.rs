@@ -471,7 +471,9 @@ fn cmd_delete(
              Keep the written-down recovery phrase: zorg can't show it again."
         );
     }
-    prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?;
+    if !prompt_line("Press Enter to continue, or Ctrl-C to cancel: ")?.is_empty() {
+        return Err("Cancelled".into());
+    }
     #[cfg(target_os = "macos")]
     zorg::secret_store::mnemonic_from_macos_keychain(account.network, &account.uuid)?;
     zorg::account::delete_account_and_empty_database(
