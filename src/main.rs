@@ -308,8 +308,18 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         "balance" => cmd_balance(db, net, uuid),
         "send" => {
             let memo = option("--memo");
-            endpoint(lwd.as_deref(), &net, cmd)
-                .and_then(|url| cmd_send(db, net, &url, &args.positional, memo.as_deref(), uuid))
+            let missing = missing_phrase_error(selected);
+            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| {
+                cmd_send(
+                    db,
+                    net,
+                    &url,
+                    &args.positional,
+                    memo.as_deref(),
+                    uuid,
+                    &missing,
+                )
+            })
         }
         "history" => {
             let limit = option("--limit").and_then(|n| n.parse::<u64>().ok());
@@ -569,9 +579,27 @@ fn cmd_delete(
     Ok(())
 }
 
+/// The error for an account whose recovery phrase is not in this Mac's
+/// Keychain, with the commands that restore it.
+fn missing_phrase_error(account: &zorg::account::AccountInfo) -> String {
+    let network = match account.network {
+        WalletNetwork::Main => String::new(),
+        net => format!(" --network {}", net.as_str()),
+    };
+    format!(
+        "The recovery phrase for {name:?} isn't in this Mac's Keychain \
+         (Keychain entries don't move to a new Mac). Restore it with your written-down phrase:\n  \
+         zorg delete --account {name:?}\n  \
+         zorg import {name:?}{network} --birthday {birthday}",
+        name = account.name,
+        birthday = account.birthday_height,
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Result<(), String> {
-    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain(net, &account.uuid)?;
+    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, &account.uuid)?
+        .ok_or_else(|| missing_phrase_error(account))?;
     print!(
         "{}",
         recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
@@ -612,6 +640,7 @@ fn cmd_send(
     positional: &[String],
     memo: Option<&str>,
     uuid: &str,
+    missing_phrase: &str,
 ) -> Result<(), String> {
     let [to, amount] = positional else {
         return Err("Usage: zorg send <to> <amount> [--memo <text>]".into());
@@ -628,7 +657,7 @@ fn cmd_send(
         lwd_url,
         proposal.proposal_id,
         &send_flow_id,
-        |network, account| load_seed(network, &account.expose_uuid().to_string()),
+        |network, account| load_seed(network, &account.expose_uuid().to_string(), missing_phrase),
         None,
         None,
     ))?;
@@ -808,14 +837,23 @@ fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
     first_alive.to_string()
 }
 
-fn load_seed(net: WalletNetwork, account_uuid: &str) -> Result<secrecy::SecretVec<u8>, String> {
+/// The account's seed, from Keychain on macOS; fails with `missing_phrase`
+/// when Keychain has no entry for the account.
+fn load_seed(
+    net: WalletNetwork,
+    account_uuid: &str,
+    missing_phrase: &str,
+) -> Result<secrecy::SecretVec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
-        zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid)
+        let mnemonic =
+            zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, account_uuid)?
+                .ok_or_else(|| missing_phrase.to_string())?;
+        keys::mnemonic_to_seed(&mnemonic)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (net, account_uuid);
+        let _ = (net, account_uuid, missing_phrase);
         let mnemonic = read_mnemonic()?;
         keys::mnemonic_to_seed(&mnemonic)
     }
@@ -979,6 +1017,28 @@ mod tests {
             Some(WalletNetwork::Regtest)
         );
         assert_eq!(network_with_sapling_activation_height(5), None);
+    }
+
+    #[test]
+    fn missing_phrase_error_shows_the_restore_commands() {
+        let account = zorg::account::AccountInfo {
+            uuid: String::new(),
+            name: "My Savings".into(),
+            unified_address: String::new(),
+            account_index: 0,
+            birthday_height: 2_345_600,
+            db_path: String::new(),
+            network: WalletNetwork::Test,
+        };
+        let error = missing_phrase_error(&account);
+        assert!(
+            error.contains("zorg delete --account \"My Savings\""),
+            "{error}"
+        );
+        assert!(
+            error.contains("zorg import \"My Savings\" --network test --birthday 2345600"),
+            "{error}"
+        );
     }
 
     #[test]
