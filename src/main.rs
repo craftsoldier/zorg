@@ -99,9 +99,14 @@ fn run_in(root: std::path::PathBuf, args: &[String]) -> Result<(), String> {
     }
     if matches!(cmd, "create" | "import") {
         zorg::account::require_available(&unavailable)?;
-        let name = match positional_args(opts)?.first() {
-            Some(name) => name.clone(),
-            None => read_account_name()?,
+        let name = match positional_args(opts)?.as_slice() {
+            [] => read_account_name()?,
+            [name] => name.clone(),
+            _ => {
+                return Err(format!(
+                    "Usage: zorg {cmd} [name]; quote a name with spaces"
+                ))
+            }
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
         let net = network.unwrap_or(WalletNetwork::Main);
@@ -884,6 +889,16 @@ mod tests {
     fn first_run_lists_no_accounts_without_creating_a_database() {
         let root = tempfile::tempdir().unwrap();
         super::run_in(root.path().to_path_buf(), &[]).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn create_rejects_an_unquoted_multi_word_name() {
+        let root = tempfile::tempdir().unwrap();
+        let args = ["create", "My", "Savings"].map(String::from);
+        assert!(super::run_in(root.path().to_path_buf(), &args)
+            .unwrap_err()
+            .contains("quote"));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
