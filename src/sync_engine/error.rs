@@ -201,8 +201,8 @@ impl SyncError {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn is_endpoint_failover_candidate_message(message: &str) -> bool {
+/// Whether `message` describes a network failure that another server might not have.
+pub fn is_endpoint_failover_candidate_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     if lower.contains("wrong network")
         || lower.contains("endpoint is for")

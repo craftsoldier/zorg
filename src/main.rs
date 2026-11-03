@@ -223,11 +223,27 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             unavailable += 1;
         }
     }
-    let cmd = if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
-        first_run()?
-    } else {
-        cmd
-    };
+    if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
+        let command = first_run()?;
+        let mut args = args;
+        run_in(
+            root.clone(),
+            Args {
+                command: Some(command.into()),
+                positional: Vec::new(),
+                options: args.options.clone(),
+                help: false,
+                version: false,
+            },
+        )?;
+        if zorg::account::read_index(&root)?.is_empty() {
+            return Ok(());
+        }
+        println!();
+        terminal::wait_for("Enter to open your account")?;
+        args.options.remove("--network");
+        return run_in(root, args);
+    }
     if matches!(cmd, "create" | "import") {
         let interactive = terminal::interactive();
         let name = match args.positional.first() {
@@ -321,11 +337,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
         println!("Account: {name}");
         println!("Address: {}", created.unified_address);
-        if args.command.is_none() {
-            println!();
-            terminal::wait_for("Enter to open your account")?;
-            return run_in(root, args);
-        }
         return Ok(());
     }
     let visible: Vec<_> = accounts
@@ -347,10 +358,11 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
         loop {
             terminal::clear()?;
+            let heading = format!("{} · {}", account.name, account.network.display_name());
+            let width = usize::from(console::Term::stdout().size().1);
             println!(
-                "{} · {}",
-                console::style(&account.name).bold(),
-                account.network.display_name()
+                "{}",
+                console::style(console::truncate_str(&heading, width, "…")).bold()
             );
             println!("{}", balance_row(account));
             println!("{}\n", terminal::row("sync", 7, sync_text(account)));
@@ -560,7 +572,10 @@ fn auto_sync(
         });
         match result {
             Ok(()) => paint("up to date", true),
-            Err(e) => paint(&format!("failed: {e} · retrying"), false),
+            Err(e) if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) => {
+                paint("server unreachable · retrying", false)
+            }
+            Err(_) => paint("failed · retrying", false),
         }
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
@@ -1271,7 +1286,7 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
         match zorg::sync_engine::get_latest_block_height(url) {
             Ok(_) => Some((url, i + 1)),
             Err(e) => {
-                eprintln!("note: {url} unreachable ({e}); trying next endpoint");
+                log::warn!("{url} unreachable ({e}); trying next endpoint");
                 None
             }
         }
@@ -1281,7 +1296,7 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
         return candidates[0].to_string();
     };
     if attempts > 1 {
-        eprintln!("note: failing over to {first_alive}");
+        log::warn!("failing over to {first_alive}");
     }
     first_alive.to_string()
 }

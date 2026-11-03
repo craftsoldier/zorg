@@ -42,6 +42,7 @@ use {
 mod block_source;
 mod enhance;
 mod error;
+pub use error::is_endpoint_failover_candidate_message;
 mod lwd;
 
 use enhance::run_enhancement;
