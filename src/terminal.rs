@@ -304,10 +304,10 @@ pub fn clear() -> Result<(), String> {
     Term::stdout().clear_screen().map_err(|e| e.to_string())
 }
 
-/// Shows "Esc back" and waits for Esc, Enter, or q. Ctrl-C is [`INTERRUPTED`].
-pub fn wait_for_back() -> Result<(), String> {
+/// Shows `label` and waits for Esc, Enter, or q. Ctrl-C is [`INTERRUPTED`].
+pub fn wait_for(label: &str) -> Result<(), String> {
     let term = Term::stdout();
-    term.write_line(&style("Esc back").dim().to_string())
+    term.write_line(&style(label).dim().to_string())
         .map_err(|e| e.to_string())?;
     loop {
         match term.read_key_raw().map_err(|e| e.to_string())? {
@@ -334,6 +334,25 @@ pub fn copy(text: &str) -> Result<(), String> {
         (Some(Ok(())), Ok(status)) if status.success() => Ok(()),
         _ => Err("Could not copy".into()),
     }
+}
+
+/// A bar `width` characters wide, filled to `fraction` (from 0 to 1).
+pub fn bar(fraction: f64, width: usize) -> String {
+    let filled = ((fraction.clamp(0.0, 1.0) * width as f64) as usize).min(width);
+    format!(
+        "{}{}",
+        style("━".repeat(filled)).cyan(),
+        style("─".repeat(width - filled)).dim()
+    )
+}
+
+/// Rewrites line `row` of the screen, counting from 1 at the top, and puts
+/// the cursor back where it was.
+pub fn paint_line(row: usize, text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(format!("\x1b7\x1b[{row};1H\x1b[2K{text}\x1b8").as_bytes());
+    let _ = out.flush();
 }
 
 /// Prints a dimmed line, such as "Cancelled. Nothing was sent."
