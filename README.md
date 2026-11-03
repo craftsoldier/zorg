@@ -43,7 +43,8 @@ Create and import ask for a name if omitted.
 |---|---|
 | `--network <main\|test\|regtest>` | Filter accounts by network; defaults to main for create/import |
 | `--lwd <url>` | lightwalletd endpoint override |
-| `--help`, `-V` | Show usage / version |
+| `--help`, `-h` | Show usage |
+| `--version`, `-V` | Show version |
 
 ## Requirements
 - Rust & Cargo
