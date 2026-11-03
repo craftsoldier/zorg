@@ -325,14 +325,13 @@ pub fn copy(text: &str) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Could not copy: {e}"))?;
-    child
+    let written = child
         .stdin
         .take()
-        .ok_or("Could not copy")?
-        .write_all(text.as_bytes())
-        .map_err(|e| format!("Could not copy: {e}"))?;
-    match child.wait() {
-        Ok(status) if status.success() => Ok(()),
+        .map(|mut stdin| stdin.write_all(text.as_bytes()));
+    let status = child.wait();
+    match (written, status) {
+        (Some(Ok(())), Ok(status)) if status.success() => Ok(()),
         _ => Err("Could not copy".into()),
     }
 }
@@ -367,9 +366,9 @@ impl Progress {
     pub fn hidden_bar() -> Self {
         let bar = ProgressBar::with_draw_target(Some(100), ProgressDrawTarget::hidden());
         bar.set_style(
-            ProgressStyle::with_template("{bar:30.cyan/dim} {pos:>3}%  {msg}")
+            ProgressStyle::with_template("{spinner:.cyan} {bar:30.cyan/dim} {pos:>3}%  {msg}")
                 .expect("template")
-                .progress_chars("━━ "),
+                .progress_chars("━━─"),
         );
         Self(bar)
     }

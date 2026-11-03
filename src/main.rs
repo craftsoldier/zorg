@@ -700,31 +700,30 @@ fn cmd_import(
 /// address, until Esc goes back.
 fn receive(account: &zorg::account::Account) -> Result<(), String> {
     let mut address = zorg::account::current_address(account)?;
-    let mut status = String::new();
+    let mut status: Result<String, String> = Ok(String::new());
     let actions = ["Copy address", "New address"].map(String::from);
     loop {
         terminal::clear()?;
         println!("{}\n", console::style("Receive").bold());
         println!("{address}\n");
-        if !status.is_empty() {
-            terminal::note(&status);
-            println!();
+        match &status {
+            Ok(message) if message.is_empty() => {}
+            Ok(message) => terminal::note(&format!("{message}\n")),
+            Err(e) => terminal::failure(&format!("{e}\n")),
         }
         status = match terminal::menu("Esc back", &actions, 0)? {
             None => return Ok(()),
-            Some(0) => terminal::copy(&address).map_or_else(|e| e, |()| "Copied.".into()),
-            Some(_) => match sync::get_next_available_address(
+            Some(0) => terminal::copy(&address).map(|()| "Copied.".into()),
+            Some(_) => sync::get_next_available_address(
                 &account.db_path,
                 account.network,
                 &account.uuid,
                 sync::AddressRequestKind::Shielded,
-            ) {
-                Ok(new) => {
-                    address = new;
-                    "New address.".into()
-                }
-                Err(e) => e,
-            },
+            )
+            .map(|new| {
+                address = new;
+                "New address.".into()
+            }),
         };
     }
 }
