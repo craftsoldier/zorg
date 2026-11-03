@@ -282,6 +282,28 @@ pub fn pick(question: &str, items: &[String], default: usize) -> Result<usize, S
     Ok(index)
 }
 
+/// Shows "[key] label   [Esc] quit" and waits for `key` (true) or Esc
+/// (false). Ctrl-C is [`INTERRUPTED`].
+pub fn read_key(label: &str, key: char) -> Result<bool, String> {
+    let term = Term::stdout();
+    term.write_line(&format!(
+        "{} {label}   {} quit",
+        style(format!("[{key}]")).bold(),
+        style("[Esc]").bold()
+    ))
+    .map_err(|e| e.to_string())?;
+    let answer = loop {
+        match term.read_key_raw().map_err(|e| e.to_string())? {
+            Key::Escape => break false,
+            Key::CtrlC => return Err(INTERRUPTED.to_string()),
+            Key::Char(c) if c.eq_ignore_ascii_case(&key) => break true,
+            _ => {}
+        }
+    };
+    term.clear_last_lines(1).map_err(|e| e.to_string())?;
+    Ok(answer)
+}
+
 /// Prints a dimmed line, such as "Cancelled. Nothing was sent."
 pub fn note(text: &str) {
     println!("{}", style(text).dim());
