@@ -11,7 +11,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
 use crate::{
     db::{
@@ -87,24 +87,15 @@ pub fn ensure_db_migrated_once(db_path: &str, network: WalletNetwork) -> Result<
     Ok(())
 }
 
-fn make_birthday(network: WalletNetwork, birthday_height: Option<u64>) -> AccountBirthday {
-    let height = match birthday_height {
-        Some(h) => BlockHeight::from_u32(h as u32),
-        None => network
-            .activation_height(NetworkUpgrade::Sapling)
-            .expect("Sapling activation height must be known"),
-    };
-    AccountBirthday::from_parts(ChainState::empty(height - 1, BlockHash([0u8; 32])), None)
-}
-
 /// Init DB + create the bootstrap software account as Derived.
 /// This pins the DB seed fingerprint for seed-aware initialization.
 /// The account receives the supplied name and the next derivation index.
+/// A `birthday` of `None` starts the account at Sapling activation.
 pub fn init_db_and_create_account(
     db_path: &str,
     network: WalletNetwork,
     seed: &SecretVec<u8>,
-    birthday_height: Option<u64>,
+    birthday: Option<AccountBirthday>,
     name: &str,
 ) -> Result<CreatedAccount, String> {
     // The seed is needed so that seed-requiring migrations can run in the future.
@@ -115,7 +106,12 @@ pub fn init_db_and_create_account(
         Ok::<_, String>(())
     })?;
 
-    let birthday = make_birthday(network, birthday_height);
+    let birthday = birthday.unwrap_or_else(|| {
+        let sapling = network
+            .activation_height(NetworkUpgrade::Sapling)
+            .expect("Sapling activation height must be known");
+        AccountBirthday::from_parts(ChainState::empty(sapling - 1, BlockHash([0u8; 32])), None)
+    });
 
     let (account_id, usk) = with_wallet_db_write_lock("keys.create_account", || {
         let mut db =
@@ -625,8 +621,7 @@ mod tests {
         let db_str = db.to_str().unwrap();
         let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
         let created =
-            init_db_and_create_account(db_str, WalletNetwork::Regtest, &seed, Some(1), "A")
-                .unwrap();
+            init_db_and_create_account(db_str, WalletNetwork::Regtest, &seed, None, "A").unwrap();
         let account = Account {
             uuid: created.uuid,
             name: "A".into(),
