@@ -19,7 +19,7 @@ COMMANDS:
     create [name]                                           Create an account with a new recovery phrase
     import [name] [--birthday <height>]                     Import a recovery phrase at account index 0
     balance [--account <name>]                              Show balance
-    address [--account <name>]                              Show receive address
+    address [--new] [--account <name>]                      Show the receive address, or make a new one
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
@@ -80,6 +80,9 @@ const VALUE_OPTIONS: [&str; 6] = [
     "--birthday",
 ];
 
+/// Options that take no value.
+const FLAG_OPTIONS: [&str; 1] = ["--new"];
+
 /// A command line parsed by [`parse_args`].
 struct Args {
     command: String,
@@ -114,9 +117,8 @@ fn command_spec(
                 1..=1
             },
         ),
-        "balance" | "address" | "sync" | "status" | "recovery" => {
-            ("[--account <name>]", &["--account"], 0..=0)
-        }
+        "balance" | "sync" | "status" | "recovery" => ("[--account <name>]", &["--account"], 0..=0),
+        "address" => ("[--new] [--account <name>]", &["--new", "--account"], 0..=0),
         "delete" => ("--account <name>", &["--account"], 0..=0),
         "send" => (
             "<to> <amount> [--memo <text>] [--account <name>]",
@@ -151,6 +153,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 .next()
                 .ok_or_else(|| format!("{option} requires a value"))?;
             if options.insert(option, value.to_string()).is_some() {
+                return Err(format!("{option} was given more than once"));
+            }
+        } else if let Some(&option) = FLAG_OPTIONS.iter().find(|&&o| o == arg) {
+            if options.insert(option, String::new()).is_some() {
                 return Err(format!("{option} was given more than once"));
             }
         } else if arg == "--help" || arg == "-h" {
@@ -394,7 +400,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let uuid = &selected.uuid;
     let result = match cmd {
         "address" => {
-            println!("{}", selected.unified_address);
+            let address = if args.options.contains_key("--new") {
+                sync::get_next_available_address(db, net, uuid, sync::AddressRequestKind::Shielded)?
+            } else {
+                selected.unified_address.clone()
+            };
+            println!("{address}");
             Ok(())
         }
         "balance" => cmd_balance(db, net, uuid),
@@ -1141,6 +1152,15 @@ mod tests {
             .unwrap()
             .contains("quote"));
         assert!(parse(&["send", "--help"]).unwrap().help);
+        assert!(parse(&["address", "--new"])
+            .unwrap()
+            .options
+            .contains_key("--new"));
+        let args = parse(&["address", "--new", "--account", "Savings"]).unwrap();
+        assert_eq!(args.options["--new"], "");
+        assert_eq!(args.options["--account"], "Savings");
+        assert!(parse(&["address", "--new", "--new"]).is_err());
+        assert!(parse(&["balance", "--new"]).is_err());
     }
 
     #[test]

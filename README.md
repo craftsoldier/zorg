@@ -25,7 +25,7 @@ Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 | `zorg create [name]` | Create a new account and recovery phrase |
 | `zorg import [name] [--birthday <height>]` | Restore an account from a recovery phrase (index 0) |
 | `zorg balance [--account <name>]` | Show spendable, pending, and locked balances |
-| `zorg address [--account <name>]` | Get a unified receiving address |
+| `zorg address [--new] [--account <name>]` | Get a unified receiving address, or make a new one |
 | `zorg sync [--account <name>]` | Sync all databases, or the chosen account's database |
 | `zorg status [--account <name>]` | Check sync status for all databases, or the chosen account's database |
 | `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send Zcash (TAZ on testnet) |

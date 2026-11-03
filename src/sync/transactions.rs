@@ -241,7 +241,12 @@ pub fn get_next_available_address(
     let (ua, _) = with_wallet_db_write_lock("transactions.get_next_available_address", || {
         let mut db = open_wallet_db(db_path, network)?;
         db.get_next_available_address(account_id, req)
-            .map_err(|e| format!("{e}"))?
+            .map_err(|e| match e {
+                zcash_client_sqlite::error::SqliteClientError::ChainHeightUnknown => {
+                    "Sync this account before making a new address".to_string()
+                }
+                e => format!("{e}"),
+            })?
             .ok_or_else(|| "No address available".to_string())
     })?;
     Ok(ua.encode(&network))

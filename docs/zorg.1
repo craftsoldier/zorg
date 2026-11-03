@@ -56,8 +56,15 @@ name, network, and unified address.
 Print spendable, pending, and locked balances for the account
 (the only account, if none given; otherwise a name is required).
 .TP
-.BI zorg\ address " [\-\-account\ name]"
-Print the account's unified receiving address.
+.BI zorg\ address " [\-\-new] [\-\-account\ name]"
+Print the account's most recently used unified receiving address.
+After restoring an account from its recovery phrase, this can be an address
+that has already been paid; make a new one before handing it out.
+With
+.BR \-\-new ,
+make a new address for the account and print it; the account must have been
+synced first.
+Every address the account has made keeps receiving.
 .TP
 .BI zorg\ sync " [\-\-account\ name]"
 Sync every known database once, or the chosen account's database.
