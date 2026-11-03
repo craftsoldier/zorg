@@ -690,6 +690,9 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     if bal.orchard > 0 {
         println!("  Orchard:      {}", fmt_zec(bal.orchard, net));
     }
+    if bal.ironwood > 0 {
+        println!("  Ironwood:     {}", fmt_zec(bal.ironwood, net));
+    }
     Ok(())
 }
 
