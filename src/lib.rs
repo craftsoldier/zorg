@@ -30,6 +30,7 @@ static LOGGER: StderrLogger = StderrLogger;
 
 /// Install stderr logging.
 pub fn init() {
+    #[cfg(debug_assertions)]
     let configured_level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|value| {
@@ -38,12 +39,15 @@ pub fn init() {
                 .map_or(value.as_str(), |(_, level)| level);
             parse_log_level(level)
         })
-        .unwrap_or(log::LevelFilter::Info);
+        .unwrap_or(log::LevelFilter::Warn);
+    #[cfg(not(debug_assertions))]
+    let configured_level = log::LevelFilter::Warn;
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(configured_level);
     }
 }
 
+#[cfg(debug_assertions)]
 fn parse_log_level(value: &str) -> Option<log::LevelFilter> {
     match value.trim().to_ascii_lowercase().as_str() {
         "off" => Some(log::LevelFilter::Off),
