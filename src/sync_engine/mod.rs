@@ -1127,12 +1127,12 @@ async fn run_sync_impl(
     let mut db =
         with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
 
-    // 2. Get chain tip. `current_tip_height` is updated by the
-    // periodic refresh (TIP_REFRESH_INTERVAL) so that progress
-    // events always reflect the latest known chain height, not the
-    // one captured at sync start. The initial `tip` response is
-    // also kept around for its other fields but `current_tip_height`
-    // is the authoritative value for emitted events.
+    // 2. Get chain tip. `current_tip_height` is updated by the tip
+    // fetch after each batch so that progress events always reflect
+    // the latest known chain height, not the one captured at sync
+    // start. The initial `tip` response is also kept around for its
+    // other fields but `current_tip_height` is the authoritative
+    // value for emitted events.
     let tip = get_latest_block(&mut client).await?;
     let mut current_tip_height: u64 = tip.height;
     let tip_height = BlockHeight::from_u32(tip.height as u32);
@@ -1208,22 +1208,6 @@ async fn run_sync_impl(
     let mut verify_phase_announced = false;
     let mut main_phase_announced = false;
 
-    /// If the scan loop has been running longer than this without
-    /// refreshing the chain tip from lightwalletd, we re-fetch
-    /// the tip and call `update_chain_tip` so that
-    /// `suggest_scan_ranges` incorporates any new blocks that
-    /// appeared while the wallet was catching up.
-    ///
-    /// Matches zcash-android-wallet-sdk's
-    /// `SYNCHRONIZATION_RESTART_TIMEOUT = 10.minutes`
-    /// (CompactBlockProcessor.kt:1197). We don't restart the
-    /// whole sync like the SDK does — just refreshing the tip is
-    /// enough because our `suggest_scan_ranges` call at the top
-    /// of each loop iteration already reflects the new tip once
-    /// `update_chain_tip` has written it to the DB.
-    const TIP_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
-    let mut last_tip_refresh = std::time::Instant::now();
-
     // Prefetched block source from the previous iteration.
     // When the scan loop processes a range that spans multiple batches,
     // we kick off a background download of the next batch while running
@@ -1264,45 +1248,6 @@ async fn run_sync_impl(
 
     // 5. Sync loop
     loop {
-        // Periodic tip refresh: if we've been scanning for longer
-        // than TIP_REFRESH_INTERVAL, re-fetch the chain tip so
-        // new blocks that arrived during a long catch-up are
-        // picked up by the next suggest_scan_ranges() call.
-        // Errors are logged and skipped — we just keep the old
-        // tip and try again next period.
-        if last_tip_refresh.elapsed() >= TIP_REFRESH_INTERVAL {
-            match get_latest_block(&mut client).await {
-                Ok(fresh_tip) => {
-                    let fresh_height = BlockHeight::from_u32(fresh_tip.height as u32);
-                    if let Err(e) =
-                        with_wallet_db_write_lock("sync_engine.update_chain_tip.periodic", || {
-                            db.update_chain_tip(fresh_height)
-                        })
-                    {
-                        log::warn!(
-                            "[{}] sync: periodic tip refresh update_chain_tip failed: {e}",
-                            elapsed(),
-                        );
-                    } else {
-                        log::info!(
-                            "[{}] sync: periodic tip refresh {} → {}",
-                            elapsed(),
-                            current_tip_height,
-                            fresh_tip.height,
-                        );
-                        current_tip_height = fresh_tip.height;
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[{}] sync: periodic tip refresh get_latest_block failed: {e}",
-                        elapsed(),
-                    );
-                }
-            }
-            last_tip_refresh = std::time::Instant::now();
-        }
-
         let ranges = db
             .suggest_scan_ranges()
             .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
@@ -1824,8 +1769,7 @@ async fn run_sync_impl(
                 // use the latest chain height, not the one from
                 // sync startup. Also update the DB so
                 // suggest_scan_ranges picks up any new blocks that
-                // appeared since the initial (or last periodic) tip
-                // fetch.
+                // appeared since the previous tip fetch.
                 //
                 // IMPORTANT: update_chain_tip MUST succeed before
                 // we bump current_tip_height. If the DB write fails,
@@ -1868,10 +1812,7 @@ async fn run_sync_impl(
             }
         }
         // Report progress
-        let post_ranges = db
-            .suggest_scan_ranges()
-            .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
-        let remaining: u64 = post_ranges
+        let remaining: u64 = post_scan_ranges
             .iter()
             .filter(|r| is_pending_scan_range(r))
             .map(|r| {
@@ -1895,7 +1836,7 @@ async fn run_sync_impl(
         }
         prev_remaining = remaining;
         let display_scanned_height =
-            progress_display_mode.batch_end_height(&post_ranges, end, current_tip_height);
+            progress_display_mode.batch_end_height(&post_scan_ranges, end, current_tip_height);
         let pct = progress_display_mode.percentage(
             initial_total,
             remaining,
