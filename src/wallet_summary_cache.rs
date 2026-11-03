@@ -159,7 +159,10 @@ mod tests {
         time::Duration,
     };
 
-    use zcash_client_backend::data_api::{Progress, Ratio, WalletSummary};
+    use zcash_client_backend::data_api::{
+        chain::ChainState, AccountBirthday, Progress, Ratio, WalletSummary,
+    };
+    use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::BlockHeight;
 
     use crate::db::with_wallet_db_write_lock;
@@ -554,7 +557,10 @@ mod tests {
             db_path,
             WalletNetwork::Regtest,
             &seed,
-            Some(1_000),
+            Some(AccountBirthday::from_parts(
+                ChainState::empty(BlockHeight::from_u32(999), BlockHash([0u8; 32])),
+                None,
+            )),
             "Account 1",
         )
         .unwrap();

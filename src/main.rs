@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 
 mod terminal;
 
+use zcash_client_backend::data_api::AccountBirthday;
 use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
@@ -665,6 +666,7 @@ fn create_account(
         }
     }
     let net = net.get();
+    let mut account_birthday = None;
     if let Some(birthday) = birthday {
         let url = endpoint(server(net).as_deref(), &net)?;
         let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
@@ -674,13 +676,14 @@ fn create_account(
                 net.display_name()
             ));
         }
+        account_birthday = Some(zorg::sync_engine::fetch_birthday(&url, net, birthday)?);
     }
     zorg::account::ensure_private_wallet_dir(root)?;
     let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
     let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
     reserve_wallet_file(&db_path)?;
     let result = if import {
-        cmd_import(db, net, birthday, &name, accounts)
+        cmd_import(db, net, account_birthday, &name, accounts)
     } else {
         endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
     };
@@ -739,9 +742,11 @@ fn cmd_create(
     name: &str,
 ) -> Result<NewAccount, String> {
     let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
+    let account_birthday = zorg::sync_engine::fetch_birthday(lwd_url, net, birthday)?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
-    let created = zorg::account::init_db_and_create_account(db, net, &seed, Some(birthday), name)?;
+    let created =
+        zorg::account::init_db_and_create_account(db, net, &seed, Some(account_birthday), name)?;
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
@@ -822,7 +827,7 @@ fn birthday_from_chain_tip(tip: u64) -> Result<u64, String> {
 fn cmd_import(
     db: &str,
     net: WalletNetwork,
-    birthday: Option<u64>,
+    birthday: Option<AccountBirthday>,
     name: &str,
     accounts: &[zorg::account::Account],
 ) -> Result<NewAccount, String> {
@@ -1675,7 +1680,7 @@ mod tests {
                 db.to_str().unwrap(),
                 WalletNetwork::Regtest,
                 &seed,
-                Some(1),
+                None,
                 name,
             )
             .unwrap();

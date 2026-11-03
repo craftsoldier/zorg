@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::{
     chain::{self, error::Error as ChainError, scan_cached_blocks},
     scanning::{ScanPriority, ScanRange},
     wallet::ConfirmationsPolicy,
-    WalletCommitmentTrees, WalletRead, WalletWrite,
+    AccountBirthday, WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_primitives::block::BlockHash;
@@ -2367,6 +2367,33 @@ pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {
         .map(|tip| tip.height)
         .map_err(|e| e.to_string())
     })
+}
+
+/// The birthday of an account whose first block is `height`: empty note
+/// commitment trees at or below Sapling activation, otherwise the tree state
+/// a lightwalletd endpoint reports for block `height - 1`.
+pub fn fetch_birthday(
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    height: u64,
+) -> Result<AccountBirthday, String> {
+    let start = BlockHeight::try_from(height)
+        .map_err(|_| format!("Birthday {height} is not a valid block height"))?;
+    if should_use_empty_chain_state(&network, start).map_err(|e| e.to_string())? {
+        let prior = chain::ChainState::empty(start - 1, BlockHash([0u8; 32]));
+        return Ok(AccountBirthday::from_parts(prior, None));
+    }
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    let tree_state = rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        get_tree_state(&mut client, height - 1)
+            .await
+            .map_err(|e| e.to_string())
+    })?;
+    AccountBirthday::from_treestate(tree_state, None)
+        .map_err(|e| format!("Could not read the tree state before birthday {height}: {e}"))
 }
 
 /// The Sapling activation height a lightwalletd endpoint reports for its chain.
