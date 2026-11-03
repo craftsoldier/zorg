@@ -1353,7 +1353,6 @@ async fn run_sync_impl(
             recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
         let _ = crate::sync::resubmit_pending_transactions(
             db_data_path,
-            lightwalletd_url,
             &mut client,
             tip.height as u32,
             &startup_resubmit_exclusions,
@@ -2032,7 +2031,6 @@ async fn run_sync_impl(
                 if allow_resubmit {
                     let _ = crate::sync::resubmit_pending_transactions(
                         db_data_path,
-                        lightwalletd_url,
                         &mut client,
                         fresh_tip_height,
                         &resubmit_exclusions,

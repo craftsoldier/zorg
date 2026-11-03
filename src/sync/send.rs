@@ -492,16 +492,19 @@ async fn execute_stored(
 
 pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
     db_path: &str,
-    _lightwalletd_url: &str,
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
-    _current_height: u32,
-    _excluded: &HashSet<Vec<u8>>,
+    current_height: u32,
+    excluded: &HashSet<Vec<u8>>,
     should_exit: ShouldExit,
 ) -> Result<ResubmitStats, String>
 where
     ShouldExit: Fn() -> bool,
 {
-    let txs = crate::sync::transactions::get_resubmittable_txs(db_path, _current_height)?;
+    let txs = crate::sync::transactions::get_resubmittable_txs_excluding(
+        db_path,
+        current_height,
+        excluded,
+    )?;
     let mut stats = ResubmitStats::default();
     for tx in txs {
         if should_exit() {
@@ -512,14 +515,14 @@ where
         match resp {
             Ok(resp) => {
                 if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
-                    log::warn!("resubmit: {} rejected: {err}", hex::encode(&tx.txid_bytes));
+                    log::warn!("resubmit: {} rejected: {err}", tx.txid);
                     stats.failed += 1;
                 } else {
                     stats.succeeded += 1;
                 }
             }
             Err(e) => {
-                log::warn!("resubmit: {} failed: {e}", hex::encode(&tx.txid_bytes));
+                log::warn!("resubmit: {} failed: {e}", tx.txid);
                 stats.failed += 1;
             }
         }
