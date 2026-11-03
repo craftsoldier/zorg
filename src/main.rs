@@ -946,6 +946,9 @@ fn cmd_tx(account: &zorg::account::AccountInfo, txid: &str) -> Result<(), String
                     "{}",
                     terminal::row("to", 4, format!("{to}  {amount} {unit}"))
                 );
+                if let Some(memo) = &output.memo {
+                    println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+                }
             } else {
                 println!("{}", terminal::row("to", 4, to));
             }
@@ -955,8 +958,10 @@ fn cmd_tx(account: &zorg::account::AccountInfo, txid: &str) -> Result<(), String
             let fee = terminal::zec(tx.fee, 0);
             println!("{}", terminal::row("fee", 4, format!("{fee} {unit}")));
         }
-        if let Some(memo) = &detail.memo {
-            println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+        if let [output] = detail.outputs.as_slice() {
+            if let Some(memo) = &output.memo {
+                println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+            }
         }
     }
     println!("{}", terminal::row("txid", 4, txid));

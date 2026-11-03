@@ -453,7 +453,6 @@ pub struct TransactionDetail {
     pub primary_address: Option<String>,
     pub source_address: Option<String>,
     pub source_pool: Option<String>,
-    pub memo: Option<String>,
     pub outputs: Vec<TransactionDetailOutput>,
 }
 
@@ -461,6 +460,7 @@ pub struct TransactionDetailOutput {
     pub address: Option<String>,
     pub amount_zatoshi: u64,
     pub pool: String,
+    pub memo: Option<String>,
 }
 
 #[cfg(test)]
@@ -855,9 +855,6 @@ pub fn get_transaction_detail(
         .iter()
         .filter(|output| detail_includes_output(&base, output, uuid_bytes.as_slice(), tx_kind))
         .collect::<Vec<_>>();
-    let memo = visible_outputs
-        .iter()
-        .find_map(|output| decode_text_memo(output.memo.as_deref()));
     let primary_address = if tx_kind == "sent" {
         visible_outputs
             .iter()
@@ -880,6 +877,7 @@ pub fn get_transaction_detail(
             address: output.detail_address(tx_kind),
             amount_zatoshi: output.value,
             pool: output_pool_label(output.output_pool).to_string(),
+            memo: decode_text_memo(output.memo.as_deref()),
         })
         .collect();
 
@@ -889,7 +887,6 @@ pub fn get_transaction_detail(
         primary_address,
         source_address: source.as_ref().and_then(|s| s.address.clone()),
         source_pool: source.map(|s| s.pool.to_string()),
-        memo,
         outputs,
     })
 }
@@ -4591,7 +4588,7 @@ mod tests {
         assert_eq!(got.txid, TxId::from_bytes(txid));
         assert_eq!(got.tx_kind, "sent");
         assert_eq!(got.primary_address.as_deref(), Some("u-recipient"));
-        assert_eq!(got.memo.as_deref(), Some("hello from activity"));
+        assert_eq!(got.outputs[0].memo.as_deref(), Some("hello from activity"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("u-recipient"));
         assert_eq!(got.outputs[0].amount_zatoshi, 1_000_000);
@@ -4864,9 +4861,56 @@ mod tests {
         assert_eq!(got.primary_address, None);
         assert_eq!(got.source_address, None);
         assert_eq!(got.source_pool.as_deref(), Some("unknown"));
-        assert_eq!(got.memo.as_deref(), Some("incoming memo"));
+        assert_eq!(got.outputs[0].memo.as_deref(), Some("incoming memo"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("u-my-receiver"));
+    }
+
+    #[test]
+    fn detail_keeps_every_output_memo() {
+        let db = fresh_history_db();
+        let account = test_account_uuid();
+        let txid = fake_txid(0xDA);
+
+        insert_history_tx(
+            &db,
+            account,
+            &txid,
+            Some(1_000_000),
+            1,
+            Some(1_000_100),
+            3_000_000,
+            0,
+            3_000_000,
+            false,
+            Some("2026-04-28T17:01:00Z"),
+        );
+        for (value, memo) in [(1_000_000, b"first memo"), (2_000_000, b"other memo")] {
+            insert_output_with_address_and_memo(
+                &db,
+                &txid,
+                3,
+                None,
+                Some(account),
+                value,
+                false,
+                Some("u-my-receiver"),
+                Some(0),
+                Some(memo),
+            );
+        }
+
+        let got = get_transaction_detail(
+            db.path().to_str().unwrap(),
+            WalletNetwork::Test,
+            &account.to_string(),
+            &TxId::from_bytes(txid),
+            "received",
+        )
+        .unwrap();
+
+        let memos: Vec<_> = got.outputs.iter().map(|o| o.memo.as_deref()).collect();
+        assert_eq!(memos, [Some("first memo"), Some("other memo")]);
     }
 
     #[test]
@@ -5021,7 +5065,10 @@ mod tests {
         assert_eq!(got.primary_address, None);
         assert_eq!(got.source_address, None);
         assert_eq!(got.source_pool.as_deref(), Some("unknown"));
-        assert_eq!(got.memo.as_deref(), Some("pending incoming memo"));
+        assert_eq!(
+            got.outputs[0].memo.as_deref(),
+            Some("pending incoming memo")
+        );
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(
             got.outputs[0].address.as_deref(),
@@ -5090,11 +5137,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(sent.primary_address.as_deref(), Some("u-self"));
-        assert_eq!(sent.memo.as_deref(), Some("self memo"));
+        assert_eq!(sent.outputs[0].memo.as_deref(), Some("self memo"));
         assert_eq!(sent.outputs.len(), 1);
         assert_eq!(sent.outputs[0].amount_zatoshi, 1_000_000);
         assert_eq!(received.primary_address, None);
-        assert_eq!(received.memo.as_deref(), Some("self memo"));
+        assert_eq!(received.outputs[0].memo.as_deref(), Some("self memo"));
         assert_eq!(received.outputs.len(), 1);
         assert_eq!(received.outputs[0].amount_zatoshi, 1_000_000);
     }
@@ -5141,7 +5188,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.primary_address, None);
-        assert_eq!(got.memo, None);
+        assert!(got.outputs.iter().all(|output| output.memo.is_none()));
         assert!(got.outputs.is_empty());
     }
 
