@@ -887,8 +887,8 @@ fn reopen() -> String {
     }
 }
 
-/// The Settings screen: accounts, servers, hiding balances, and `account`'s
-/// viewing key, until Esc goes back. A saved change reopens zorg.
+/// The Settings screen: accounts, the server for `account`'s network, and
+/// `account`'s viewing key, until Esc goes back. A saved change reopens zorg.
 fn settings(
     root: &std::path::Path,
     account: &zorg::account::Account,
@@ -897,11 +897,12 @@ fn settings(
     options: &HashMap<&'static str, String>,
     hide: bool,
 ) -> Result<(), String> {
-    let server = |url: &Option<String>| url.clone().unwrap_or_else(|| "built-in".into());
+    let server = saved
+        .server(account.network)
+        .unwrap_or_else(|| "built-in".into());
     let items = [
-        format!("{:<15} {}", "Accounts", account.name),
-        format!("{:<15} {}", "Testnet server", server(&saved.server_test)),
-        format!("{:<15} {}", "Mainnet server", server(&saved.server_main)),
+        format!("{:<11} {}", "Accounts", account.name),
+        format!("{:<11} {server}", "Server"),
         "Viewing key".to_string(),
     ];
     let mut current = 0;
@@ -914,8 +915,7 @@ fn settings(
         current = choice;
         let result = match choice {
             0 => switch_account(root, account, accounts, options, saved, hide),
-            1 => choose_server(root, WalletNetwork::Test),
-            2 => choose_server(root, WalletNetwork::Main),
+            1 => choose_server(root, account.network),
             _ => show_viewing_key(account).map(|()| false),
         };
         match result {

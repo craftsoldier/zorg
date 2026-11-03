@@ -256,7 +256,8 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
              server_test TEXT,
              server_main TEXT
          );
-         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');",
+         INSERT OR IGNORE INTO settings (id, user_name, server_test)
+             VALUES (1, 'ZORG', 'https://testnet.zec.rocks:443');",
     )
     .map_err(|e| format!("Could not lock database index: {e}"))?;
     Ok(conn)
