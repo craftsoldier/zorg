@@ -4,7 +4,6 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use rusqlite::OptionalExtension;
 use secrecy::{ExposeSecret, SecretVec};
 
 use zcash_client_backend::data_api::{
@@ -34,15 +33,13 @@ pub struct CreatedAccount {
     pub unified_address: String,
 }
 
-#[derive(Debug)]
-pub struct AccountInfo {
+/// An account as `zorg_index.db` records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
     pub uuid: String,
     pub name: String,
-    pub unified_address: String,
-    pub account_index: u32,
-    pub birthday_height: u32, // scan-from height
-    pub db_path: String,
     pub network: WalletNetwork,
+    pub db_path: String,
 }
 
 fn open_wallet_db_for_init(
@@ -198,44 +195,52 @@ pub fn import_derived_account_at_index(
     })
 }
 
-/// List the seed-derived accounts in the wallet database, including their UUIDs.
-pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<AccountInfo>, String> {
+/// The UUIDs of the accounts in the wallet database.
+pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<String>, String> {
     let db = open_wallet_db_for_read(db_path, network)?;
-
     let account_ids = db
         .get_account_ids()
         .map_err(|e| format!("Failed to list accounts: {e}"))?;
+    Ok(account_ids
+        .into_iter()
+        .map(|id| id.expose_uuid().to_string())
+        .collect())
+}
 
-    let mut accounts = Vec::new();
-    for id in account_ids {
-        let account = db
-            .get_account(id)
-            .map_err(|e| format!("Failed to get account: {e}"))?
-            .ok_or_else(|| format!("Account not found: {}", id.expose_uuid()))?;
-
-        let source = account.source();
-        let Some(derivation) = source.key_derivation() else {
-            continue;
-        };
-
-        let address = match account.ufvk() {
-            Some(ufvk) => current_receive_address(&db, network, id, ufvk)?,
-            None => String::new(),
-        };
-
-        accounts.push(AccountInfo {
-            uuid: id.expose_uuid().to_string(),
-            name: account.name().unwrap_or("").to_string(),
-            unified_address: address,
-            account_index: u32::from(derivation.account_index()),
-            birthday_height: u32::from(account.birthday_height()),
-            db_path: db_path.to_string(),
-            network,
-        });
+/// Fails when `account`'s database file is missing.
+pub fn ensure_database_exists(account: &Account) -> Result<(), String> {
+    if Path::new(&account.db_path).exists() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{:?}: database missing ({})",
+            account.name, account.db_path
+        ))
     }
+}
 
-    accounts.sort_by_key(|a| a.account_index);
-    Ok(accounts)
+/// `account`'s current receiving address, read from its database.
+pub fn current_address(account: &Account) -> Result<String, String> {
+    ensure_database_exists(account)?;
+    let db = open_wallet_db_for_read(&account.db_path, account.network)?;
+    let id = parse_account_uuid(&account.uuid)?;
+    let ufvk = db
+        .get_account(id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .and_then(|a| a.ufvk().cloned())
+        .ok_or_else(|| format!("Account not found: {}", account.uuid))?;
+    current_receive_address(&db, account.network, id, &ufvk)
+}
+
+/// The height `account` scans from, read from its database.
+pub fn birthday_height(account: &Account) -> Result<u32, String> {
+    ensure_database_exists(account)?;
+    let db = open_wallet_db_for_read(&account.db_path, account.network)?;
+    let id = parse_account_uuid(&account.uuid)?;
+    db.get_account(id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .map(|a| u32::from(a.birthday_height()))
+        .ok_or_else(|| format!("Account not found: {}", account.uuid))
 }
 
 /// True when the wallet database has accounts derived from `seed`.
@@ -292,27 +297,44 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
         .map_err(|e| format!("Could not open database index: {e}"))?;
     secure_wallet_db_file(&path)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS databases (db_path TEXT PRIMARY KEY NOT NULL);
+        "CREATE TABLE IF NOT EXISTS accounts (
+             uuid TEXT PRIMARY KEY NOT NULL,
+             name TEXT NOT NULL UNIQUE,
+             network TEXT NOT NULL,
+             db_path TEXT NOT NULL UNIQUE
+         );
          BEGIN IMMEDIATE;",
     )
     .map_err(|e| format!("Could not lock database index: {e}"))?;
     Ok(conn)
 }
 
-/// The database paths in an open `zorg_index.db`, in the order they were added.
-pub fn database_paths(conn: &rusqlite::Connection) -> Result<Vec<PathBuf>, String> {
+/// The accounts in an open `zorg_index.db`, in the order they were added.
+fn indexed_accounts(conn: &rusqlite::Connection) -> Result<Vec<Account>, String> {
+    let error = |e: rusqlite::Error| format!("Could not read database index: {e}");
     let mut stmt = conn
-        .prepare("SELECT db_path FROM databases ORDER BY rowid")
-        .map_err(|e| format!("Could not read database index: {e}"))?;
-    let paths = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .map_err(|e| format!("Could not read database index: {e}"))?;
-    Ok(paths.into_iter().map(PathBuf::from).collect())
+        .prepare("SELECT uuid, name, network, db_path FROM accounts ORDER BY rowid")
+        .map_err(error)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<[String; 4]>, _>>())
+        .map_err(error)?;
+    rows.into_iter()
+        .map(|[uuid, name, network, db_path]| {
+            Ok(Account {
+                uuid,
+                name,
+                network: network.parse()?,
+                db_path,
+            })
+        })
+        .collect()
 }
 
-/// The database paths in `zorg_index.db`, or none when it does not exist.
-pub fn read_database_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// The accounts in `zorg_index.db`, or none when it does not exist.
+pub fn read_index(root: &Path) -> Result<Vec<Account>, String> {
     let path = root.join("zorg_index.db");
     if !path.exists() {
         return Ok(Vec::new());
@@ -320,50 +342,41 @@ pub fn read_database_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
     let conn =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("Could not open database index: {e}"))?;
-    database_paths(&conn)
+    indexed_accounts(&conn)
 }
 
-/// Adds a database path to an open `zorg_index.db`.
-pub fn add_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), String> {
-    let path = path.to_str().ok_or("Database path must be UTF-8")?;
-    conn.execute("INSERT INTO databases (db_path) VALUES (?1)", [path])
-        .map_err(|e| format!("Could not update database index: {e}"))?;
-    Ok(())
-}
-
-/// Removes a database path from an open `zorg_index.db`.
-pub fn remove_database_path(conn: &rusqlite::Connection, path: &Path) -> Result<(), String> {
-    let path = path.to_str().ok_or("Database path must be UTF-8")?;
-    conn.execute("DELETE FROM databases WHERE db_path = ?1", [path])
-        .map_err(|e| format!("Could not update database index: {e}"))?;
-    Ok(())
-}
-
-/// Adds a new wallet database to `zorg_index.db` after checking that its
-/// account name and seed are still unused.
-pub fn index_new_database(
+/// Adds `account` to `zorg_index.db` after checking that its name and seed
+/// are still unused.
+pub fn index_new_account(
     root: &Path,
-    db_path: &Path,
-    name: &str,
+    account: &Account,
     seed: &SecretVec<u8>,
-    network: WalletNetwork,
 ) -> Result<(), String> {
     let index = open_index_for_write(root)?;
-    let databases = database_paths(&index)?;
-    let (accounts, unavailable) = accounts_from_databases(&databases)?;
-    require_available(&unavailable)?;
-    ensure_unique_name(&accounts, name)?;
-    ensure_new_seed(&databases, seed, network)?;
-    add_database_path(&index, db_path)?;
+    let accounts = indexed_accounts(&index)?;
+    ensure_unique_name(&accounts, &account.name)?;
+    ensure_new_seed(&accounts, seed, account.network)?;
+    let db_path = account.db_path.as_str();
+    index
+        .execute(
+            "INSERT INTO accounts (uuid, name, network, db_path) VALUES (?1, ?2, ?3, ?4)",
+            [
+                account.uuid.as_str(),
+                account.name.as_str(),
+                account.network.as_str(),
+                db_path,
+            ],
+        )
+        .map_err(|e| format!("Could not update database index: {e}"))?;
     index
         .execute_batch("COMMIT")
         .map_err(|e| format!("Could not update database index: {e}"))
 }
 
-/// Deletes `account` by removing its wallet database from `zorg_index.db` and
-/// deleting the database file. Fails without deleting anything unless the
-/// database is in `root` and holds exactly this account.
-pub fn delete_account(root: &Path, account: &AccountInfo) -> Result<(), String> {
+/// Deletes `account` from `zorg_index.db` along with its database files, if
+/// any are left. Fails without deleting anything unless the database is in
+/// `root` and, when it exists, holds exactly this account.
+pub fn delete_account(root: &Path, account: &Account) -> Result<(), String> {
     let index = open_index_for_write(root)?;
     let db_path = account.db_path.as_str();
     let in_root = Path::new(db_path)
@@ -376,16 +389,20 @@ pub fn delete_account(root: &Path, account: &AccountInfo) -> Result<(), String> 
             "{db_path} is outside zorg's data directory; not deleting it"
         ));
     }
-    match list_accounts(db_path, account.network)?.as_slice() {
-        [only] if only.uuid == account.uuid => {}
-        _ => {
-            return Err(format!(
-                "{db_path} does not hold exactly account {:?}; not deleting it",
-                account.name
-            ))
+    if Path::new(db_path).exists() {
+        match list_accounts(db_path, account.network)?.as_slice() {
+            [only] if *only == account.uuid => {}
+            _ => {
+                return Err(format!(
+                    "{db_path} does not hold exactly account {:?}; not deleting it",
+                    account.name
+                ))
+            }
         }
     }
-    remove_database_path(&index, Path::new(db_path))?;
+    index
+        .execute("DELETE FROM accounts WHERE uuid = ?1", [&account.uuid])
+        .map_err(|e| format!("Could not update database index: {e}"))?;
     // Dropping `index` without COMMIT keeps the row when a file can't be deleted.
     remove_wallet_files(db_path)?;
     index
@@ -406,70 +423,24 @@ pub fn remove_wallet_files(db: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The accounts in the given databases, and a message for each database that is unavailable.
-pub fn accounts_from_databases(
-    databases: &[PathBuf],
-) -> Result<(Vec<AccountInfo>, Vec<String>), String> {
-    let mut result = Vec::new();
-    let mut unavailable = Vec::new();
-    let mut seen_paths = std::collections::HashSet::new();
-    for path in databases {
-        let canonical = match path.canonicalize() {
-            Ok(path) => path,
-            Err(e) => {
-                unavailable.push(format!("Database unavailable: {} ({e})", path.display()));
-                continue;
-            }
-        };
-        if !seen_paths.insert(canonical) {
-            continue;
-        }
-        match accounts_in_database(path) {
-            Ok(accounts) => result.extend(accounts),
-            Err(e) => unavailable.push(format!("Database unavailable: {} ({e})", path.display())),
-        }
-    }
-    Ok((result, unavailable))
-}
-
-/// The accounts in one wallet database.
-fn accounts_in_database(path: &Path) -> Result<Vec<AccountInfo>, String> {
-    let path = path.to_str().ok_or("Database path must be UTF-8")?;
-    let Some(net) = network_in_wallet_db(path)? else {
-        return Ok(Vec::new());
-    };
-    ensure_custom_wallet_dir(Path::new(path).parent().ok_or("Database has no parent")?)?;
-    secure_wallet_db_file(Path::new(path))?;
-    list_accounts(path, net)
-}
-
-/// Fails when one of `databases` already holds accounts from `seed` on `network`.
+/// Fails when one of `accounts` on `network` already holds accounts from
+/// `seed`. Accounts whose database is missing are skipped.
 pub fn ensure_new_seed(
-    databases: &[PathBuf],
+    accounts: &[Account],
     seed: &secrecy::SecretVec<u8>,
     network: WalletNetwork,
 ) -> Result<(), String> {
-    for path in databases {
-        let path = path.to_str().ok_or("Database path must be UTF-8")?;
-        if network_in_wallet_db(path)? == Some(network) && seed_is_in_wallet(path, network, seed)? {
+    for account in accounts {
+        if account.network != network || !Path::new(&account.db_path).exists() {
+            continue;
+        }
+        if seed_is_in_wallet(&account.db_path, network, seed)? {
             return Err(
                 "This recovery phrase is already known on this network; run `zorg accounts`".into(),
             );
         }
     }
     Ok(())
-}
-
-/// Fails when any database is unavailable.
-pub fn require_available(unavailable: &[String]) -> Result<(), String> {
-    if unavailable.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Reconnect unavailable databases before adding accounts:\n{}",
-            unavailable.join("\n")
-        ))
-    }
 }
 
 /// Fails unless `name` is nonempty, with no surrounding whitespace or control characters.
@@ -485,10 +456,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 }
 
 /// The account named `name`.
-pub fn select<'a>(
-    accounts: &'a [AccountInfo],
-    name: Option<&str>,
-) -> Result<&'a AccountInfo, String> {
+pub fn select<'a>(accounts: &'a [Account], name: Option<&str>) -> Result<&'a Account, String> {
     match name {
         Some(name) => {
             let mut matches = accounts.iter().filter(|a| a.name == name);
@@ -511,7 +479,7 @@ pub fn select<'a>(
 }
 
 /// Fails when `name` is invalid or already used by one of `accounts`.
-pub fn ensure_unique_name(accounts: &[AccountInfo], name: &str) -> Result<(), String> {
+pub fn ensure_unique_name(accounts: &[Account], name: &str) -> Result<(), String> {
     validate_name(name)?;
     if accounts.iter().any(|a| a.name == name) {
         Err(format!(
@@ -536,30 +504,6 @@ pub fn ensure_private_wallet_dir(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to secure wallet directory: {e}"))
 }
 
-/// Creates `path` if needed and fails when other users can access it.
-pub fn ensure_custom_wallet_dir(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .map_err(|e| format!("Failed to create wallet directory: {e}"))?;
-
-    let mode = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to inspect wallet directory: {e}"))?
-        .permissions()
-        .mode();
-    if mode & 0o077 == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "Wallet database directory {} is accessible by other users; use a private directory with permissions 0700",
-            path.display()
-        ))
-    }
-}
-
 /// Sets an existing wallet file's permissions to 0600.
 pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -569,42 +513,6 @@ pub fn secure_wallet_db_file(path: &std::path::Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to secure wallet database: {e}"))?;
     }
     Ok(())
-}
-
-/// The network of the wallet database at `db_path`, or none when it has no accounts.
-pub fn network_in_wallet_db(db_path: &str) -> Result<Option<WalletNetwork>, String> {
-    if !std::path::Path::new(db_path).exists() {
-        return Ok(None);
-    }
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Could not inspect wallet database network: {e}"))?;
-    let has_accounts: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|exists| exists != 0)
-        .map_err(|e| format!("Could not inspect wallet database schema: {e}"))?;
-    if !has_accounts {
-        return Ok(None);
-    }
-    let encoded_key = conn
-        .query_row(
-            "SELECT uivk FROM accounts WHERE uivk IS NOT NULL AND uivk != '' LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| format!("Could not read wallet database network: {e}"))?;
-    let Some(encoded_key) = encoded_key else {
-        return Ok(None);
-    };
-    use zcash_address::unified::Encoding as _;
-    let (network, _, _) = zcash_address::unified::Uivk::decode(&encoded_key).map_err(|e| {
-        format!("Could not determine wallet database network from account key: {e}")
-    })?;
-    Ok(Some(network.into()))
 }
 
 #[cfg(test)]
@@ -632,10 +540,13 @@ mod tests {
         );
 
         // Verify we can read the address back
-        let address2 = list_accounts(db_path_str, WalletNetwork::Main).unwrap()[0]
-            .unified_address
-            .clone();
-        assert_eq!(address, address2);
+        let account = Account {
+            uuid: created.uuid,
+            name: "Account 1".into(),
+            network: WalletNetwork::Main,
+            db_path: db_path_str.into(),
+        };
+        assert_eq!(address, current_address(&account).unwrap());
     }
 
     #[test]
@@ -650,8 +561,14 @@ mod tests {
         let created =
             init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 1")
                 .unwrap();
-        let uuid = created.uuid;
+        let uuid = created.uuid.clone();
         let default_address = created.unified_address;
+        let account = Account {
+            uuid: created.uuid,
+            name: "Account 1".into(),
+            network: WalletNetwork::Main,
+            db_path: db_path_str.into(),
+        };
 
         crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
         let renewed_address = crate::sync::get_next_available_address(
@@ -663,10 +580,7 @@ mod tests {
         .unwrap();
 
         assert_ne!(default_address, renewed_address);
-        assert_eq!(
-            renewed_address,
-            list_accounts(db_path_str, WalletNetwork::Main).unwrap()[0].unified_address
-        );
+        assert_eq!(renewed_address, current_address(&account).unwrap());
     }
 
     #[test]
@@ -676,13 +590,16 @@ mod tests {
         let db = root.path().join("wallet.db");
         let db_str = db.to_str().unwrap();
         let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
-        init_db_and_create_account(db_str, WalletNetwork::Regtest, &seed, Some(1), "A").unwrap();
-        let index = open_index_for_write(root.path()).unwrap();
-        add_database_path(&index, &db).unwrap();
-        index.execute_batch("COMMIT").unwrap();
-        let account = list_accounts(db_str, WalletNetwork::Regtest)
-            .unwrap()
-            .remove(0);
+        let created =
+            init_db_and_create_account(db_str, WalletNetwork::Regtest, &seed, Some(1), "A")
+                .unwrap();
+        let account = Account {
+            uuid: created.uuid,
+            name: "A".into(),
+            network: WalletNetwork::Regtest,
+            db_path: db_str.into(),
+        };
+        index_new_account(root.path(), &account, &seed).unwrap();
         let chflags = |flag: &str| {
             assert!(std::process::Command::new("chflags")
                 .args([flag, db_str])
@@ -697,56 +614,13 @@ mod tests {
         assert!(error.unwrap_err().contains("Could not delete"));
         assert!(db.exists());
         assert_eq!(
-            read_database_paths(root.path()).unwrap(),
-            std::slice::from_ref(&db)
+            read_index(root.path()).unwrap(),
+            std::slice::from_ref(&account)
         );
 
         delete_account(root.path(), &account).unwrap();
         assert!(!db.exists());
-        assert!(read_database_paths(root.path()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn network_in_wallet_db_reads_the_network_from_an_account() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-        assert_eq!(network_in_wallet_db(db_path_str).unwrap(), None);
-
-        ensure_db_initialized(db_path_str, WalletNetwork::Test).unwrap();
-        assert_eq!(network_in_wallet_db(db_path_str).unwrap(), None);
-
-        let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
-        init_db_and_create_account(db_path_str, WalletNetwork::Test, &seed, None, "Account 1")
-            .unwrap();
-        assert_eq!(
-            network_in_wallet_db(db_path_str).unwrap(),
-            Some(WalletNetwork::Test)
-        );
-    }
-
-    #[test]
-    fn a_broken_database_is_unavailable_without_hiding_the_others() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        ensure_private_wallet_dir(temp_dir.path()).unwrap();
-        let good = temp_dir.path().join("good.db");
-        let seed = mnemonic_to_seed(&generate_mnemonic()).unwrap();
-        init_db_and_create_account(
-            good.to_str().unwrap(),
-            WalletNetwork::Test,
-            &seed,
-            None,
-            "Daily",
-        )
-        .unwrap();
-        let broken = temp_dir.path().join("broken.db");
-        std::fs::write(&broken, b"not a wallet database").unwrap();
-
-        let (accounts, unavailable) = accounts_from_databases(&[broken, good]).unwrap();
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].name, "Daily");
-        assert_eq!(unavailable.len(), 1);
-        assert!(unavailable[0].contains("broken.db"));
+        assert!(read_index(root.path()).unwrap().is_empty());
     }
 
     #[test]

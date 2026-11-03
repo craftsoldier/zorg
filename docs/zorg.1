@@ -14,13 +14,19 @@ and broadcasts shielded transfers natively from the terminal. The
 mnemonic is stored in the macOS Keychain; wallet state lives in a
 SQLite database. zorg_index.db and new databases live in
 .IR ~/Library/Application\ Support/zorg/ .
-The index lists absolute paths to known databases. Each account has its own
-database. Account names live in the databases, and each account's phrase is
-stored in Keychain.
+zorg_index.db is the record of which accounts exist: each account's name,
+network, and database path. Each account has its own database, and each
+account's phrase is stored in Keychain.
 The database itself is not encrypted.
-Running zorg without a command lists accounts across all known databases.
-Names are case-sensitive and unique across known databases.
-Missing databases remain in the index and are reported as unavailable.
+Running zorg without a command in a terminal shows the first account's
+balance and address, and
+.B x
+lists every account; with no accounts it offers to create an
+account or import a recovery phrase. Outside a terminal it lists accounts.
+Names are case-sensitive and unique.
+An account whose database is missing is reported as unavailable until
+.B zorg delete
+removes it.
 .SH GLOBAL FLAGS
 Recognized before or after the command:
 .TP

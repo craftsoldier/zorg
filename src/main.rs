@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
 
 mod terminal;
 
@@ -83,7 +82,8 @@ const FLAG_OPTIONS: [&str; 1] = ["--new"];
 
 /// A command line parsed by [`parse_args`].
 struct Args {
-    command: String,
+    /// The command, or none when only `zorg` was typed.
+    command: Option<String>,
     positional: Vec<String>,
     options: HashMap<&'static str, String>,
     help: bool,
@@ -169,11 +169,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
     }
     let mut words = words.into_iter();
-    let command = words.next().unwrap_or_else(|| "accounts".into());
+    let command = words.next();
     let positional: Vec<String> = words.collect();
     if !(help || version) {
+        let command = command.as_deref().unwrap_or("accounts");
         let (usage, accepted, count) =
-            command_spec(&command).ok_or_else(|| format!("Unknown command: {command}"))?;
+            command_spec(command).ok_or_else(|| format!("Unknown command: {command}"))?;
         if let Some(option) = options
             .keys()
             .find(|o| !matches!(**o, "--network" | "--lwd") && !accepted.contains(o))
@@ -203,7 +204,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
     let network = option("--network");
     let lwd = option("--lwd");
-    let cmd = args.command.as_str();
+    let cmd = args.command.as_deref().unwrap_or("accounts");
     if cmd == "validate" {
         let address = match args.positional.first() {
             Some(address) => address.clone(),
@@ -214,13 +215,20 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         return Ok(());
     }
     let network = network.as_deref().map(str::parse).transpose()?;
-    let databases = zorg::account::read_database_paths(&root)?;
-    let (accounts, unavailable) = zorg::account::accounts_from_databases(&databases)?;
-    for message in &unavailable {
-        eprintln!("{message}");
+    let accounts = zorg::account::read_index(&root)?;
+    let mut unavailable = 0;
+    for account in &accounts {
+        if let Err(e) = zorg::account::ensure_database_exists(account) {
+            eprintln!("{e}");
+            unavailable += 1;
+        }
     }
+    let cmd = if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
+        first_run()?
+    } else {
+        cmd
+    };
     if matches!(cmd, "create" | "import") {
-        zorg::account::require_available(&unavailable)?;
         let interactive = terminal::interactive();
         let name = match args.positional.first() {
             Some(name) => name.clone(),
@@ -286,7 +294,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let result = if cmd == "create" {
             endpoint(lwd.as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
-            cmd_import(db, net, birthday, &name, &databases)
+            cmd_import(db, net, birthday, &name, &accounts)
         };
         let created = match result {
             Ok(created) => created,
@@ -295,9 +303,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 return Err(e);
             }
         };
-        if let Err(e) = zorg::account::secure_wallet_db_file(&db_path).and_then(|()| {
-            zorg::account::index_new_database(&root, &db_path, &name, &created.seed, net)
-        }) {
+        let new_account = zorg::account::Account {
+            uuid: created.uuid.clone(),
+            name: name.clone(),
+            network: net,
+            db_path: db.to_string(),
+        };
+        if let Err(e) = zorg::account::secure_wallet_db_file(&db_path)
+            .and_then(|()| zorg::account::index_new_account(&root, &new_account, &created.seed))
+        {
             let _ = zorg::account::remove_wallet_files(db);
             let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
             return Err(e);
@@ -313,16 +327,38 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .into_iter()
         .filter(|a| network.is_none_or(|n| n == a.network))
         .collect();
+    let first = visible
+        .iter()
+        .find(|a| zorg::account::ensure_database_exists(a).is_ok());
+    if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
+        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+            .map_or("unknown".to_string(), |b| {
+                format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
+            });
+        println!(
+            "{} · {}",
+            console::style(&account.name).bold(),
+            account.network.display_name()
+        );
+        println!("{}", terminal::row("balance", 7, balance));
+        let address = zorg::account::current_address(account)?;
+        let address = terminal::address(&address, false);
+        println!("{}\n", terminal::row("address", 7, address));
+        if !terminal::read_key("all accounts", 'x')? {
+            return Ok(());
+        }
+    }
     if cmd == "accounts" {
         if visible.is_empty() {
             println!("No accounts found. Run `zorg create` or `zorg import`.");
         }
         for account in &visible {
+            let address =
+                zorg::account::current_address(account).unwrap_or_else(|_| "(unavailable)".into());
             println!(
-                "  {:<20} {:<7} {}",
+                "  {:<20} {:<7} {address}",
                 account.name,
                 account.network.as_str(),
-                account.unified_address
             );
         }
         return Ok(());
@@ -332,11 +368,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         && name.is_none()
         && visible.len() > 1
         && !matches!(cmd, "sync" | "status");
-    if name.is_none()
-        && !pick_account
-        && !unavailable.is_empty()
-        && !matches!(cmd, "sync" | "status")
-    {
+    if name.is_none() && !pick_account && unavailable > 0 && !matches!(cmd, "sync" | "status") {
         return Err(
             "Some databases are unavailable; choose an account with --account <name>".into(),
         );
@@ -350,7 +382,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let items: Vec<String> = visible
             .iter()
             .map(|a| {
-                let balance = sync::get_wallet_balance(&a.db_path, a.network, &a.uuid)
+                let balance = zorg::account::ensure_database_exists(a)
+                    .and_then(|()| sync::get_wallet_balance(&a.db_path, a.network, &a.uuid))
                     .map(|b| terminal::zec(b.total, 2))
                     .unwrap_or_else(|_| "?".into());
                 format!("{:<20} {balance} {}", a.name, a.network.unit())
@@ -360,25 +393,25 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     } else {
         Some(zorg::account::select(&visible, name.as_deref())?)
     };
+    if let Some(account) = selected.filter(|_| cmd != "delete") {
+        zorg::account::ensure_database_exists(account)?;
+    }
     if matches!(cmd, "sync" | "status") {
         let targets: Vec<_> = selected
             .map(|a| vec![a])
             .unwrap_or_else(|| visible.iter().collect());
-        let missing = if selected.is_none() {
-            unavailable.len()
-        } else {
-            0
-        };
-        let mut failed = missing;
+        let mut failed = 0;
         for account in &targets {
             println!("{}:", account.name);
-            let result = endpoint(lwd.as_deref(), &account.network).and_then(|url| {
-                if cmd == "sync" {
-                    sync_database(&account.db_path, account.network, &url)
-                } else {
-                    print_database_status(&account.db_path, account.network, &url)
-                }
-            });
+            let result = zorg::account::ensure_database_exists(account)
+                .and_then(|()| endpoint(lwd.as_deref(), &account.network))
+                .and_then(|url| {
+                    if cmd == "sync" {
+                        sync_database(&account.db_path, account.network, &url)
+                    } else {
+                        print_database_status(&account.db_path, account.network, &url)
+                    }
+                });
             if let Err(e) = result {
                 eprintln!("Error: {e}");
                 failed += 1;
@@ -387,10 +420,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         return if failed == 0 {
             Ok(())
         } else {
-            Err(format!(
-                "{failed} of {} databases failed",
-                targets.len() + missing
-            ))
+            Err(format!("{failed} of {} databases failed", targets.len()))
         };
     }
     let selected = selected.ok_or("Choose an account")?;
@@ -402,7 +432,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let address = if args.options.contains_key("--new") {
                 sync::get_next_available_address(db, net, uuid, sync::AddressRequestKind::Shielded)?
             } else {
-                selected.unified_address.clone()
+                zorg::account::current_address(selected)?
             };
             println!("{address}");
             Ok(())
@@ -410,7 +440,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         "balance" => cmd_balance(db, net, uuid),
         "send" => {
             let memo = option("--memo");
-            let missing = missing_phrase_error(selected);
+            let birthday = zorg::account::birthday_height(selected)?;
+            let missing = missing_phrase_error(selected, birthday);
             endpoint(lwd.as_deref(), &net).and_then(|url| {
                 cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
             })
@@ -476,6 +507,20 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, Strin
         ));
     }
     Ok(url.to_string())
+}
+
+/// The first-run screen: what zorg is, then a choice of creating or importing an
+/// account. Returns the command to run.
+fn first_run() -> Result<&'static str, String> {
+    println!(
+        "{}",
+        console::style("zorg · a Zcash wallet for your terminal").bold()
+    );
+    terminal::note("Recovery phrases stay in this Mac's Keychain, behind Touch ID.");
+    terminal::note("Run zorg --help to see every command.");
+    println!();
+    let choices = ["Create a new account", "Import a recovery phrase"].map(String::from);
+    Ok(["create", "import"][terminal::pick("Get started", &choices, 0)?])
 }
 
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
@@ -590,11 +635,11 @@ fn cmd_import(
     net: WalletNetwork,
     birthday: Option<u64>,
     name: &str,
-    databases: &[PathBuf],
+    accounts: &[zorg::account::Account],
 ) -> Result<NewAccount, String> {
     let mnemonic = read_mnemonic()?;
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
-    zorg::account::ensure_new_seed(databases, &seed, net)?;
+    zorg::account::ensure_new_seed(accounts, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
     store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
@@ -606,31 +651,41 @@ fn cmd_import(
     })
 }
 
-fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> Result<(), String> {
+/// Deletes `account` after confirming: its index entry, its database if one is
+/// left, and its Keychain phrase.
+fn cmd_delete(root: &std::path::Path, account: &zorg::account::Account) -> Result<(), String> {
     let interactive = terminal::interactive();
+    let address = zorg::account::current_address(account).ok();
     if interactive {
         let unit = account.network.unit();
-        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-            .map_or("unknown".to_string(), |b| {
-                format!("{} {unit}", terminal::zec(b.total, 2))
-            });
+        let balance = address.as_ref().map(|_| {
+            sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+                .map_or("unknown".to_string(), |b| {
+                    format!("{} {unit}", terminal::zec(b.total, 2))
+                })
+        });
         let card = |full: bool| {
-            vec![
-                format!("Delete account {}", console::style(&account.name).bold()),
-                terminal::row(
+            let mut lines = vec![format!(
+                "Delete account {}",
+                console::style(&account.name).bold()
+            )];
+            if let (Some(address), Some(balance)) = (&address, &balance) {
+                lines.push(terminal::row(
                     "address",
                     7,
-                    terminal::address(&account.unified_address, full),
-                ),
-                terminal::row("balance", 7, &balance),
-                String::new(),
-                format!(
-                    "{} zorg can't show the recovery phrase again. Keep your written copy.",
-                    console::style("!").yellow().bold()
-                ),
-            ]
+                    terminal::address(address, full),
+                ));
+                lines.push(terminal::row("balance", 7, balance));
+            }
+            lines.push(String::new());
+            lines.push(format!(
+                "{} zorg can't show the recovery phrase again. Keep your written copy.",
+                console::style("!").yellow().bold()
+            ));
+            lines
         };
-        match terminal::confirm("delete", account.unified_address.len(), None, card) {
+        let width = address.as_ref().map_or(0, String::len);
+        match terminal::confirm("delete", width, None, card) {
             Ok(()) => {}
             Err(e) if e == terminal::CANCELLED => {
                 terminal::note("Cancelled. Nothing was deleted.");
@@ -639,10 +694,10 @@ fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> R
             Err(e) => return Err(e),
         }
     } else {
-        println!(
-            "This deletes account {:?} ({}).",
-            account.name, account.unified_address
-        );
+        match &address {
+            Some(address) => println!("This deletes account {:?} ({address}).", account.name),
+            None => println!("This deletes account {:?}.", account.name),
+        }
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
     }
     zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
@@ -658,7 +713,7 @@ fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> R
 
 /// The error for an account whose recovery phrase is not in this Mac's
 /// Keychain, with the commands that restore it.
-fn missing_phrase_error(account: &zorg::account::AccountInfo) -> String {
+fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> String {
     let network = match account.network {
         WalletNetwork::Main => String::new(),
         net => format!(" --network {}", net.as_str()),
@@ -669,17 +724,14 @@ fn missing_phrase_error(account: &zorg::account::AccountInfo) -> String {
          zorg delete --account {name:?}\n  \
          zorg import {name:?}{network} --birthday {birthday}",
         name = account.name,
-        birthday = account.birthday_height,
     )
 }
 
-fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Result<(), String> {
+fn cmd_recovery(net: WalletNetwork, account: &zorg::account::Account) -> Result<(), String> {
+    let birthday = zorg::account::birthday_height(account)?;
     let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, &account.uuid)?
-        .ok_or_else(|| missing_phrase_error(account))?;
-    print!(
-        "{}",
-        *recovery_phrase_text(&mnemonic, u64::from(account.birthday_height))
-    );
+        .ok_or_else(|| missing_phrase_error(account, birthday))?;
+    print!("{}", *recovery_phrase_text(&mnemonic, u64::from(birthday)));
     Ok(())
 }
 
@@ -704,7 +756,7 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
 }
 
 fn cmd_send(
-    account: &zorg::account::AccountInfo,
+    account: &zorg::account::Account,
     lwd_url: &str,
     positional: &[String],
     memo: Option<&str>,
@@ -893,7 +945,7 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
 }
 
 /// Prints the transaction `txid` in full: one section per history row it makes.
-fn cmd_tx(account: &zorg::account::AccountInfo, txid: &str) -> Result<(), String> {
+fn cmd_tx(account: &zorg::account::Account, txid: &str) -> Result<(), String> {
     let (db, net, uuid) = (
         account.db_path.as_str(),
         account.network,
@@ -1117,24 +1169,16 @@ fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
 mod tests {
     use super::*;
 
-    fn set_database_paths(root: &std::path::Path, paths: &[PathBuf]) {
-        let index = zorg::account::open_index_for_write(root).unwrap();
-        for path in paths {
-            zorg::account::add_database_path(&index, path).unwrap();
-        }
-        index.execute_batch("COMMIT").unwrap();
-    }
-
     #[test]
     fn named_account_commands_use_the_owning_database_on_regtest() {
         let root = tempfile::tempdir().unwrap();
         let index_root = root.path().to_path_buf();
         zorg::account::ensure_private_wallet_dir(root.path()).unwrap();
-        let mut dbs = Vec::new();
+        let mut accounts = Vec::new();
         for name in ["Daily", "Savings", "Travel"] {
             let seed = zorg::keys::mnemonic_to_seed(&zorg::keys::generate_mnemonic()).unwrap();
             let db = root.path().join(format!("{name}.db"));
-            zorg::account::init_db_and_create_account(
+            let created = zorg::account::init_db_and_create_account(
                 db.to_str().unwrap(),
                 WalletNetwork::Regtest,
                 &seed,
@@ -1142,53 +1186,59 @@ mod tests {
                 name,
             )
             .unwrap();
-            dbs.push(db);
+            let account = zorg::account::Account {
+                uuid: created.uuid,
+                name: name.into(),
+                network: WalletNetwork::Regtest,
+                db_path: db.to_str().unwrap().into(),
+            };
+            zorg::account::index_new_account(root.path(), &account, &seed).unwrap();
+            accounts.push(account);
         }
         let command = |args: &[&str]| {
             let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
             args.extend(["--network".into(), "regtest".into()]);
             parse_args(&args).and_then(|args| super::run_in(index_root.clone(), args))
         };
-        let account = |name: &str| {
-            let db = root.path().join(format!("{name}.db"));
-            zorg::account::list_accounts(db.to_str().unwrap(), WalletNetwork::Regtest)
+        let names = || -> Vec<String> {
+            zorg::account::read_index(root.path())
                 .unwrap()
-                .remove(0)
+                .into_iter()
+                .map(|account| account.name)
+                .collect()
         };
-        set_database_paths(root.path(), &dbs);
         command(&[]).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("--account"));
         command(&["address", "--account", "Savings"]).unwrap();
         command(&["balance", "--account", "Travel"]).unwrap();
         command(&["history", "--account", "Daily"]).unwrap();
 
-        zorg::account::delete_account(root.path(), &account("Daily")).unwrap();
-        assert!(!dbs[0].exists());
-        assert_eq!(
-            zorg::account::read_database_paths(root.path()).unwrap(),
-            dbs[1..]
-        );
+        zorg::account::delete_account(root.path(), &accounts[0]).unwrap();
+        assert!(!std::path::Path::new(&accounts[0].db_path).exists());
+        assert_eq!(names(), ["Savings", "Travel"]);
 
         let offline = root.path().join("offline.db");
-        std::fs::rename(&dbs[2], &offline).unwrap();
+        std::fs::rename(&accounts[2].db_path, &offline).unwrap();
         assert!(command(&["balance"]).unwrap_err().contains("unavailable"));
+        assert!(command(&["balance", "--account", "Travel"])
+            .unwrap_err()
+            .contains("database missing"));
         assert_eq!(command(&["status"]).unwrap_err(), "1 of 2 databases failed");
         command(&["status", "--account", "Savings"]).unwrap();
         command(&["balance", "--account", "Savings"]).unwrap();
-        std::fs::rename(&offline, &dbs[2]).unwrap();
+        std::fs::rename(&offline, &accounts[2].db_path).unwrap();
 
-        let mut travel = account("Travel");
-        travel.uuid = account("Savings").uuid;
+        let mut travel = accounts[2].clone();
+        travel.uuid = accounts[1].uuid.clone();
         assert!(zorg::account::delete_account(root.path(), &travel)
             .unwrap_err()
             .contains("not deleting"));
-        assert!(dbs[2].exists());
-        zorg::account::delete_account(root.path(), &account("Travel")).unwrap();
-        assert!(!dbs[2].exists());
-        assert_eq!(
-            zorg::account::read_database_paths(root.path()).unwrap(),
-            [dbs[1].clone()]
-        );
+        assert!(std::path::Path::new(&accounts[2].db_path).exists());
+
+        std::fs::rename(&accounts[2].db_path, &offline).unwrap();
+        zorg::account::delete_account(root.path(), &accounts[2]).unwrap();
+        assert!(offline.exists());
+        assert_eq!(names(), ["Savings"]);
     }
 
     #[test]
@@ -1212,7 +1262,12 @@ mod tests {
             parse(&["balance", "--account", "--help"]).unwrap().options["--account"],
             "--help"
         );
-        assert_eq!(parse(&[]).unwrap().command, "accounts");
+        assert_eq!(parse(&[]).unwrap().command, None);
+        assert_eq!(parse(&["--network", "test"]).unwrap().command, None);
+        assert_eq!(
+            parse(&["accounts"]).unwrap().command.as_deref(),
+            Some("accounts")
+        );
         assert!(parse(&["balance", "--account"]).is_err());
         assert!(parse(&["balance", "--account", "A", "--account", "B"]).is_err());
         assert!(parse(&["balance", "--acount", "A"]).is_err());
@@ -1244,16 +1299,13 @@ mod tests {
 
     #[test]
     fn missing_phrase_error_shows_the_restore_commands() {
-        let account = zorg::account::AccountInfo {
+        let account = zorg::account::Account {
             uuid: String::new(),
             name: "My Savings".into(),
-            unified_address: String::new(),
-            account_index: 0,
-            birthday_height: 2_345_600,
-            db_path: String::new(),
             network: WalletNetwork::Test,
+            db_path: String::new(),
         };
-        let error = missing_phrase_error(&account);
+        let error = missing_phrase_error(&account, 2_345_600);
         assert!(
             error.contains("zorg delete --account \"My Savings\""),
             "{error}"
