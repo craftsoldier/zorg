@@ -294,6 +294,11 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
         )
         .items(items)
         .default(default)
+        .max_length(
+            usize::from(Term::stdout().size().0)
+                .saturating_sub(6)
+                .max(1),
+        )
         .report(false)
         .interact_on_opt(&Term::stdout())
         .map_err(|e| e.to_string())
