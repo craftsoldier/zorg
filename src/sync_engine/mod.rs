@@ -2392,6 +2392,13 @@ pub fn fetch_birthday(
             .await
             .map_err(|e| e.to_string())
     })?;
+    if tree_state.height != height - 1 {
+        return Err(format!(
+            "lightwalletd returned the tree state for height {}, not {}",
+            tree_state.height,
+            height - 1
+        ));
+    }
     AccountBirthday::from_treestate(tree_state, None)
         .map_err(|e| format!("Could not read the tree state before birthday {height}: {e}"))
 }
