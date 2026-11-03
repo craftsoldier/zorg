@@ -215,14 +215,7 @@ pub fn run_full_sync_blocking(
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
-        crate::sync_engine::run_sync_inner(
-            db_path,
-            lightwalletd_url,
-            network,
-            cancel,
-            true,
-            progress,
-        )
-        .await
+        crate::sync_engine::run_sync_inner(db_path, lightwalletd_url, network, cancel, progress)
+            .await
     })
 }
