@@ -282,26 +282,58 @@ pub fn pick(question: &str, items: &[String], default: usize) -> Result<usize, S
     Ok(index)
 }
 
-/// Shows "[key] label   [Esc] quit" and waits for `key` (true) or Esc
-/// (false). Ctrl-C is [`INTERRUPTED`].
-pub fn read_key(label: &str, key: char) -> Result<bool, String> {
+/// Shows `items` as a menu to choose from with the arrow keys, starting at
+/// `default`, with `leave` ("q quit" or "Esc back") in the hint. Returns the
+/// chosen index, or none for q or Esc. The menu is cleared after a choice.
+pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usize>, String> {
+    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt(
+            style(format!("↑↓ move · Enter pick · {leave}"))
+                .dim()
+                .to_string(),
+        )
+        .items(items)
+        .default(default)
+        .report(false)
+        .interact_on_opt(&Term::stdout())
+        .map_err(|e| e.to_string())
+}
+
+/// Clears the terminal.
+pub fn clear() -> Result<(), String> {
+    Term::stdout().clear_screen().map_err(|e| e.to_string())
+}
+
+/// Shows "Esc back" and waits for Esc, Enter, or q. Ctrl-C is [`INTERRUPTED`].
+pub fn wait_for_back() -> Result<(), String> {
     let term = Term::stdout();
-    term.write_line(&format!(
-        "{} {label}   {} quit",
-        style(format!("[{key}]")).bold(),
-        style("[Esc]").bold()
-    ))
-    .map_err(|e| e.to_string())?;
-    let answer = loop {
+    term.write_line(&style("Esc back").dim().to_string())
+        .map_err(|e| e.to_string())?;
+    loop {
         match term.read_key_raw().map_err(|e| e.to_string())? {
-            Key::Escape => break false,
+            Key::Escape | Key::Enter | Key::Char('q') => return Ok(()),
             Key::CtrlC => return Err(INTERRUPTED.to_string()),
-            Key::Char(c) if c.eq_ignore_ascii_case(&key) => break true,
             _ => {}
         }
-    };
-    term.clear_last_lines(1).map_err(|e| e.to_string())?;
-    Ok(answer)
+    }
+}
+
+/// Puts `text` on the macOS clipboard.
+pub fn copy(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not copy: {e}"))?;
+    let written = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(text.as_bytes()));
+    let status = child.wait();
+    match (written, status) {
+        (Some(Ok(())), Ok(status)) if status.success() => Ok(()),
+        _ => Err("Could not copy".into()),
+    }
 }
 
 /// Prints a dimmed line, such as "Cancelled. Nothing was sent."
@@ -328,6 +360,22 @@ impl Progress {
         let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
         bar.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("template"));
         Self(bar)
+    }
+
+    /// A progress bar out of 100 that draws nothing until [`Progress::show`].
+    pub fn hidden_bar() -> Self {
+        let bar = ProgressBar::with_draw_target(Some(100), ProgressDrawTarget::hidden());
+        bar.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {bar:30.cyan/dim} {pos:>3}%  {msg}")
+                .expect("template")
+                .progress_chars("━━─"),
+        );
+        Self(bar)
+    }
+
+    /// Moves a bar to `percent`, from 0 to 100.
+    pub fn set_percent(&self, percent: u64) {
+        self.0.set_position(percent);
     }
 
     /// Shows the spinner with `message`, or changes its message.

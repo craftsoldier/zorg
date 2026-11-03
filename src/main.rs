@@ -331,26 +331,54 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .iter()
         .find(|a| zorg::account::ensure_database_exists(a).is_ok());
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-            .map_or("unknown".to_string(), |b| {
-                format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
-            });
-        println!(
-            "{} · {}",
-            console::style(&account.name).bold(),
-            account.network.display_name()
-        );
-        println!("{}", terminal::row("balance", 7, balance));
-        let address = match zorg::account::current_address(account) {
-            Ok(address) => terminal::address(&address, false),
-            Err(e) => {
-                eprintln!("{e}");
-                "(unavailable)".into()
+        let actions = ["Send", "Receive", "History", "Sync"].map(String::from);
+        loop {
+            terminal::clear()?;
+            let balance =
+                sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+                    .map_or("unknown".to_string(), |b| {
+                        format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
+                    });
+            println!(
+                "{} · {}",
+                console::style(&account.name).bold(),
+                account.network.display_name()
+            );
+            println!("{}", terminal::row("balance", 7, balance));
+            let short = match zorg::account::current_address(account) {
+                Ok(address) => terminal::address(&address, false),
+                Err(e) => {
+                    eprintln!("{e}");
+                    "(unavailable)".into()
+                }
+            };
+            println!("{}\n", terminal::row("address", 7, short));
+            let Some(choice) = terminal::menu("q quit", &actions, 0)? else {
+                return Ok(());
+            };
+            terminal::clear()?;
+            println!("{}\n", console::style(&actions[choice]).bold());
+            let result = match choice {
+                0 => zorg::account::birthday_height(account).and_then(|birthday| {
+                    let missing = missing_phrase_error(account, birthday);
+                    endpoint(lwd.as_deref(), &account.network)
+                        .and_then(|url| cmd_send(account, &url, &[], None, &missing))
+                }),
+                1 => receive(account),
+                2 => cmd_history(&account.db_path, account.network, None, &account.uuid),
+                _ => endpoint(lwd.as_deref(), &account.network)
+                    .and_then(|url| sync_database(&account.db_path, account.network, &url)),
+            };
+            match result {
+                Err(e) if e == terminal::INTERRUPTED => return Err(e),
+                Err(e) if e == terminal::CANCELLED => terminal::note("Cancelled."),
+                Err(e) if e == terminal::REPORTED => {}
+                Err(e) => terminal::failure(&e),
+                Ok(()) if choice == 1 => continue,
+                Ok(()) => {}
             }
-        };
-        println!("{}\n", terminal::row("address", 7, address));
-        if !terminal::read_key("all accounts", 'x')? {
-            return Ok(());
+            println!();
+            terminal::wait_for_back()?;
         }
     }
     if cmd == "accounts" {
@@ -477,7 +505,19 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
 
 /// Syncs one wallet database with the chain.
 fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
-    sync::run_full_sync_blocking(db_path, lwd_url, net)?;
+    let progress = terminal::Progress::hidden_bar();
+    let result = sync::run_full_sync_blocking(db_path, lwd_url, net, |event| {
+        if terminal::interactive() && event.chain_tip_height > 0 {
+            progress.set_percent((event.percentage * 100.0) as u64);
+            progress.show(&format!(
+                "block {} of {}",
+                event.scanned_height.min(event.chain_tip_height),
+                event.chain_tip_height
+            ));
+        }
+    });
+    progress.clear();
+    result?;
     println!("Sync complete.");
     Ok(())
 }
@@ -654,6 +694,38 @@ fn cmd_import(
         seed,
         birthday: None,
     })
+}
+
+/// The Receive screen: `account`'s full address, with Copy address and New
+/// address, until Esc goes back.
+fn receive(account: &zorg::account::Account) -> Result<(), String> {
+    let mut address = zorg::account::current_address(account)?;
+    let mut status: Result<String, String> = Ok(String::new());
+    let actions = ["Copy address", "New address"].map(String::from);
+    loop {
+        terminal::clear()?;
+        println!("{}\n", console::style("Receive").bold());
+        println!("{address}\n");
+        match &status {
+            Ok(message) if message.is_empty() => {}
+            Ok(message) => terminal::note(&format!("{message}\n")),
+            Err(e) => terminal::failure(&format!("{e}\n")),
+        }
+        status = match terminal::menu("Esc back", &actions, 0)? {
+            None => return Ok(()),
+            Some(0) => terminal::copy(&address).map(|()| "Copied.".into()),
+            Some(_) => sync::get_next_available_address(
+                &account.db_path,
+                account.network,
+                &account.uuid,
+                sync::AddressRequestKind::Shielded,
+            )
+            .map(|new| {
+                address = new;
+                "New address.".into()
+            }),
+        };
+    }
 }
 
 /// Deletes `account` after confirming: its index entry, its database if one is
