@@ -15,8 +15,8 @@ USAGE:
 
 COMMANDS:
     accounts                                                List named accounts
-    create [name] [--network <net>]                         Create an account with a new recovery phrase
-    import [name] [--birthday <height>] [--network <net>]   Import a recovery phrase at account index 0
+    create [name] --new [--network <net>]                   Create an account with a new recovery phrase
+    create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
     address [--new] [--account <name>]                      Show the receive address, or make a new one
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
@@ -29,7 +29,7 @@ COMMANDS:
     delete --account <name>                                 Delete an account
 
 OPTIONS:
-    --network <net>      main | test | regtest (create and import)
+    --network <net>      main | test | regtest (create)
     --lwd <url>          Lightwalletd endpoint
     --version, -V        Show version
     --help, -h           Show this help
@@ -78,7 +78,7 @@ const VALUE_OPTIONS: [&str; 6] = [
 ];
 
 /// Options that take no value.
-const FLAG_OPTIONS: [&str; 1] = ["--new"];
+const FLAG_OPTIONS: [&str; 2] = ["--new", "--import"];
 
 /// A command line parsed by [`parse_args`].
 struct Args {
@@ -98,17 +98,8 @@ fn command_spec(
     Some(match cmd {
         "accounts" => ("", &[], 0..=0),
         "create" => (
-            "<name> [--network <net>]",
-            &["--network"],
-            if terminal::interactive() {
-                0..=1
-            } else {
-                1..=1
-            },
-        ),
-        "import" => (
-            "<name> [--birthday <height>] [--network <net>]",
-            &["--birthday", "--network"],
+            "<name> (--new | --import [--birthday <height>]) [--network <net>]",
+            &["--new", "--import", "--birthday", "--network"],
             if terminal::interactive() {
                 0..=1
             } else {
@@ -202,7 +193,6 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 
 fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
-    let network = option("--network");
     let lwd = option("--lwd");
     let cmd = args.command.as_deref().unwrap_or("accounts");
     if cmd == "validate" {
@@ -214,7 +204,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
-    let network = network.as_deref().map(str::parse).transpose()?;
     let accounts = zorg::account::read_index(&root)?;
     let saved = zorg::account::read_settings(&root)?;
     let server = |net: WalletNetwork| lwd.clone().or_else(|| saved.server(net));
@@ -227,104 +216,16 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
         first_run();
-        if add_account(&root, &args.options, "Get started")?.is_none() {
+        if create_account(&root, None, &args.options, &accounts, &server)?.is_none() {
             return Ok(());
         }
+        println!();
+        terminal::wait_for("Enter to open your account")?;
         return run_in(root, args);
     }
-    if matches!(cmd, "create" | "import") {
-        let interactive = terminal::interactive();
-        let name = match args.positional.first() {
-            Some(name) => name.clone(),
-            None => terminal::ask("Account name", false, |name| {
-                zorg::account::ensure_unique_name(&accounts, name)
-            })?,
-        };
-        zorg::account::ensure_unique_name(&accounts, &name)?;
-        let mut birthday: Option<u64> = option("--birthday")
-            .map(|h| h.parse().map_err(|_| "--birthday must be a block height"))
-            .transpose()?;
-        if cmd == "import" && birthday.is_none() && interactive {
-            terminal::note("Scanning from the start takes hours on mainnet.");
-            let height = terminal::ask(
-                "Birthday height (Enter to scan from the start)",
-                true,
-                |h| match h.parse::<u32>() {
-                    Ok(height) if height > 0 => Ok(()),
-                    _ => Err("Enter a block height from 1 to 4294967295".to_string()),
-                },
-            )?;
-            birthday = height.parse().ok();
-        }
-        let net = std::cell::Cell::new(network.unwrap_or(WalletNetwork::Main));
-        if interactive {
-            let (title, action, done) = if cmd == "create" {
-                ("Create", "create", "created")
-            } else {
-                ("Import", "import", "imported")
-            };
-            let card = |_full: bool| {
-                let mut lines = vec![
-                    format!("{title} account {}", console::style(&name).bold()),
-                    terminal::row("network", 8, net.get().display_name()),
-                ];
-                if cmd == "import" {
-                    let from = birthday.map_or("the start".to_string(), |h| h.to_string());
-                    lines.push(terminal::row("birthday", 8, from));
-                }
-                lines
-            };
-            let mut switch = || {
-                let networks = WalletNetwork::ALL;
-                let names = networks.map(|n| n.display_name().to_string());
-                let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
-                net.set(networks[terminal::pick("Network", &names, current)?]);
-                Ok(())
-            };
-            match terminal::confirm(action, 0, Some(("switch network", &mut switch)), card) {
-                Ok(()) => {}
-                Err(e) if e == terminal::CANCELLED => {
-                    terminal::note(&format!("Cancelled. Nothing was {done}."));
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        let net = net.get();
-        zorg::account::ensure_private_wallet_dir(&root)?;
-        let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
-        let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
-        reserve_wallet_file(&db_path)?;
-        let result = if cmd == "create" {
-            endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
-        } else {
-            cmd_import(db, net, birthday, &name, &accounts)
-        };
-        let created = match result {
-            Ok(created) => created,
-            Err(e) => {
-                let _ = zorg::account::remove_wallet_files(db);
-                return Err(e);
-            }
-        };
-        let new_account = zorg::account::Account {
-            uuid: created.uuid.clone(),
-            name: name.clone(),
-            network: net,
-            db_path: db.to_string(),
-        };
-        if let Err(e) = zorg::account::secure_wallet_db_file(&db_path)
-            .and_then(|()| zorg::account::index_new_account(&root, &new_account, &created.seed))
-        {
-            let _ = zorg::account::remove_wallet_files(db);
-            let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
-            return Err(e);
-        }
-        if let Some(birthday) = created.birthday {
-            print!("{}", *recovery_phrase_text(&created.mnemonic, birthday));
-        }
-        println!("Account: {name}");
-        println!("Address: {}", created.unified_address);
+    if cmd == "create" {
+        let name = args.positional.first().map(String::as_str);
+        create_account(&root, name, &args.options, &accounts, &server)?;
         return Ok(());
     }
     let openable = |a: &&zorg::account::Account| zorg::account::ensure_database_exists(a).is_ok();
@@ -389,7 +290,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     if cmd == "accounts" {
         if accounts.is_empty() {
-            println!("No accounts found. Run `zorg create` or `zorg import`.");
+            println!("No accounts found. Run `zorg create`.");
         }
         for account in &accounts {
             let address =
@@ -414,7 +315,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     let selected = if matches!(cmd, "sync" | "status") && name.is_none() {
         if accounts.is_empty() {
-            return Err("No accounts found. Run `zorg create` or `zorg import`.".into());
+            return Err("No accounts found. Run `zorg create`.".into());
         }
         None
     } else if pick_account {
@@ -650,33 +551,138 @@ fn first_run() {
     println!();
 }
 
-/// Asks `question` with a choice of creating an account or importing a
-/// recovery phrase, runs it, and waits until the user is ready to open the new
-/// account. Returns the new account, or none when nothing was added.
-fn add_account(
+/// Creates an account named `name` (asked for when none), with a new recovery
+/// phrase (`--new`) or an imported one (`--import`), asked for in a terminal
+/// when neither is given. The new account becomes the default. Returns it, or
+/// none when the person cancelled.
+fn create_account(
     root: &std::path::Path,
+    name: Option<&str>,
     options: &HashMap<&'static str, String>,
-    question: &str,
+    accounts: &[zorg::account::Account],
+    server: &dyn Fn(WalletNetwork) -> Option<String>,
 ) -> Result<Option<zorg::account::Account>, String> {
-    let ways = ["Create a new account", "Import a recovery phrase"].map(String::from);
-    let command = ["create", "import"][terminal::pick(question, &ways, 0)?];
-    let before = zorg::account::read_index(root)?.len();
-    run_in(
-        root.to_path_buf(),
-        Args {
-            command: Some(command.into()),
-            positional: Vec::new(),
-            options: options.clone(),
-            help: false,
-            version: false,
-        },
-    )?;
-    let Some(added) = zorg::account::read_index(root)?.into_iter().nth(before) else {
-        return Ok(None);
+    let interactive = terminal::interactive();
+    let import = match (
+        options.contains_key("--new"),
+        options.contains_key("--import"),
+    ) {
+        (true, true) => return Err("Choose either --new or --import, not both".into()),
+        (new, import) if new || import => import,
+        _ if interactive => {
+            let ways = ["Import an existing account", "Start a new account"].map(String::from);
+            match terminal::pick("Create account", &ways, 0) {
+                Ok(choice) => choice == 0,
+                Err(e) if e == terminal::CANCELLED => {
+                    terminal::note("Cancelled. Nothing was created.");
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        _ => return Err("Choose --new for a new recovery phrase or --import to import one".into()),
     };
-    println!();
-    terminal::wait_for("Enter to open your account")?;
-    Ok(Some(added))
+    let mut birthday: Option<u64> = options
+        .get("--birthday")
+        .map(|h| h.parse().map_err(|_| "--birthday must be a block height"))
+        .transpose()?;
+    if birthday.is_some() && !import {
+        return Err("--birthday only applies with --import".into());
+    }
+    let name = match name {
+        Some(name) => name.to_string(),
+        None => terminal::ask("Account name", false, |name| {
+            zorg::account::ensure_unique_name(accounts, name)
+        })?,
+    };
+    zorg::account::ensure_unique_name(accounts, &name)?;
+    if import && birthday.is_none() && interactive {
+        terminal::note("Scanning from the start takes hours on mainnet.");
+        let height = terminal::ask(
+            "Birthday height (Enter to scan from the start)",
+            true,
+            |h| match h.parse::<u32>() {
+                Ok(height) if height > 0 => Ok(()),
+                _ => Err("Enter a block height from 1 to 4294967295".to_string()),
+            },
+        )?;
+        birthday = height.parse().ok();
+    }
+    let network = options
+        .get("--network")
+        .map(|n| n.parse())
+        .transpose()?
+        .unwrap_or(WalletNetwork::Main);
+    let net = std::cell::Cell::new(network);
+    if interactive {
+        let (title, action, done) = if import {
+            ("Import", "import", "imported")
+        } else {
+            ("Create", "create", "created")
+        };
+        let card = |_full: bool| {
+            let mut lines = vec![
+                format!("{title} account {}", console::style(&name).bold()),
+                terminal::row("network", 8, net.get().display_name()),
+            ];
+            if import {
+                let from = birthday.map_or("the start".to_string(), |h| h.to_string());
+                lines.push(terminal::row("birthday", 8, from));
+            }
+            lines
+        };
+        let mut switch = || {
+            let networks = WalletNetwork::ALL;
+            let names = networks.map(|n| n.display_name().to_string());
+            let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
+            net.set(networks[terminal::pick("Network", &names, current)?]);
+            Ok(())
+        };
+        match terminal::confirm(action, 0, Some(("switch network", &mut switch)), card) {
+            Ok(()) => {}
+            Err(e) if e == terminal::CANCELLED => {
+                terminal::note(&format!("Cancelled. Nothing was {done}."));
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let net = net.get();
+    zorg::account::ensure_private_wallet_dir(root)?;
+    let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
+    let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
+    reserve_wallet_file(&db_path)?;
+    let result = if import {
+        cmd_import(db, net, birthday, &name, accounts)
+    } else {
+        endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
+    };
+    let created = match result {
+        Ok(created) => created,
+        Err(e) => {
+            let _ = zorg::account::remove_wallet_files(db);
+            return Err(e);
+        }
+    };
+    let new_account = zorg::account::Account {
+        uuid: created.uuid.clone(),
+        name: name.clone(),
+        network: net,
+        db_path: db.to_string(),
+    };
+    if let Err(e) = zorg::account::secure_wallet_db_file(&db_path)
+        .and_then(|()| zorg::account::index_new_account(root, &new_account, &created.seed))
+    {
+        let _ = zorg::account::remove_wallet_files(db);
+        let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
+        return Err(e);
+    }
+    if let Some(birthday) = created.birthday {
+        print!("{}", *recovery_phrase_text(&created.mnemonic, birthday));
+    }
+    println!("Account: {name}");
+    println!("Address: {}", created.unified_address);
+    Ok(Some(new_account))
 }
 
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
@@ -881,7 +887,7 @@ fn settings(
         };
         current = choice;
         let result = match choice {
-            0 => switch_account(root, account, accounts, options, saved.hide_balances),
+            0 => switch_account(root, account, accounts, options, saved),
             1 => choose_server(root, WalletNetwork::Test),
             2 => choose_server(root, WalletNetwork::Main),
             3 => zorg::account::set_hide_balances(root, !saved.hide_balances).map(|()| true),
@@ -902,14 +908,14 @@ fn settings(
 }
 
 /// Settings → Accounts: open another account, add one, or delete one other
-/// than the open `account`, with balances hidden when `hide` is set. Returns
+/// than the open `account`, with balances hidden as `saved` says. Returns
 /// whether anything changed.
 fn switch_account(
     root: &std::path::Path,
     account: &zorg::account::Account,
     accounts: &[zorg::account::Account],
     options: &HashMap<&'static str, String>,
-    hide: bool,
+    saved: &zorg::account::Settings,
 ) -> Result<bool, String> {
     terminal::clear()?;
     println!("{}\n", console::style("Accounts").bold());
@@ -934,12 +940,15 @@ fn switch_account(
     };
     let Some(picked) = accounts.get(choice) else {
         terminal::clear()?;
-        let Some(added) = add_account(root, options, "Add account")? else {
+        let lwd = options.get("--lwd").cloned();
+        let server = |net| lwd.clone().or_else(|| saved.server(net));
+        if create_account(root, None, options, accounts, &server)?.is_none() {
             println!();
             terminal::wait_for("Esc back")?;
             return Ok(false);
-        };
-        zorg::account::set_default_account(root, &added.uuid)?;
+        }
+        println!();
+        terminal::wait_for("Enter to open your account")?;
         return Ok(true);
     };
     if picked.uuid == account.uuid {
@@ -956,7 +965,7 @@ fn switch_account(
         return Ok(true);
     }
     terminal::clear()?;
-    cmd_delete(root, picked, hide)?;
+    cmd_delete(root, picked, saved.hide_balances)?;
     let deleted = zorg::account::read_index(root)?.len() < accounts.len();
     if !deleted {
         println!();
@@ -1170,7 +1179,7 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
         "The recovery phrase for {name:?} isn't in this Mac's Keychain \
          (Keychain entries don't move to a new Mac). Restore it with your written-down phrase:\n  \
          zorg delete --account {name:?}\n  \
-         zorg import {name:?}{network} --birthday {birthday}",
+         zorg create {name:?} --import{network} --birthday {birthday}",
         name = account.name,
     )
 }
@@ -1713,7 +1722,7 @@ mod tests {
         assert!(parse(&["--network", "test"]).is_err());
         assert!(parse(&["balance", "--network", "test"]).is_err());
         assert_eq!(
-            parse(&["import", "Savings", "--network", "test"])
+            parse(&["create", "Savings", "--import", "--network", "test"])
                 .unwrap()
                 .options["--network"],
             "test"
@@ -1765,7 +1774,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("zorg import \"My Savings\" --network test --birthday 2345600"),
+            error.contains("zorg create \"My Savings\" --import --network test --birthday 2345600"),
             "{error}"
         );
     }

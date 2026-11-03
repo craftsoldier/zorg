@@ -38,7 +38,7 @@ removes it.
 Recognized before or after the command:
 .TP
 .BI \-\-network " main|test|regtest"
-The new account's network, for create and import only. Defaults to mainnet.
+The new account's network, for create only. Defaults to mainnet.
 .TP
 .BI \-\-lwd " url"
 lightwalletd endpoint override. Well-known public endpoints are the
@@ -51,15 +51,24 @@ Print usage and exit.
 Print version and exit.
 .SH COMMANDS
 .TP
-.BI zorg\ create " [name]"
-Create a new seed database and print its mnemonic. Ask for a name if omitted. The wallet birthday is the current chain tip (resolved via
-the lightwalletd endpoint) minus 100, rounded down to a multiple of 100,
-and is printed with the address.
+.BI zorg\ create " [name] \-\-new"
+Create an account with a new recovery phrase in a new database and print
+the phrase. Ask for a name if omitted. The wallet birthday is the current
+chain tip (resolved via the lightwalletd endpoint) minus 100, rounded down to
+a multiple of 100, and is printed with the address.
 .TP
-.BI zorg\ import " [name] [\-\-birthday\ height]"
-Import a phrase at derivation index 0 into a new database. Ask for a name if
-omitted. Reject a phrase already known on the same network. Higher
-account-index discovery is not implemented.
+.BI zorg\ create " [name] \-\-import [\-\-birthday\ height]"
+Create an account from an existing phrase, typed at a hidden prompt, at
+derivation index 0 in a new database. Ask for a name if omitted. Reject a
+phrase already known on the same network. Higher account-index discovery is
+not implemented.
+.IP
+In a terminal, create asks which of the two when neither
+.B \-\-new
+nor
+.B \-\-import
+is given; without a terminal one is required. The new account becomes the
+one the app opens.
 .TP
 .B zorg\ accounts
 List all accounts across known databases. Each line shows the account

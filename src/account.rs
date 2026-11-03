@@ -428,8 +428,8 @@ pub fn viewing_key(account: &Account) -> Result<String, String> {
         .map_err(|e| format!("Could not encode viewing key: {e}"))
 }
 
-/// Adds `account` to `zorg_index.db` after checking that its name and seed
-/// are still unused.
+/// Adds `account` to `zorg_index.db` and makes it the default account, after
+/// checking that its name and seed are still unused.
 pub fn index_new_account(
     root: &Path,
     account: &Account,
@@ -452,7 +452,11 @@ pub fn index_new_account(
         )
         .map_err(|e| format!("Could not update database index: {e}"))?;
     index
-        .execute_batch("COMMIT")
+        .execute(
+            "UPDATE settings SET default_account = ?1",
+            [account.uuid.as_str()],
+        )
+        .and_then(|_| index.execute_batch("COMMIT"))
         .map_err(|e| format!("Could not update database index: {e}"))
 }
 
