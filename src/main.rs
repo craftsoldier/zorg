@@ -1153,6 +1153,9 @@ mod tests {
             .unwrap()
             .options
             .contains_key("--new"));
+        let args = parse(&["address", "--new", "--account", "Savings"]).unwrap();
+        assert_eq!(args.options["--new"], "");
+        assert_eq!(args.options["--account"], "Savings");
         assert!(parse(&["address", "--new", "--new"]).is_err());
         assert!(parse(&["balance", "--new"]).is_err());
     }
