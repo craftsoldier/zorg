@@ -34,9 +34,6 @@ OPTIONS:
     --lwd <url>          Lightwalletd endpoint
     --version, -V        Show version
     --help, -h           Show this help
-
-ENV:
-    RUST_LOG             Log level: error | warn | info | debug | trace
 ";
 
 fn main() {
