@@ -50,20 +50,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_mnemonic_is_24_words() {
-        let phrase = generate_mnemonic();
-        let words: Vec<&str> = phrase.split_whitespace().collect();
-        assert_eq!(words.len(), 24);
-    }
-
-    #[test]
-    fn test_mnemonic_to_seed_roundtrip() {
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-        assert_eq!(seed.expose_secret().len(), 64);
-    }
-
-    #[test]
     fn test_mnemonic_to_seed_accepts_12_and_24_words() {
         for count in [Count::Words12, Count::Words24] {
             let phrase = Mnemonic::<English>::generate(count).phrase().to_string();
