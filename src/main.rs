@@ -226,22 +226,10 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
     }
     if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
-        let command = first_run()?;
-        run_in(
-            root.clone(),
-            Args {
-                command: Some(command.into()),
-                positional: Vec::new(),
-                options: args.options.clone(),
-                help: false,
-                version: false,
-            },
-        )?;
-        if zorg::account::read_index(&root)?.is_empty() {
+        first_run();
+        if add_account(&root, &args.options, "Get started")?.is_none() {
             return Ok(());
         }
-        println!();
-        terminal::wait_for("Enter to open your account")?;
         return run_in(root, args);
     }
     if matches!(cmd, "create" | "import") {
@@ -384,7 +372,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                         .and_then(|url| cmd_send(account, &url, &[], None, &missing))
                 }),
                 1 => receive(account),
-                2 => history(account),
+                2 => history(account, hide),
                 _ => settings(&root, account, &accounts, &saved, &args.options),
             };
             match result {
@@ -513,7 +501,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             if name.is_none() && !terminal::interactive() {
                 return Err("Usage: zorg delete --account <name>".into());
             }
-            cmd_delete(&root, selected)
+            cmd_delete(&root, selected, false)
         }
         _ => unreachable!(),
     };
@@ -551,7 +539,8 @@ fn sync_text(account: &zorg::account::Account) -> String {
 }
 
 /// Keeps `account` synced while the app is open: checks the chain tip every
-/// 10 seconds and syncs when the wallet is behind. While `on_account_screen`
+/// 10 seconds and syncs when the wallet is behind. A chosen server `lwd` is
+/// checked once; the built-in list is resolved each time, for failover. While `on_account_screen`
 /// is set, it paints its progress on the sync row, and the balance row after
 /// each sync. Runs until the process exits.
 fn auto_sync(
@@ -568,8 +557,16 @@ fn auto_sync(
             }
         }
     };
+    let mut checked: Option<String> = None;
     loop {
-        let result = endpoint(lwd.as_deref(), &account.network).and_then(|url| {
+        let url = match &checked {
+            Some(url) => Ok(url.clone()),
+            None => endpoint(lwd.as_deref(), &account.network),
+        };
+        let result = url.and_then(|url| {
+            if lwd.is_some() {
+                checked = Some(url.clone());
+            }
             let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
             let progress = sync::get_sync_progress(&account.db_path, account.network)?;
             if progress.is_complete && tip <= progress.chain_tip_height {
@@ -642,9 +639,8 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, Strin
     Ok(url.to_string())
 }
 
-/// The first-run screen: what zorg is, then a choice of creating or importing an
-/// account. Returns the command to run.
-fn first_run() -> Result<&'static str, String> {
+/// The first-run screen: what zorg is.
+fn first_run() {
     println!(
         "{}",
         console::style("zorg · a Zcash wallet for your terminal").bold()
@@ -652,8 +648,35 @@ fn first_run() -> Result<&'static str, String> {
     terminal::note("Recovery phrases stay in this Mac's Keychain, behind Touch ID.");
     terminal::note("Run zorg --help to see every command.");
     println!();
-    let choices = ["Create a new account", "Import a recovery phrase"].map(String::from);
-    Ok(["create", "import"][terminal::pick("Get started", &choices, 0)?])
+}
+
+/// Asks `question` with a choice of creating an account or importing a
+/// recovery phrase, runs it, and waits until the user is ready to open the new
+/// account. Returns the new account, or none when nothing was added.
+fn add_account(
+    root: &std::path::Path,
+    options: &HashMap<&'static str, String>,
+    question: &str,
+) -> Result<Option<zorg::account::Account>, String> {
+    let ways = ["Create a new account", "Import a recovery phrase"].map(String::from);
+    let command = ["create", "import"][terminal::pick(question, &ways, 0)?];
+    let before = zorg::account::read_index(root)?.len();
+    run_in(
+        root.to_path_buf(),
+        Args {
+            command: Some(command.into()),
+            positional: Vec::new(),
+            options: options.clone(),
+            help: false,
+            version: false,
+        },
+    )?;
+    let Some(added) = zorg::account::read_index(root)?.into_iter().nth(before) else {
+        return Ok(None);
+    };
+    println!();
+    terminal::wait_for("Enter to open your account")?;
+    Ok(Some(added))
 }
 
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
@@ -858,7 +881,7 @@ fn settings(
         };
         current = choice;
         let result = match choice {
-            0 => switch_account(root, account, accounts, options),
+            0 => switch_account(root, account, accounts, options, saved.hide_balances),
             1 => choose_server(root, WalletNetwork::Test),
             2 => choose_server(root, WalletNetwork::Main),
             3 => zorg::account::set_hide_balances(root, !saved.hide_balances).map(|()| true),
@@ -878,13 +901,15 @@ fn settings(
     }
 }
 
-/// Settings → Accounts: open another account, add one, or delete one.
-/// Returns whether anything changed.
+/// Settings → Accounts: open another account, add one, or delete one other
+/// than the open `account`, with balances hidden when `hide` is set. Returns
+/// whether anything changed.
 fn switch_account(
     root: &std::path::Path,
     account: &zorg::account::Account,
     accounts: &[zorg::account::Account],
     options: &HashMap<&'static str, String>,
+    hide: bool,
 ) -> Result<bool, String> {
     terminal::clear()?;
     println!("{}\n", console::style("Accounts").bold());
@@ -908,43 +933,36 @@ fn switch_account(
         return Ok(false);
     };
     let Some(picked) = accounts.get(choice) else {
-        let ways = ["Create a new account", "Import a recovery phrase"].map(String::from);
-        let command = ["create", "import"][terminal::pick("Add account", &ways, 0)?];
-        let before = zorg::account::read_index(root)?.len();
-        run_in(
-            root.to_path_buf(),
-            Args {
-                command: Some(command.into()),
-                positional: Vec::new(),
-                options: options.clone(),
-                help: false,
-                version: false,
-            },
-        )?;
-        let Some(added) = zorg::account::read_index(root)?.into_iter().nth(before) else {
+        terminal::clear()?;
+        let Some(added) = add_account(root, options, "Add account")? else {
+            println!();
+            terminal::wait_for("Esc back")?;
             return Ok(false);
         };
-        println!();
-        terminal::wait_for("Enter to open your account")?;
         zorg::account::set_default_account(root, &added.uuid)?;
         return Ok(true);
     };
-    let mut actions = vec!["Delete account".to_string()];
-    if picked.uuid != account.uuid {
-        actions.insert(0, "Open account".into());
+    if picked.uuid == account.uuid {
+        return Ok(false);
     }
+    let actions = ["Open account", "Delete account"].map(String::from);
     terminal::clear()?;
     println!("{}\n", console::style(&picked.name).bold());
     let Some(action) = terminal::menu("Esc back", &actions, 0)? else {
         return Ok(false);
     };
-    if actions[action] == "Open account" {
+    if action == 0 {
         zorg::account::set_default_account(root, &picked.uuid)?;
         return Ok(true);
     }
     terminal::clear()?;
-    cmd_delete(root, picked)?;
-    Ok(zorg::account::read_index(root)?.len() < accounts.len())
+    cmd_delete(root, picked, hide)?;
+    let deleted = zorg::account::read_index(root)?.len() < accounts.len();
+    if !deleted {
+        println!();
+        terminal::wait_for("Esc back")?;
+    }
+    Ok(deleted)
 }
 
 /// Settings → a network's server: the built-in list, or a URL that serves
@@ -994,8 +1012,9 @@ fn show_viewing_key(account: &zorg::account::Account) -> Result<(), String> {
 }
 
 /// The History screen: `account`'s transactions, pending first and then
-/// newest first, with Enter to show one in full, until Esc goes back.
-fn history(account: &zorg::account::Account) -> Result<(), String> {
+/// newest first, with amounts as dots when `hide` is set, and Enter to show
+/// one in full, until Esc goes back.
+fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
     let (db, net, uuid) = (
         account.db_path.as_str(),
         account.network,
@@ -1019,11 +1038,12 @@ fn history(account: &zorg::account::Account) -> Result<(), String> {
                 "migration" => ("↔".to_string(), " ", "Migration"),
                 _ => ("↔".to_string(), " ", "Unknown"),
             };
-            let amount = format!(
-                "{sign}{} {}",
-                terminal::zec(tx.display_amount, 2),
-                net.unit()
-            );
+            let amount = if hide {
+                "••••".to_string()
+            } else {
+                terminal::zec(tx.display_amount, 2)
+            };
+            let amount = format!("{sign}{amount} {}", net.unit());
             let when = match tx.mined_height {
                 0 if tx.expired_unmined => "expired".to_string(),
                 0 => "pending".to_string(),
@@ -1068,17 +1088,29 @@ fn ago(seconds: u64) -> String {
 }
 
 /// Deletes `account` after confirming: its index entry, its database if one is
-/// left, and its Keychain phrase.
-fn cmd_delete(root: &std::path::Path, account: &zorg::account::Account) -> Result<(), String> {
+/// left, and its Keychain phrase. The card shows the balance as dots when
+/// `hide` is set.
+fn cmd_delete(
+    root: &std::path::Path,
+    account: &zorg::account::Account,
+    hide: bool,
+) -> Result<(), String> {
     let interactive = terminal::interactive();
     let address = zorg::account::current_address(account).ok();
     if interactive {
         let unit = account.network.unit();
         let balance = address.as_ref().map(|_| {
-            sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-                .map_or("unknown".to_string(), |b| {
-                    format!("{} {unit}", terminal::zec(b.total, 2))
-                })
+            sync::get_wallet_balance(&account.db_path, account.network, &account.uuid).map_or(
+                "unknown".to_string(),
+                |b| {
+                    let amount = if hide {
+                        "••••".into()
+                    } else {
+                        terminal::zec(b.total, 2)
+                    };
+                    format!("{amount} {unit}")
+                },
+            )
         });
         let card = |full: bool| {
             let mut lines = vec![format!(

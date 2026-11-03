@@ -306,10 +306,14 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
 
 /// Shows `items` as a menu like [`menu`], where pressing `key` answers
 /// `items.len()`, as if it were one more item named `name` in the hint.
-/// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. The menu is cleared after.
+/// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. Lines are cut to the
+/// terminal's width, and the menu is cleared after.
 pub fn menu_with_key(items: &[String], key: char, name: &str) -> Result<Option<usize>, String> {
     let term = Term::stdout();
-    let hint = format!("↑↓ move · Enter pick · {key} {name} · q quit");
+    let width = usize::from(term.size().1).saturating_sub(2);
+    let fit = |text: &str| console::truncate_str(text, width, "…").into_owned();
+    let hint = fit(&format!("↑↓ move · Enter pick · {key} {name} · q quit"));
+    let items: Vec<String> = items.iter().map(|item| fit(item)).collect();
     let draw = |current: usize| -> std::io::Result<()> {
         term.write_line(&style(&hint).dim().to_string())?;
         for (i, item) in items.iter().enumerate() {
