@@ -1744,6 +1744,10 @@ async fn run_sync_impl(
             )));
         }
 
+        // Fetch the tip for the post-batch resubmit pass while the scan runs.
+        let mut tip_client = client.clone();
+        let tip_fetch = tokio::spawn(async move { get_latest_block(&mut tip_client).await });
+
         // Scan from memory. There are three reorg-adjacent signals from
         // librustzcash that all need to land on `SyncError::Continuity`
         // so the rewind recovery below fires:
@@ -2016,7 +2020,9 @@ async fn run_sync_impl(
         // tip. Refreshing here is one extra unary gRPC per batch,
         // which is cheap compared to the batch download itself and
         // closes the "resubmit expired tx forever" regression
-        // caught by Codex 2nd-round review finding 2.
+        // caught by Codex 2nd-round review finding 2. The request
+        // starts before the scan, so the tip is at most one scan
+        // and enhancement old.
         //
         // Pre-flight guard matches the one at the startup resubmit
         // call site — if cancel or mode-change landed during
@@ -2039,8 +2045,10 @@ async fn run_sync_impl(
             );
             return Ok(());
         }
-        match get_latest_block(&mut client)
+        match tip_fetch
             .await
+            .map_err(|e| SyncError::other(format!("tip fetch task: {e}")))
+            .and_then(|tip| tip)
             .map(|tip| tip.height as u32)
         {
             Ok(fresh_tip_height) => {
