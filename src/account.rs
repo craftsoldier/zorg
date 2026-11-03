@@ -269,6 +269,7 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
     secure_wallet_db_file(&path)?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
+         BEGIN IMMEDIATE;
          CREATE TABLE IF NOT EXISTS accounts (
              uuid TEXT PRIMARY KEY NOT NULL,
              name TEXT NOT NULL UNIQUE,
@@ -283,8 +284,7 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
              server_test TEXT,
              server_main TEXT
          );
-         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');
-         BEGIN IMMEDIATE;",
+         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');",
     )
     .map_err(|e| format!("Could not lock database index: {e}"))?;
     Ok(conn)

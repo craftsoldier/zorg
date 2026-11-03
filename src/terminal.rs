@@ -304,15 +304,19 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
         .map_err(|e| e.to_string())
 }
 
-/// Shows `items` as a menu like [`menu`], where pressing `key` answers
-/// `items.len()`, as if it were one more item named `name` in the hint.
+/// Shows `items` as a menu like [`menu`], where pressing the `i`th of `keys`
+/// answers `items.len() + i`, as if it were one more item, named in the hint.
 /// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. Lines are cut to the
 /// terminal's width, and the menu is cleared after.
-pub fn menu_with_key(items: &[String], key: char, name: &str) -> Result<Option<usize>, String> {
+pub fn menu_with_keys(items: &[String], keys: &[(char, &str)]) -> Result<Option<usize>, String> {
     let term = Term::stdout();
     let width = usize::from(term.size().1).saturating_sub(2);
     let fit = |text: &str| console::truncate_str(text, width, "…").into_owned();
-    let hint = fit(&format!("↑↓ move · Enter pick · {key} {name} · q quit"));
+    let named: Vec<String> = keys
+        .iter()
+        .map(|(key, name)| format!("{key} {name} · "))
+        .collect();
+    let hint = fit(&format!("↑↓ move · Enter pick · {}q quit", named.concat()));
     let items: Vec<String> = items.iter().map(|item| fit(item)).collect();
     let draw = |current: usize| -> std::io::Result<()> {
         term.write_line(&style(&hint).dim().to_string())?;
@@ -339,8 +343,11 @@ pub fn menu_with_key(items: &[String], key: char, name: &str) -> Result<Option<u
                 None
             }
             Key::Enter => Some(Some(current)),
-            Key::Char(c) if c == key => Some(Some(items.len())),
             Key::Escape | Key::Char('q') => Some(None),
+            Key::Char(c) => keys
+                .iter()
+                .position(|(key, _)| *key == c)
+                .map(|i| Some(items.len() + i)),
             Key::CtrlC => {
                 let _ = term.show_cursor();
                 return Err(INTERRUPTED.to_string());
