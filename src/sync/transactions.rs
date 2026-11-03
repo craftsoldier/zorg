@@ -1857,10 +1857,8 @@ impl TxBase {
 /// resubmit path at `sync::send::resubmit_pending_transactions`
 /// consumes this struct directly.
 pub(crate) struct ResubmittableTx {
-    pub txid_bytes: Vec<u8>,
+    pub txid: TxId,
     pub raw_tx: Vec<u8>,
-    #[allow(dead_code)]
-    pub expiry_height: u32,
 }
 
 /// Return every wallet transaction that is eligible for automatic
@@ -1887,7 +1885,7 @@ pub(crate) struct ResubmittableTx {
 ///
 /// A transaction that touches more than one of the wallet's own
 /// accounts shows up as more than one row in `v_transactions`; we
-/// `SELECT DISTINCT` on `(txid, raw, expiry_height)` to collapse
+/// `SELECT DISTINCT` on `(txid, raw)` to collapse
 /// that into a single broadcast instead of double-sending the same
 /// bytes.
 pub(crate) fn get_resubmittable_txs(
@@ -1898,7 +1896,7 @@ pub(crate) fn get_resubmittable_txs(
 
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT txid, raw, expiry_height \
+            "SELECT DISTINCT txid, raw \
              FROM v_transactions \
              WHERE mined_height IS NULL \
                AND (expiry_height = 0 OR expiry_height > ?1) \
@@ -1909,18 +1907,9 @@ pub(crate) fn get_resubmittable_txs(
 
     let rows = stmt
         .query_map([current_height], |row| {
-            let txid_bytes: Vec<u8> = row.get(0)?;
-            let raw_tx: Vec<u8> = row.get(1)?;
-            // The WHERE clause rejects NULL expiry heights but still
-            // permits 0 as the protocol no-expiry marker.
-            let expiry_height: u32 = row
-                .get::<_, Option<i64>>(2)?
-                .map(|h| h.max(0) as u32)
-                .unwrap_or(0);
             Ok(ResubmittableTx {
-                txid_bytes,
-                raw_tx,
-                expiry_height,
+                txid: TxId::from_bytes(row.get(0)?),
+                raw_tx: row.get(1)?,
             })
         })
         .map_err(|e| format!("Query error: {e}"))?;
@@ -1931,7 +1920,6 @@ pub(crate) fn get_resubmittable_txs(
 
 /// Returns resubmittable transactions after filtering `excluded_txids` before
 /// loading raw transaction bytes.
-#[cfg(test)]
 pub(crate) fn get_resubmittable_txs_excluding(
     db_path: &str,
     current_height: u32,
@@ -1945,7 +1933,7 @@ pub(crate) fn get_resubmittable_txs_excluding(
     let candidate_metadata = {
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT txid, expiry_height \
+                "SELECT DISTINCT txid \
                  FROM v_transactions \
                  WHERE mined_height IS NULL \
                    AND (expiry_height = 0 OR expiry_height > ?1) \
@@ -1954,14 +1942,7 @@ pub(crate) fn get_resubmittable_txs_excluding(
             )
             .map_err(|e| format!("SQL error: {e}"))?;
         let rows = stmt
-            .query_map([current_height], |row| {
-                let txid_bytes: Vec<u8> = row.get(0)?;
-                let expiry_height = row
-                    .get::<_, Option<i64>>(1)?
-                    .map(|h| h.max(0) as u32)
-                    .unwrap_or(0);
-                Ok((txid_bytes, expiry_height))
-            })
+            .query_map([current_height], |row| row.get::<_, [u8; 32]>(0))
             .map_err(|e| format!("Query error: {e}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("Row error: {e}"))?
@@ -1972,15 +1953,14 @@ pub(crate) fn get_resubmittable_txs_excluding(
         .map_err(|e| format!("SQL error: {e}"))?;
     candidate_metadata
         .into_iter()
-        .filter(|(txid_bytes, _)| !excluded_txids.contains(txid_bytes))
-        .map(|(txid_bytes, expiry_height)| {
+        .filter(|txid| !excluded_txids.contains(txid.as_slice()))
+        .map(|txid| {
             let raw_tx = raw_stmt
-                .query_row([&txid_bytes], |row| row.get::<_, Vec<u8>>(0))
+                .query_row([&txid], |row| row.get::<_, Vec<u8>>(0))
                 .map_err(|e| format!("Raw transaction query error: {e}"))?;
             Ok(ResubmittableTx {
-                txid_bytes,
+                txid: TxId::from_bytes(txid),
                 raw_tx,
-                expiry_height,
             })
         })
         .collect()
@@ -5613,9 +5593,8 @@ mod tests {
         insert_row(&db, &txid, Some(&raw), None, Some(1_000_100), -5_000);
         let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert_eq!(got.len(), 1, "outbound pending tx must appear exactly once");
-        assert_eq!(got[0].txid_bytes, txid.to_vec());
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].raw_tx, raw);
-        assert_eq!(got[0].expiry_height, 1_000_100);
     }
 
     #[test]
@@ -5656,7 +5635,7 @@ mod tests {
             get_resubmittable_txs_excluding(db.path().to_str().unwrap(), 1_000_000, &excluded)
                 .unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid_bytes, pending_txid);
+        assert_eq!(got[0].txid, TxId::from_bytes(pending_txid));
     }
 
     #[test]
@@ -5675,9 +5654,8 @@ mod tests {
             1,
             "no-expiry outbound pending tx must be resubmittable"
         );
-        assert_eq!(got[0].txid_bytes, txid.to_vec());
+        assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].raw_tx, raw);
-        assert_eq!(got[0].expiry_height, 0);
     }
 
     #[test]

@@ -287,7 +287,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
         reserve_wallet_file(&db_path)?;
         let result = if cmd == "create" {
-            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| cmd_create(db, net, &url, &name))
+            endpoint(lwd.as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
             cmd_import(db, net, birthday, &name, &databases)
         };
@@ -375,7 +375,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let mut failed = missing;
         for account in &targets {
             println!("{}:", account.name);
-            let result = endpoint(lwd.as_deref(), &account.network, cmd).and_then(|url| {
+            let result = endpoint(lwd.as_deref(), &account.network).and_then(|url| {
                 if cmd == "sync" {
                     sync_database(&account.db_path, account.network, &url)
                 } else {
@@ -414,7 +414,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         "send" => {
             let memo = option("--memo");
             let missing = missing_phrase_error(selected);
-            endpoint(lwd.as_deref(), &net, cmd).and_then(|url| {
+            endpoint(lwd.as_deref(), &net).and_then(|url| {
                 cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
             })
         }
@@ -463,9 +463,9 @@ fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Re
 
 /// The lightwalletd endpoint for `net`: the explicit one, which must not serve
 /// a different network, or a default one.
-fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<String, String> {
+fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, String> {
     let Some(url) = explicit else {
-        return Ok(resolve_default_lwd_url(net, cmd));
+        return Ok(resolve_default_lwd_url(net));
     };
     let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
     let served = WalletNetwork::from_sapling_activation_height(height);
@@ -695,17 +695,15 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     );
     println!("Locked:     {}", fmt_zec(bal.locked, net));
     println!("Total:      {}", fmt_zec(bal.total, net));
-    if bal.transparent > 0 {
-        println!("  Transparent: {}", fmt_zec(bal.transparent, net));
-    }
-    if bal.sapling > 0 {
-        println!("  Sapling:      {}", fmt_zec(bal.sapling, net));
-    }
-    if bal.orchard > 0 {
-        println!("  Orchard:      {}", fmt_zec(bal.orchard, net));
-    }
-    if bal.ironwood > 0 {
-        println!("  Ironwood:     {}", fmt_zec(bal.ironwood, net));
+    for (pool, value) in [
+        ("Transparent:", bal.transparent),
+        ("Sapling:", bal.sapling),
+        ("Orchard:", bal.orchard),
+        ("Ironwood:", bal.ironwood),
+    ] {
+        if value > 0 {
+            println!("  {pool:<13} {}", fmt_zec(value, net));
+        }
     }
     Ok(())
 }
@@ -1079,13 +1077,9 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
 }
 
 /// Pick a lightwalletd endpoint when the user did not specify one.
-fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
+fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
     let candidates = net.default_lightwalletd_urls();
-    let needs_network = matches!(cmd, "sync" | "create" | "send");
     let Some((first_alive, attempts)) = candidates.iter().enumerate().find_map(|(i, url)| {
-        if !needs_network {
-            return None;
-        }
         match zorg::sync_engine::get_latest_block_height(url) {
             Ok(_) => Some((url, i + 1)),
             Err(e) => {
@@ -1094,8 +1088,8 @@ fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
             }
         }
     }) else {
-        // No probe needed, or every candidate refused the connection: the
-        // primary default is returned and the command itself reports failure.
+        // Every candidate refused the connection: the primary default is
+        // returned and the command itself reports failure.
         return candidates[0].to_string();
     };
     if attempts > 1 {
