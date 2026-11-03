@@ -824,15 +824,15 @@ fn history(account: &zorg::account::Account) -> Result<(), String> {
     let items: Vec<String> = txs
         .iter()
         .map(|tx| {
-            let (arrow, sign) = match tx.tx_kind.as_str() {
-                "received" | "receiving" => (console::style("↓").green().to_string(), "+"),
-                "sent" => (console::style("↑").to_string(), "−"),
-                _ => ("↔".to_string(), " "),
+            let (arrow, sign, kind) = match tx.tx_kind.as_str() {
+                "received" | "receiving" => {
+                    (console::style("↓").green().to_string(), "+", "Received")
+                }
+                "sent" => ("↑".to_string(), "−", "Sent"),
+                "shielded" => ("↔".to_string(), " ", "Shielding"),
+                "migration" => ("↔".to_string(), " ", "Migration"),
+                _ => ("↔".to_string(), " ", "Unknown"),
             };
-            let mut kind = tx.tx_kind.clone();
-            if let Some(first) = kind.get_mut(..1) {
-                first.make_ascii_uppercase();
-            }
             let amount = format!(
                 "{sign}{} {}",
                 terminal::zec(tx.display_amount, 2),
