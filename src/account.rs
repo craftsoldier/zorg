@@ -63,15 +63,6 @@ fn open_wallet_db_for_read(
     open_wallet_db_for_read_with_timeout(db_path, network, READ_DB_BUSY_TIMEOUT)
 }
 
-/// Initialize the wallet DB schema without binding a seed.
-pub fn ensure_db_initialized(db_path: &str, network: WalletNetwork) -> Result<(), String> {
-    with_wallet_db_write_lock("keys.ensure_db_initialized", || {
-        let mut db = open_wallet_db_for_init(db_path, network)?;
-        init_wallet_db(&mut db, None).map_err(|e| format!("Failed to init wallet DB: {e}"))?;
-        Ok(())
-    })
-}
-
 /// Ensure the wallet DB schema is initialized and migrated once per process.
 ///
 /// This intentionally runs without a seed. Most migrations, including the
@@ -95,7 +86,11 @@ pub fn ensure_db_migrated_once(db_path: &str, network: WalletNetwork) -> Result<
     }
 
     log::info!("wallet DB migration gate: ensuring schema for {db_path}");
-    ensure_db_initialized(db_path, network)?;
+    with_wallet_db_write_lock("keys.ensure_db_initialized", || {
+        let mut db = open_wallet_db_for_init(db_path, network)?;
+        init_wallet_db(&mut db, None).map_err(|e| format!("Failed to init wallet DB: {e}"))?;
+        Ok::<_, String>(())
+    })?;
     migrated.insert(key);
     Ok(())
 }
@@ -116,20 +111,13 @@ fn ensure_db_initialized_with_seed(
 }
 
 fn make_birthday(network: WalletNetwork, birthday_height: Option<u64>) -> AccountBirthday {
-    match birthday_height {
-        Some(h) => {
-            let height = BlockHeight::from_u32(h as u32);
-            let chain_state = ChainState::empty(height - 1, BlockHash([0u8; 32]));
-            AccountBirthday::from_parts(chain_state, None)
-        }
-        None => {
-            let sapling_height = network
-                .activation_height(NetworkUpgrade::Sapling)
-                .expect("Sapling activation height must be known");
-            let chain_state = ChainState::empty(sapling_height - 1, BlockHash([0u8; 32]));
-            AccountBirthday::from_parts(chain_state, None)
-        }
-    }
+    let height = match birthday_height {
+        Some(h) => BlockHeight::from_u32(h as u32),
+        None => network
+            .activation_height(NetworkUpgrade::Sapling)
+            .expect("Sapling activation height must be known"),
+    };
+    AccountBirthday::from_parts(ChainState::empty(height - 1, BlockHash([0u8; 32])), None)
 }
 
 /// Init DB + create the bootstrap software account as Derived.
@@ -212,22 +200,6 @@ pub fn birthday_height(account: &Account) -> Result<u32, String> {
         .map_err(|e| format!("Failed to get account: {e}"))?
         .map(|a| u32::from(a.birthday_height()))
         .ok_or_else(|| format!("Account not found: {}", account.uuid))
-}
-
-/// True when the wallet database has accounts derived from `seed`.
-pub fn seed_is_in_wallet(
-    db_path: &str,
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-) -> Result<bool, String> {
-    let db = open_wallet_db_for_read(db_path, network)?;
-    let relevance = db
-        .seed_relevance_to_derived_accounts(seed)
-        .map_err(|e| format!("Failed to check recovery phrase: {e}"))?;
-    Ok(matches!(
-        relevance,
-        zcash_client_backend::data_api::SeedRelevance::Relevant { .. }
-    ))
 }
 
 /// Parse an account UUID string into the backend's AccountUuid.
@@ -523,25 +495,20 @@ pub fn ensure_new_seed(
         if account.network != network || !Path::new(&account.db_path).exists() {
             continue;
         }
-        if seed_is_in_wallet(&account.db_path, network, seed)? {
+        let db = open_wallet_db_for_read(&account.db_path, network)?;
+        let relevance = db
+            .seed_relevance_to_derived_accounts(seed)
+            .map_err(|e| format!("Failed to check recovery phrase: {e}"))?;
+        if matches!(
+            relevance,
+            zcash_client_backend::data_api::SeedRelevance::Relevant { .. }
+        ) {
             return Err(
                 "This recovery phrase is already known on this network; run `zorg accounts`".into(),
             );
         }
     }
     Ok(())
-}
-
-/// Fails unless `name` is nonempty, with no surrounding whitespace or control characters.
-pub fn validate_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
-        Err(
-            "Account name must be nonempty, with no surrounding whitespace or control characters"
-                .into(),
-        )
-    } else {
-        Ok(())
-    }
 }
 
 /// The account named `name`.
@@ -569,7 +536,12 @@ pub fn select<'a>(accounts: &'a [Account], name: Option<&str>) -> Result<&'a Acc
 
 /// Fails when `name` is invalid or already used by one of `accounts`.
 pub fn ensure_unique_name(accounts: &[Account], name: &str) -> Result<(), String> {
-    validate_name(name)?;
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        return Err(
+            "Account name must be nonempty, with no surrounding whitespace or control characters"
+                .into(),
+        );
+    }
     if accounts.iter().any(|a| a.name == name) {
         Err(format!(
             "Account name {name:?} already exists; choose another name"
