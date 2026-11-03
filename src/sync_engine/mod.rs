@@ -1415,9 +1415,9 @@ async fn run_sync_impl(
     // Prefetched block source from the previous iteration.
     // When the scan loop processes a range that spans multiple batches,
     // we kick off a background download of the next batch while running
-    // enhancement / resubmit / progress reporting for the current
+    // scan / enhancement / resubmit / progress reporting for the current
     // batch. This overlaps network I/O (download) with CPU-bound
-    // work (enhancement) and unrelated gRPC calls (resubmit), matching
+    // work (scan) and unrelated gRPC calls (resubmit), matching
     // the SDK's `.buffer(1)` pipelining pattern in
     // `CompactBlockProcessor.kt:1666`.
     //
@@ -1677,6 +1677,42 @@ async fn run_sync_impl(
                 u32::from(start),
                 u32::from(end),
             )));
+        }
+
+        // Prefetch: if the current range still has blocks beyond
+        // `end`, kick off a background download of the next batch
+        // now, so it runs while this batch is scanned, enhanced and
+        // resubmitted. The download runs on a cloned gRPC client so
+        // it doesn't conflict with the main client's unary RPCs
+        // (tree_state, get_latest_block, etc.).
+        //
+        // When the range is exhausted (end == range.end), we skip
+        // the prefetch — the next range comes from
+        // suggest_scan_ranges() which needs the DB state the current
+        // scan just committed, and we can't predict it in advance.
+        if end < range_end && !cancel.load(Ordering::Relaxed) {
+            let pf_start = end;
+            // Recompute batch_size for the prefetch range in case
+            // it crosses a sandblasting boundary differently.
+            if let Some((_, pf_end)) =
+                scannable_batch_end(base_batch_size, pf_start, range_end, current_tip_height)
+            {
+                let mut pf_client = client.clone();
+                prefetch = Some(Prefetch {
+                    start: pf_start,
+                    end: pf_end,
+                    handle: Some(tokio::spawn(async move {
+                        download_blocks(&mut pf_client, pf_start, pf_end - 1).await
+                    })),
+                });
+            } else {
+                log::debug!(
+                    "[{}] sync: skipping prefetch from {} past current tip {}",
+                    elapsed(),
+                    u32::from(pf_start),
+                    current_tip_height,
+                );
+            }
         }
 
         // Fetch and validate the frontier before projecting the checkpoints
@@ -2146,43 +2182,6 @@ async fn run_sync_impl(
         progress_fn(progress);
         #[cfg(debug_assertions)]
         maybe_sleep_for_e2e_sync_batch_delay().await;
-
-        // Prefetch: if the current range still has blocks beyond
-        // `end`, kick off a background download of the next batch
-        // now, while the next loop iteration does suggest_scan_ranges
-        // + phase bookkeeping + (potentially) enhancement for the
-        // batch we just finished. The download runs on a cloned
-        // gRPC client so it doesn't conflict with the main client's
-        // unary RPCs (tree_state, get_latest_block, etc.).
-        //
-        // When the range is exhausted (end == range.end), we skip
-        // the prefetch — the next range comes from
-        // suggest_scan_ranges() which needs the DB state the current
-        // scan just committed, and we can't predict it in advance.
-        if end < range_end && !cancel.load(Ordering::Relaxed) {
-            let pf_start = end;
-            // Recompute batch_size for the prefetch range in case
-            // it crosses a sandblasting boundary differently.
-            if let Some((_, pf_end)) =
-                scannable_batch_end(base_batch_size, pf_start, range_end, current_tip_height)
-            {
-                let mut pf_client = client.clone();
-                prefetch = Some(Prefetch {
-                    start: pf_start,
-                    end: pf_end,
-                    handle: Some(tokio::spawn(async move {
-                        download_blocks(&mut pf_client, pf_start, pf_end - 1).await
-                    })),
-                });
-            } else {
-                log::debug!(
-                    "[{}] sync: skipping prefetch from {} past current tip {}",
-                    elapsed(),
-                    u32::from(pf_start),
-                    current_tip_height,
-                );
-            }
-        }
     }
 
     let (final_scanned_height, final_tip_height) =
