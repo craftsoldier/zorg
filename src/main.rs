@@ -648,6 +648,16 @@ fn create_account(
         }
     }
     let net = net.get();
+    if let Some(birthday) = birthday {
+        let url = endpoint(server(net).as_deref(), &net)?;
+        let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
+        if birthday > tip {
+            return Err(format!(
+                "Birthday {birthday} is above {}'s current height {tip}",
+                net.display_name()
+            ));
+        }
+    }
     zorg::account::ensure_private_wallet_dir(root)?;
     let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
     let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
