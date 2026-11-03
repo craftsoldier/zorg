@@ -686,10 +686,8 @@ fn cmd_recovery(net: WalletNetwork, account: &zorg::account::AccountInfo) -> Res
 fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     let bal = sync::get_wallet_balance(db, net, uuid)?;
     println!("Spendable:  {}", fmt_zec(bal.spendable, net));
-    println!(
-        "Pending:    {}",
-        fmt_zec(bal.value_pending_spendability, net)
-    );
+    let pending = bal.change_pending_confirmation + bal.value_pending_spendability;
+    println!("Pending:    {}", fmt_zec(pending, net));
     println!("Locked:     {}", fmt_zec(bal.locked, net));
     println!("Total:      {}", fmt_zec(bal.total, net));
     for (pool, value) in [
@@ -975,9 +973,10 @@ fn parse_txid(text: &str) -> Result<zcash_primitives::transaction::TxId, String>
 
 // ── helpers ──
 
-/// Testnet (and regtest) coins are worthless by design — say so.
+/// `zatoshis` with all 8 decimal places and the network's unit, e.g. "0.29000000 TAZ".
 fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
-    format!("{:.8} {}", zatoshis as f64 / 100_000_000.0, net.unit())
+    let (whole, fraction) = (zatoshis / 100_000_000, zatoshis % 100_000_000);
+    format!("{whole}.{fraction:08} {}", net.unit())
 }
 
 /// Unix seconds since the epoch (0 if the clock is somehow before 1970).
