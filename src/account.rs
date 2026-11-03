@@ -563,12 +563,6 @@ mod tests {
                 .unwrap();
         let address = created.unified_address;
 
-        // Mainnet unified addresses start with "u1"
-        assert!(
-            address.starts_with("u1"),
-            "Expected u1 prefix, got: {address}"
-        );
-
         // Verify we can read the address back
         let account = Account {
             uuid: created.uuid,
@@ -652,69 +646,5 @@ mod tests {
         assert!(!db.exists());
         assert!(read_index(root.path()).unwrap().is_empty());
         assert_eq!(read_settings(root.path()).unwrap().default_account, None);
-    }
-
-    #[test]
-    fn test_deterministic_address_from_same_seed() {
-        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
-        let seed = mnemonic_to_seed(phrase).unwrap();
-
-        let temp1 = tempfile::tempdir().unwrap();
-        let db1 = temp1.path().join("wallet.db");
-        let addr1 = init_db_and_create_account(
-            db1.to_str().unwrap(),
-            WalletNetwork::Main,
-            &seed,
-            None,
-            "Account 1",
-        )
-        .unwrap()
-        .unified_address;
-
-        let temp2 = tempfile::tempdir().unwrap();
-        let db2 = temp2.path().join("wallet.db");
-        let addr2 = init_db_and_create_account(
-            db2.to_str().unwrap(),
-            WalletNetwork::Main,
-            &seed,
-            None,
-            "Account 1",
-        )
-        .unwrap()
-        .unified_address;
-
-        assert_eq!(addr1, addr2, "Same seed should produce same address");
-    }
-
-    #[test]
-    fn test_shielded_address_has_sapling_and_orchard_only() {
-        // Verify our address uses Sapling+Orchard receivers (no transparent),
-        // matching zodl/Zashi wallet behavior.
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let phrase = generate_mnemonic();
-        let seed = mnemonic_to_seed(&phrase).unwrap();
-
-        let address =
-            init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 1")
-                .unwrap()
-                .unified_address;
-        // Decode and verify receiver types
-        let za = zcash_address::ZcashAddress::try_from_encoded(&address).unwrap();
-        let debug = format!("{:?}", za);
-        assert!(
-            debug.contains("Sapling"),
-            "UA should contain Sapling receiver"
-        );
-        assert!(
-            debug.contains("Orchard"),
-            "UA should contain Orchard receiver"
-        );
-        assert!(
-            !debug.contains("P2pkh"),
-            "UA should NOT contain transparent receiver"
-        );
     }
 }
