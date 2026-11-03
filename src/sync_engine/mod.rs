@@ -79,8 +79,9 @@ const BATCH_SIZE: u32 = 2000;
 /// contain a very large number of outputs from a sustained spam
 /// attack, making `scan_cached_blocks` significantly more expensive
 /// per block. We reduce the batch size to `BATCH_SIZE_SANDBLASTING`
-/// when any part of the scan range falls inside this window to
-/// avoid excessive memory pressure and potential timeouts.
+/// when the batch starts inside this window to avoid excessive
+/// memory pressure and potential timeouts; batches before it end
+/// at the window's start.
 ///
 /// Matches `zcash-android-wallet-sdk`'s `SANDBLASTING_RANGE` in
 /// `CompactBlockProcessor.kt:1171-1181`.
@@ -116,14 +117,14 @@ pub(crate) fn elapsed() -> String {
         .unwrap_or_default()
 }
 
-fn batch_size_for_range(base_batch_size: u32, start: BlockHeight, range_end: BlockHeight) -> u32 {
-    let start_u32 = u32::from(start);
-    let range_end_u32 = u32::from(range_end);
-    // Overlap check: range [start, range_end) ∩ [SANDBLASTING_START, SANDBLASTING_END)
-    if start_u32 < SANDBLASTING_END && range_end_u32 > SANDBLASTING_START {
+fn batch_size_for_range(base_batch_size: u32, start: BlockHeight) -> u32 {
+    let start = u32::from(start);
+    if start >= SANDBLASTING_END {
+        base_batch_size
+    } else if start >= SANDBLASTING_START {
         BATCH_SIZE_SANDBLASTING
     } else {
-        base_batch_size
+        base_batch_size.min(SANDBLASTING_START - start)
     }
 }
 
@@ -143,7 +144,7 @@ fn scannable_batch_end(
         return None;
     }
 
-    let batch_size = batch_size_for_range(base_batch_size, start, available_end);
+    let batch_size = batch_size_for_range(base_batch_size, start);
     let end = std::cmp::min(start + batch_size, available_end);
     Some((batch_size, end))
 }
@@ -2152,8 +2153,7 @@ async fn run_sync_impl(
             .find(|r| is_pending_scan_range(r))
             .map(|r| {
                 let next_start = r.block_range().start;
-                let next_batch_size =
-                    batch_size_for_range(base_batch_size, next_start, r.block_range().end);
+                let next_batch_size = batch_size_for_range(base_batch_size, next_start);
                 let next_end = std::cmp::min(next_start + next_batch_size, r.block_range().end);
                 (next_start, next_end)
             });
@@ -2537,6 +2537,38 @@ mod tests {
                 121,
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn batches_before_sandblasting_end_at_its_start() {
+        assert_eq!(
+            batch_size_for_range(2_000, BlockHeight::from_u32(1_300_000)),
+            2_000
+        );
+        assert_eq!(
+            batch_size_for_range(2_000, BlockHeight::from_u32(1_709_000)),
+            1_000
+        );
+    }
+
+    #[test]
+    fn batches_inside_sandblasting_use_the_small_size() {
+        assert_eq!(
+            batch_size_for_range(2_000, BlockHeight::from_u32(SANDBLASTING_START)),
+            BATCH_SIZE_SANDBLASTING
+        );
+        assert_eq!(
+            batch_size_for_range(2_000, BlockHeight::from_u32(SANDBLASTING_END - 1)),
+            BATCH_SIZE_SANDBLASTING
+        );
+    }
+
+    #[test]
+    fn batches_after_sandblasting_use_the_base_size() {
+        assert_eq!(
+            batch_size_for_range(2_000, BlockHeight::from_u32(SANDBLASTING_END)),
+            2_000
         );
     }
 
