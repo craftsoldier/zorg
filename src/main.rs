@@ -759,9 +759,7 @@ fn cmd_send(
         }
         memo => memo,
     };
-    let send_flow_id = uuid::Uuid::new_v4().to_string();
-
-    let proposal = sync::propose_send(db, net, uuid, &send_flow_id, to, amount_zat, memo)?;
+    let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
     let fee = proposal.fee_zatoshi;
     let summary = send_summary(to, amount_zat, fee, memo, net);
     let card = |full: bool| {
@@ -796,10 +794,8 @@ fn cmd_send(
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(sync::execute_proposal_with_seed_loader(
-        db,
         lwd_url,
-        proposal.proposal_id,
-        &send_flow_id,
+        proposal,
         |network, account| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
             if interactive {

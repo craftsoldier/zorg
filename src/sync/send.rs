@@ -32,10 +32,7 @@ use zcash_protocol::{
 use crate::account::parse_account_uuid;
 use crate::db::{with_wallet_db_write_lock, WalletDatabase};
 use crate::network::WalletNetwork;
-use crate::sync::{
-    consume_stored_proposal, finish_stored_proposal, open_readonly_conn, open_wallet_db,
-    stored_proposal_lock, StoredProposal, StoredProposalLock, PROPOSAL_STORE,
-};
+use crate::sync::{open_readonly_conn, open_wallet_db, proposal_locks};
 
 pub type WalletFeeRule = StandardFeeRule;
 
@@ -43,8 +40,13 @@ const SEND_PROPOSAL_LOCK_BLOCKS: u32 = 40;
 
 // ======================== Result Structs ========================
 
+/// A send proposal whose inputs are locked to `owner` until it is executed or released.
 pub struct ProposalResult {
-    pub proposal_id: u64,
+    proposal: zcash_client_backend::proposal::Proposal<WalletFeeRule, ReceivedNoteId>,
+    network: WalletNetwork,
+    account_id: AccountUuid,
+    db_path: String,
+    owner: LockOwner,
     pub fee_zatoshi: u64,
 }
 
@@ -221,14 +223,10 @@ pub fn propose_send(
     db_path: &str,
     network: WalletNetwork,
     account_uuid: &str,
-    send_flow_id: &str,
     to_address: &str,
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<ProposalResult, String> {
-    if send_flow_id.is_empty() {
-        return Err("Send flow id is required".into());
-    }
     with_wallet_db_write_lock("send.propose_send", || {
         let mut db = open_wallet_db(db_path, network)?;
         let account_id = parse_account_uuid(account_uuid)?;
@@ -266,40 +264,18 @@ pub fn propose_send(
         let lock_expiry =
             send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        crate::sync::proposal_locks::persist(db_path, lock_owner, &input_refs, lock_expiry)?;
+        proposal_locks::persist(db_path, lock_owner, &input_refs, lock_expiry)?;
         if let Err(e) = db.lock_outputs(&input_refs, lock_owner, lock_expiry) {
-            let _ = crate::sync::proposal_locks::remove(db_path, lock_owner);
+            let _ = proposal_locks::remove(db_path, lock_owner);
             return Err(format!("Lock inputs: {e:?}"));
         }
 
-        let mut store = PROPOSAL_STORE
-            .lock()
-            .map_err(|e| format!("Lock store: {e}"))?;
-        let id = store.next_id;
-        store.next_id += 1;
-        store.locks.insert(
-            id,
-            StoredProposalLock {
-                proposal: proposal.clone(),
-                network,
-                db_path: db_path.to_string(),
-                owner: lock_owner,
-                send_flow_id: send_flow_id.to_string(),
-            },
-        );
-        store.proposals.insert(
-            id,
-            StoredProposal {
-                proposal_id: id,
-                proposal,
-                network,
-                account_id,
-                send_flow_id: send_flow_id.to_string(),
-            },
-        );
-
         Ok(ProposalResult {
-            proposal_id: id,
+            proposal,
+            network,
+            account_id,
+            db_path: db_path.to_string(),
+            owner: lock_owner,
             fee_zatoshi: fee,
         })
     })
@@ -345,44 +321,47 @@ pub fn estimate_fee(
 
 // ======================== Execute ========================
 
+/// Forgets `stored`'s lock record, first unlocking its inputs when `release_inputs`.
+fn finish_proposal(stored: &ProposalResult, release_inputs: bool) -> Result<(), String> {
+    if !release_inputs {
+        return proposal_locks::remove(&stored.db_path, stored.owner);
+    }
+    with_wallet_db_write_lock("sync.unlock_proposal", || {
+        let mut db = open_wallet_db(&stored.db_path, stored.network)?;
+        wallet::unlock_proposal_inputs(&mut db, &stored.proposal, stored.owner)
+            .map_err(|e| format!("Unlock abandoned send proposal inputs: {e}"))?;
+        proposal_locks::remove(&stored.db_path, stored.owner)
+    })
+}
+
 pub async fn execute_proposal_with_seed_loader<F>(
-    db_path: &str,
     lightwalletd_url: &str,
-    proposal_id: u64,
-    send_flow_id: &str,
+    stored: ProposalResult,
     load_seed: F,
     on_broadcast: &dyn Fn(),
 ) -> Result<ExecuteProposalResult, String>
 where
     F: FnOnce(WalletNetwork, AccountUuid) -> Result<SecretVec<u8>, String>,
 {
-    let stored = consume_stored_proposal(proposal_id, send_flow_id, "Proposal not found")?;
     let seed = load_seed(stored.network, stored.account_id).inspect_err(|_| {
-        let _ = finish_stored_proposal(proposal_id, send_flow_id, true);
+        let _ = finish_proposal(&stored, true);
     })?;
-    execute_stored(db_path, lightwalletd_url, stored, seed, on_broadcast).await
+    execute_stored(lightwalletd_url, stored, seed, on_broadcast).await
 }
 
 async fn execute_stored(
-    db_path: &str,
     lightwalletd_url: &str,
-    stored: StoredProposal,
+    stored: ProposalResult,
     seed: SecretVec<u8>,
     on_broadcast: &dyn Fn(),
 ) -> Result<ExecuteProposalResult, String> {
     let network = stored.network;
-    let proposal_id = stored.proposal_id;
-    let send_flow_id = stored.send_flow_id.clone();
-    let proposal_lock = stored_proposal_lock(proposal_id, &send_flow_id)?;
-    if proposal_lock.db_path != db_path {
-        let _ = finish_stored_proposal(proposal_id, &send_flow_id, true);
-        return Err("Wrong wallet DB".into());
-    }
+    let db_path = stored.db_path.as_str();
     let min_target = BlockHeight::from(stored.proposal.min_target_height());
     let live_expiry = live_send_expiry_height(lightwalletd_url, min_target)
         .await
         .inspect_err(|_| {
-            let _ = finish_stored_proposal(proposal_id, &send_flow_id, true);
+            let _ = finish_proposal(&stored, true);
         })?;
 
     let create_result = with_wallet_db_write_lock("send.execute", || {
@@ -396,11 +375,11 @@ async fn execute_stored(
         }
         db.lock_outputs(
             &proposal_input_refs(&stored.proposal),
-            proposal_lock.owner,
+            stored.owner,
             live_expiry,
         )
         .map_err(|e| format!("Relock: {e:?}"))?;
-        crate::sync::proposal_locks::update_expiry(db_path, proposal_lock.owner, live_expiry)?;
+        proposal_locks::update_expiry(db_path, stored.owner, live_expiry)?;
 
         let account = db
             .get_account(stored.account_id)
@@ -463,11 +442,11 @@ async fn execute_stored(
 
     let txids = match create_result {
         Ok(txids) => {
-            let _ = finish_stored_proposal(proposal_id, &send_flow_id, false);
+            let _ = finish_proposal(&stored, false);
             txids
         }
         Err(e) => {
-            let _ = finish_stored_proposal(proposal_id, &send_flow_id, true);
+            let _ = finish_proposal(&stored, true);
             return Err(e);
         }
     };

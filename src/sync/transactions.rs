@@ -14,8 +14,7 @@
 //! in `sync_engine/mod.rs`. They're one-shot lookups the UI drives
 //! directly, so extracting them into their own submodule keeps
 //! `sync/mod.rs` focused on per-wallet infrastructure (DB open,
-//! chain-tip update, scan range management) and the shared
-//! PROPOSAL_STORE used by the software send path.
+//! chain-tip update, scan range management).
 
 use std::{
     collections::{HashMap, HashSet},
