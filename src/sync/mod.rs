@@ -191,9 +191,8 @@ use std::sync::Arc;
 pub fn run_full_sync_blocking(
     db_path: &str,
     lightwalletd_url: &str,
-    network: &str,
+    network: WalletNetwork,
 ) -> Result<(), String> {
-    let network = crate::keys::parse_network(network)?;
     crate::account::ensure_db_migrated_once(db_path, network)?;
     let cancel = Arc::new(AtomicBool::new(false));
 

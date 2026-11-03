@@ -604,12 +604,7 @@ pub fn network_in_wallet_db(db_path: &str) -> Result<Option<WalletNetwork>, Stri
     let (network, _, _) = zcash_address::unified::Uivk::decode(&encoded_key).map_err(|e| {
         format!("Could not determine wallet database network from account key: {e}")
     })?;
-    use zcash_protocol::consensus::NetworkType;
-    Ok(Some(match network {
-        NetworkType::Main => WalletNetwork::Main,
-        NetworkType::Test => WalletNetwork::Test,
-        NetworkType::Regtest => WalletNetwork::Regtest,
-    }))
+    Ok(Some(network.into()))
 }
 
 #[cfg(test)]
