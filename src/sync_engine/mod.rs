@@ -1165,7 +1165,6 @@ pub async fn run_sync_inner(
     lightwalletd_url: &str,
     network: WalletNetwork,
     cancel: Arc<AtomicBool>,
-    allow_resubmit: bool,
     progress_fn: impl Fn(SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
     const MAX_RETRIES: u32 = 3;
@@ -1201,7 +1200,6 @@ pub async fn run_sync_inner(
             lightwalletd_url,
             network,
             cancel.clone(),
-            allow_resubmit,
             &progress_fn,
         )
         .await
@@ -1256,7 +1254,6 @@ async fn run_sync_impl(
     lightwalletd_url: &str,
     network: WalletNetwork,
     cancel: Arc<AtomicBool>,
-    allow_resubmit: bool,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
     let default_batch_size = BATCH_SIZE;
@@ -1340,9 +1337,7 @@ async fn run_sync_impl(
     // slow connection, which is long enough for the user to hit
     // stop. Skip the whole pass in that case instead of sending
     // one more round of broadcasts after the UI asked us to quit.
-    if !allow_resubmit {
-        log::info!("[{}] sync: startup resubmit disabled", elapsed());
-    } else if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Relaxed) {
         log::info!(
             "[{}] sync: cancel/mode observed before startup resubmit, skipping",
             elapsed(),
@@ -2086,16 +2081,14 @@ async fn run_sync_impl(
                         }
                     }
                 }
-                if allow_resubmit {
-                    let _ = crate::sync::resubmit_pending_transactions(
-                        db_data_path,
-                        &mut client,
-                        fresh_tip_height,
-                        &resubmit_exclusions,
-                        || cancel.load(Ordering::Relaxed),
-                    )
-                    .await;
-                }
+                let _ = crate::sync::resubmit_pending_transactions(
+                    db_data_path,
+                    &mut client,
+                    fresh_tip_height,
+                    &resubmit_exclusions,
+                    || cancel.load(Ordering::Relaxed),
+                )
+                .await;
             }
             Err(e) => {
                 log::warn!(
