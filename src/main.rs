@@ -15,8 +15,8 @@ USAGE:
 
 COMMANDS:
     accounts                                                List named accounts
-    create [name]                                           Create an account with a new recovery phrase
-    import [name] [--birthday <height>]                     Import a recovery phrase at account index 0
+    create [name] [--network <net>]                         Create an account with a new recovery phrase
+    import [name] [--birthday <height>] [--network <net>]   Import a recovery phrase at account index 0
     balance [--account <name>]                              Show balance
     address [--new] [--account <name>]                      Show the receive address, or make a new one
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
@@ -29,7 +29,7 @@ COMMANDS:
     delete --account <name>                                 Delete an account
 
 OPTIONS:
-    --network <net>      main | test | regtest
+    --network <net>      main | test | regtest (create and import)
     --lwd <url>          Lightwalletd endpoint
     --version, -V        Show version
     --help, -h           Show this help
@@ -67,7 +67,7 @@ fn run(args: &[String]) -> Result<(), String> {
     run_in(zorg::account::wallet_dir()?, args)
 }
 
-/// Options that take a value. `--network` and `--lwd` apply to every command.
+/// Options that take a value. `--lwd` applies to every command.
 const VALUE_OPTIONS: [&str; 6] = [
     "--network",
     "--lwd",
@@ -98,8 +98,8 @@ fn command_spec(
     Some(match cmd {
         "accounts" => ("", &[], 0..=0),
         "create" => (
-            "<name>",
-            &[],
+            "<name> [--network <net>]",
+            &["--network"],
             if terminal::interactive() {
                 0..=1
             } else {
@@ -107,8 +107,8 @@ fn command_spec(
             },
         ),
         "import" => (
-            "<name> [--birthday <height>]",
-            &["--birthday"],
+            "<name> [--birthday <height>] [--network <net>]",
+            &["--birthday", "--network"],
             if terminal::interactive() {
                 0..=1
             } else {
@@ -177,7 +177,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             command_spec(command).ok_or_else(|| format!("Unknown command: {command}"))?;
         if let Some(option) = options
             .keys()
-            .find(|o| !matches!(**o, "--network" | "--lwd") && !accepted.contains(o))
+            .find(|o| **o != "--lwd" && !accepted.contains(o))
         {
             return Err(format!("{option} is not an option of zorg {command}"));
         }
@@ -225,7 +225,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
         let command = first_run()?;
-        let mut args = args;
         run_in(
             root.clone(),
             Args {
@@ -241,7 +240,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
         println!();
         terminal::wait_for("Enter to open your account")?;
-        args.options.remove("--network");
         return run_in(root, args);
     }
     if matches!(cmd, "create" | "import") {
@@ -339,11 +337,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         println!("Address: {}", created.unified_address);
         return Ok(());
     }
-    let visible: Vec<_> = accounts
-        .into_iter()
-        .filter(|a| network.is_none_or(|n| n == a.network))
-        .collect();
-    let first = visible
+    let first = accounts
         .iter()
         .find(|a| zorg::account::ensure_database_exists(a).is_ok());
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
@@ -396,10 +390,10 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
     }
     if cmd == "accounts" {
-        if visible.is_empty() {
+        if accounts.is_empty() {
             println!("No accounts found. Run `zorg create` or `zorg import`.");
         }
-        for account in &visible {
+        for account in &accounts {
             let address =
                 zorg::account::current_address(account).unwrap_or_else(|_| "(unavailable)".into());
             println!(
@@ -413,7 +407,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let name = option("--account");
     let pick_account = terminal::interactive()
         && name.is_none()
-        && visible.len() > 1
+        && accounts.len() > 1
         && !matches!(cmd, "sync" | "status");
     if name.is_none() && !pick_account && unavailable > 0 && !matches!(cmd, "sync" | "status") {
         return Err(
@@ -421,12 +415,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         );
     }
     let selected = if matches!(cmd, "sync" | "status") && name.is_none() {
-        if visible.is_empty() {
+        if accounts.is_empty() {
             return Err("No accounts found. Run `zorg create` or `zorg import`.".into());
         }
         None
     } else if pick_account {
-        let items: Vec<String> = visible
+        let items: Vec<String> = accounts
             .iter()
             .map(|a| {
                 let balance = zorg::account::ensure_database_exists(a)
@@ -436,9 +430,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 format!("{:<20} {balance} {}", a.name, a.network.unit())
             })
             .collect();
-        Some(&visible[terminal::pick("Which account?", &items, 0)?])
+        Some(&accounts[terminal::pick("Which account?", &items, 0)?])
     } else {
-        Some(zorg::account::select(&visible, name.as_deref())?)
+        Some(zorg::account::select(&accounts, name.as_deref())?)
     };
     if let Some(account) = selected.filter(|_| cmd != "delete") {
         zorg::account::ensure_database_exists(account)?;
@@ -446,7 +440,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     if matches!(cmd, "sync" | "status") {
         let targets: Vec<_> = selected
             .map(|a| vec![a])
-            .unwrap_or_else(|| visible.iter().collect());
+            .unwrap_or_else(|| accounts.iter().collect());
         let mut failed = 0;
         for account in &targets {
             println!("{}:", account.name);
@@ -1425,8 +1419,7 @@ mod tests {
             accounts.push(account);
         }
         let command = |args: &[&str]| {
-            let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-            args.extend(["--network".into(), "regtest".into()]);
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
             parse_args(&args).and_then(|args| super::run_in(index_root.clone(), args))
         };
         let names = || -> Vec<String> {
@@ -1492,7 +1485,14 @@ mod tests {
             "--help"
         );
         assert_eq!(parse(&[]).unwrap().command, None);
-        assert_eq!(parse(&["--network", "test"]).unwrap().command, None);
+        assert!(parse(&["--network", "test"]).is_err());
+        assert!(parse(&["balance", "--network", "test"]).is_err());
+        assert_eq!(
+            parse(&["import", "Savings", "--network", "test"])
+                .unwrap()
+                .options["--network"],
+            "test"
+        );
         assert_eq!(
             parse(&["accounts"]).unwrap().command.as_deref(),
             Some("accounts")
