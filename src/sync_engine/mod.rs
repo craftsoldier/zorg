@@ -1424,7 +1424,13 @@ async fn run_sync_impl(
     // `None` on the first iteration and whenever the previous batch
     // was the last in its range (so there's nothing to prefetch until
     // `suggest_scan_ranges` runs again).
-    type PrefetchResult = Result<crate::sync_engine::block_source::MemoryBlockSource, SyncError>;
+    type PrefetchResult = Result<
+        (
+            crate::sync_engine::block_source::MemoryBlockSource,
+            zcash_client_backend::proto::service::TreeState,
+        ),
+        SyncError,
+    >;
     /// Prefetched block download state. Implements `Drop` to
     /// abort the spawned tokio task when the loop exits for any
     /// reason (cancel, mode change, error, break, reorg
@@ -1635,35 +1641,35 @@ async fn run_sync_impl(
 
         // Download blocks into memory — or use the prefetched data
         // from the previous iteration if it matches this batch.
-        let block_source = if let Some(mut pf) = prefetch.take() {
+        let (block_source, prefetched_tree_state) = if let Some(mut pf) = prefetch.take() {
             if pf.start == start && pf.end == end {
                 // Prefetch matches. Take the handle out of the
                 // Option so Drop doesn't abort a completed task.
                 let handle = pf.handle.take().expect("prefetch handle present");
                 match handle.await {
-                    Ok(Ok(bs)) => {
+                    Ok(Ok((bs, ts))) => {
                         log::debug!(
                             "[{}] sync: using prefetched blocks for {}-{}",
                             elapsed(),
                             u32::from(start),
                             u32::from(end) - 1,
                         );
-                        bs
+                        (bs, Some(ts))
                     }
                     _ => {
                         // Prefetch failed — download synchronously.
                         log::warn!("[{}] sync: prefetch failed, downloading fresh", elapsed(),);
-                        download_blocks(&mut client, start, end - 1).await?
+                        (download_blocks(&mut client, start, end - 1).await?, None)
                     }
                 }
             } else {
                 // Range changed (reorg, priority switch, etc.) —
                 // Drop the Prefetch, which aborts the background task.
                 drop(pf);
-                download_blocks(&mut client, start, end - 1).await?
+                (download_blocks(&mut client, start, end - 1).await?, None)
             }
         } else {
-            download_blocks(&mut client, start, end - 1).await?
+            (download_blocks(&mut client, start, end - 1).await?, None)
         };
 
         if cancel.load(Ordering::Relaxed) {
@@ -1702,7 +1708,10 @@ async fn run_sync_impl(
                     start: pf_start,
                     end: pf_end,
                     handle: Some(tokio::spawn(async move {
-                        download_blocks(&mut pf_client, pf_start, pf_end - 1).await
+                        let blocks = download_blocks(&mut pf_client, pf_start, pf_end - 1).await?;
+                        let tree_state =
+                            get_tree_state(&mut pf_client, u32::from(pf_start - 1) as u64).await?;
+                        Ok((blocks, tree_state))
                     })),
                 });
             } else {
@@ -1718,7 +1727,10 @@ async fn run_sync_impl(
         // Fetch and validate the frontier before projecting the checkpoints
         // this batch will create. `update_tree` inserts this exact height as a
         // checkpoint before any compact-block commitments.
-        let from_state = if should_use_empty_chain_state(&network, start)? {
+        let from_state = if let Some(ts) = prefetched_tree_state {
+            ts.to_chain_state()
+                .map_err(|e| SyncError::parse(format!("parse tree state: {e}")))?
+        } else if should_use_empty_chain_state(&network, start)? {
             chain::ChainState::empty(start - 1, BlockHash([0u8; 32]))
         } else {
             let ts = get_tree_state(&mut client, u32::from(start - 1) as u64).await?;
