@@ -224,7 +224,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             })?,
         };
         zorg::account::ensure_unique_name(&accounts, &name)?;
-        let mut birthday: Option<u64> = option("--birthday").and_then(|h| h.parse().ok());
+        let mut birthday: Option<u64> = option("--birthday")
+            .map(|h| h.parse().map_err(|_| "--birthday must be a block height"))
+            .transpose()?;
         if cmd == "import" && birthday.is_none() && interactive {
             terminal::note("Scanning from the start takes hours on mainnet.");
             let height = terminal::ask(
@@ -404,8 +406,14 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             })
         }
         "history" => {
-            let limit = option("--limit").and_then(|n| n.parse::<u64>().ok());
-            cmd_history(db, net, limit.map(|n| n as u32), uuid)
+            let limit = option("--limit")
+                .map(|n| match n.parse::<u32>() {
+                    Ok(0) => Err("--limit must be at least 1"),
+                    Ok(n) => Ok(n),
+                    Err(_) => Err("--limit must be a whole number"),
+                })
+                .transpose()?;
+            cmd_history(db, net, limit, uuid)
         }
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
