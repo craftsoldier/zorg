@@ -15,12 +15,16 @@ mnemonic is stored in the macOS Keychain; wallet state lives in a
 SQLite database. zorg_index.db and new databases live in
 .IR ~/Library/Application\ Support/zorg/ .
 zorg_index.db is the record of which accounts exist: each account's name,
-network, and database path. Each account has its own database, and each
-account's phrase is stored in Keychain.
+network, and database path. It also holds the settings: the account the app
+opens, whether it hides balances, and a server for testnet and for mainnet
+that every command uses unless
+.B --lwd
+is given. Each account has its own database, and each account's phrase is
+stored in Keychain.
 The database itself is not encrypted.
-Running zorg without a command in a terminal shows the first account's
-balance, syncing in the background, with a menu to send,
-receive, or see history until
+Running zorg without a command in a terminal shows the default account's
+balance, syncing in the background, with a menu to send, receive, see
+history, or change settings until
 .B q
 or Esc quits; with no accounts it offers to create an
 account or import a recovery phrase. Outside a terminal it lists accounts.

@@ -216,6 +216,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     }
     let network = network.as_deref().map(str::parse).transpose()?;
     let accounts = zorg::account::read_index(&root)?;
+    let saved = zorg::account::read_settings(&root)?;
+    let server = |net: WalletNetwork| lwd.clone().or_else(|| saved.server(net));
     let mut unavailable = 0;
     for account in &accounts {
         if let Err(e) = zorg::account::ensure_database_exists(account) {
@@ -306,7 +308,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
         reserve_wallet_file(&db_path)?;
         let result = if cmd == "create" {
-            endpoint(lwd.as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
+            endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
         } else {
             cmd_import(db, net, birthday, &name, &accounts)
         };
@@ -337,18 +339,25 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         println!("Address: {}", created.unified_address);
         return Ok(());
     }
+    let openable = |a: &&zorg::account::Account| zorg::account::ensure_database_exists(a).is_ok();
     let first = accounts
         .iter()
-        .find(|a| zorg::account::ensure_database_exists(a).is_ok());
+        .filter(openable)
+        .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
+        .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        let actions = ["Send", "Receive", "History"].map(String::from);
+        let actions = ["Send", "Receive", "History", "Settings"].map(String::from);
+        let hide = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
         log::set_max_level(log::LevelFilter::Off);
         let on_account_screen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let (account, lwd, on_screen) =
-                (account.clone(), lwd.clone(), on_account_screen.clone());
-            std::thread::spawn(move || auto_sync(account, lwd, on_screen));
+            let (account, lwd, on_screen) = (
+                account.clone(),
+                server(account.network),
+                on_account_screen.clone(),
+            );
+            std::thread::spawn(move || auto_sync(account, lwd, hide, on_screen));
         }
         loop {
             terminal::clear()?;
@@ -358,7 +367,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 "{}",
                 console::style(console::truncate_str(&heading, width, "…")).bold()
             );
-            println!("{}", balance_row(account));
+            println!("{}", balance_row(account, hide));
             println!("{}\n", terminal::row("sync", 7, sync_text(account)));
             on_account_screen.store(true, std::sync::atomic::Ordering::SeqCst);
             let choice = terminal::menu("q quit", &actions, 0);
@@ -371,11 +380,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let result = match choice {
                 0 => zorg::account::birthday_height(account).and_then(|birthday| {
                     let missing = missing_phrase_error(account, birthday);
-                    endpoint(lwd.as_deref(), &account.network)
+                    endpoint(server(account.network).as_deref(), &account.network)
                         .and_then(|url| cmd_send(account, &url, &[], None, &missing))
                 }),
                 1 => receive(account),
-                _ => history(account),
+                2 => history(account),
+                _ => settings(&root, account, &accounts, &saved, &args.options),
             };
             match result {
                 Err(e) if e == terminal::INTERRUPTED => return Err(e),
@@ -445,7 +455,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         for account in &targets {
             println!("{}:", account.name);
             let result = zorg::account::ensure_database_exists(account)
-                .and_then(|()| endpoint(lwd.as_deref(), &account.network))
+                .and_then(|()| endpoint(server(account.network).as_deref(), &account.network))
                 .and_then(|url| {
                     if cmd == "sync" {
                         sync_database(&account.db_path, account.network, &url)
@@ -483,7 +493,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let memo = option("--memo");
             let birthday = zorg::account::birthday_height(selected)?;
             let missing = missing_phrase_error(selected, birthday);
-            endpoint(lwd.as_deref(), &net).and_then(|url| {
+            endpoint(server(net).as_deref(), &net).and_then(|url| {
                 cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
             })
         }
@@ -511,11 +521,16 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     result
 }
 
-/// The account screen's balance row for `account`.
-fn balance_row(account: &zorg::account::Account) -> String {
+/// The account screen's balance row for `account`, as dots when `hide` is set.
+fn balance_row(account: &zorg::account::Account, hide: bool) -> String {
     let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
         .map_or("unknown".to_string(), |b| {
-            format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
+            let amount = if hide {
+                "••••".into()
+            } else {
+                terminal::zec(b.total, 2)
+            };
+            format!("{amount} {}", account.network.unit())
         });
     terminal::row("balance", 7, balance)
 }
@@ -542,13 +557,14 @@ fn sync_text(account: &zorg::account::Account) -> String {
 fn auto_sync(
     account: zorg::account::Account,
     lwd: Option<String>,
+    hide: bool,
     on_account_screen: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let paint = |text: &str, balance: bool| {
         if on_account_screen.load(std::sync::atomic::Ordering::SeqCst) {
             terminal::paint_line(3, &terminal::row("sync", 7, text));
             if balance {
-                terminal::paint_line(2, &balance_row(&account));
+                terminal::paint_line(2, &balance_row(&account, hide));
             }
         }
     };
@@ -796,6 +812,183 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
                 address = new;
                 "New address.".into()
             }),
+        };
+    }
+}
+
+/// Starts zorg over with the same arguments, so the app opens with the
+/// settings just saved. Returns only if that fails.
+fn reopen() -> String {
+    use std::os::unix::process::CommandExt;
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let error = std::process::Command::new(exe)
+                .args(std::env::args().skip(1))
+                .exec();
+            format!("Could not reopen zorg: {error}")
+        }
+        Err(e) => format!("Could not reopen zorg: {e}"),
+    }
+}
+
+/// The Settings screen: accounts, servers, hiding balances, and `account`'s
+/// viewing key, until Esc goes back. A saved change reopens zorg.
+fn settings(
+    root: &std::path::Path,
+    account: &zorg::account::Account,
+    accounts: &[zorg::account::Account],
+    saved: &zorg::account::Settings,
+    options: &HashMap<&'static str, String>,
+) -> Result<(), String> {
+    let server = |url: &Option<String>| url.clone().unwrap_or_else(|| "built-in".into());
+    let hidden = if saved.hide_balances { "on" } else { "off" };
+    let items = [
+        format!("{:<15} {}", "Accounts", account.name),
+        format!("{:<15} {}", "Testnet server", server(&saved.server_test)),
+        format!("{:<15} {}", "Mainnet server", server(&saved.server_main)),
+        format!("{:<15} {hidden}", "Hide balances"),
+        "Viewing key".to_string(),
+    ];
+    let mut current = 0;
+    loop {
+        terminal::clear()?;
+        println!("{}\n", console::style("Settings").bold());
+        let Some(choice) = terminal::menu("Esc back", &items, current)? else {
+            return Ok(());
+        };
+        current = choice;
+        let result = match choice {
+            0 => switch_account(root, account, accounts, options),
+            1 => choose_server(root, WalletNetwork::Test),
+            2 => choose_server(root, WalletNetwork::Main),
+            3 => zorg::account::set_hide_balances(root, !saved.hide_balances).map(|()| true),
+            _ => show_viewing_key(account).map(|()| false),
+        };
+        match result {
+            Ok(true) => return Err(reopen()),
+            Ok(false) => {}
+            Err(e) if e == terminal::INTERRUPTED => return Err(e),
+            Err(e) if e == terminal::CANCELLED => {}
+            Err(e) => {
+                terminal::failure(&e);
+                println!();
+                terminal::wait_for("Esc back")?;
+            }
+        }
+    }
+}
+
+/// Settings → Accounts: open another account, add one, or delete one.
+/// Returns whether anything changed.
+fn switch_account(
+    root: &std::path::Path,
+    account: &zorg::account::Account,
+    accounts: &[zorg::account::Account],
+    options: &HashMap<&'static str, String>,
+) -> Result<bool, String> {
+    terminal::clear()?;
+    println!("{}\n", console::style("Accounts").bold());
+    let mut items: Vec<String> = accounts
+        .iter()
+        .map(|a| {
+            let open = if a.uuid == account.uuid {
+                "  (open)"
+            } else {
+                ""
+            };
+            format!("{:<20} {}{open}", a.name, a.network.display_name())
+        })
+        .collect();
+    items.push("Add account".into());
+    let current = accounts
+        .iter()
+        .position(|a| a.uuid == account.uuid)
+        .unwrap_or(0);
+    let Some(choice) = terminal::menu("Esc back", &items, current)? else {
+        return Ok(false);
+    };
+    let Some(picked) = accounts.get(choice) else {
+        let ways = ["Create a new account", "Import a recovery phrase"].map(String::from);
+        let command = ["create", "import"][terminal::pick("Add account", &ways, 0)?];
+        let before = zorg::account::read_index(root)?.len();
+        run_in(
+            root.to_path_buf(),
+            Args {
+                command: Some(command.into()),
+                positional: Vec::new(),
+                options: options.clone(),
+                help: false,
+                version: false,
+            },
+        )?;
+        let Some(added) = zorg::account::read_index(root)?.into_iter().nth(before) else {
+            return Ok(false);
+        };
+        println!();
+        terminal::wait_for("Enter to open your account")?;
+        zorg::account::set_default_account(root, &added.uuid)?;
+        return Ok(true);
+    };
+    let mut actions = vec!["Delete account".to_string()];
+    if picked.uuid != account.uuid {
+        actions.insert(0, "Open account".into());
+    }
+    terminal::clear()?;
+    println!("{}\n", console::style(&picked.name).bold());
+    let Some(action) = terminal::menu("Esc back", &actions, 0)? else {
+        return Ok(false);
+    };
+    if actions[action] == "Open account" {
+        zorg::account::set_default_account(root, &picked.uuid)?;
+        return Ok(true);
+    }
+    terminal::clear()?;
+    cmd_delete(root, picked)?;
+    Ok(zorg::account::read_index(root)?.len() < accounts.len())
+}
+
+/// Settings → a network's server: the built-in list, or a URL that serves
+/// `network`. Returns whether anything changed.
+fn choose_server(root: &std::path::Path, network: WalletNetwork) -> Result<bool, String> {
+    terminal::clear()?;
+    let title = format!("{} server", network.display_name());
+    println!("{}\n", console::style(title).bold());
+    let choices = ["Built-in (with failover)", "Custom URL"].map(String::from);
+    let Some(choice) = terminal::menu("Esc back", &choices, 0)? else {
+        return Ok(false);
+    };
+    if choice == 0 {
+        zorg::account::set_server(root, network, None)?;
+        return Ok(true);
+    }
+    let url = terminal::ask("Server URL", false, |_| Ok(()))?;
+    endpoint(Some(&url), &network)?;
+    zorg::account::set_server(root, network, Some(&url))?;
+    Ok(true)
+}
+
+/// Settings → Viewing key: `account`'s unified full viewing key and birthday,
+/// with Copy, until Esc goes back.
+fn show_viewing_key(account: &zorg::account::Account) -> Result<(), String> {
+    let key = zorg::account::viewing_key(account)?;
+    let birthday = zorg::account::birthday_height(account)?;
+    let copy = ["Copy viewing key".to_string()];
+    let mut status: Result<String, String> = Ok(String::new());
+    loop {
+        terminal::clear()?;
+        println!("{}\n", console::style("Viewing key").bold());
+        println!("{key}\n");
+        println!("{}\n", terminal::row("birthday", 8, birthday));
+        terminal::note("Anyone with this key can see every transaction of this account.");
+        match &status {
+            Ok(message) if message.is_empty() => {}
+            Ok(message) => terminal::note(message),
+            Err(e) => terminal::failure(e),
+        }
+        println!();
+        status = match terminal::menu("Esc back", &copy, 0)? {
+            None => return Ok(()),
+            Some(_) => terminal::copy(&key).map(|()| "Copied.".into()),
         };
     }
 }

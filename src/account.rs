@@ -268,12 +268,22 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
         .map_err(|e| format!("Could not open database index: {e}"))?;
     secure_wallet_db_file(&path)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS accounts (
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE IF NOT EXISTS accounts (
              uuid TEXT PRIMARY KEY NOT NULL,
              name TEXT NOT NULL UNIQUE,
              network TEXT NOT NULL,
              db_path TEXT NOT NULL UNIQUE
          );
+         CREATE TABLE IF NOT EXISTS settings (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             user_name TEXT NOT NULL,
+             default_account TEXT REFERENCES accounts(uuid) ON DELETE SET NULL,
+             hide_balances INTEGER NOT NULL DEFAULT 0,
+             server_test TEXT,
+             server_main TEXT
+         );
+         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');
          BEGIN IMMEDIATE;",
     )
     .map_err(|e| format!("Could not lock database index: {e}"))?;
@@ -314,6 +324,108 @@ pub fn read_index(root: &Path) -> Result<Vec<Account>, String> {
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("Could not open database index: {e}"))?;
     indexed_accounts(&conn)
+}
+
+/// What the settings row of `zorg_index.db` holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// The account the app opens, or none for the first account.
+    pub default_account: Option<String>,
+    /// Whether the app shows balances as dots.
+    pub hide_balances: bool,
+    /// The testnet server, or none for the built-in list.
+    pub server_test: Option<String>,
+    /// The mainnet server, or none for the built-in list.
+    pub server_main: Option<String>,
+}
+
+impl Settings {
+    /// The saved server for `network`, or none for the built-in list.
+    pub fn server(&self, network: WalletNetwork) -> Option<String> {
+        match network {
+            WalletNetwork::Main => self.server_main.clone(),
+            WalletNetwork::Test => self.server_test.clone(),
+            WalletNetwork::Regtest => None,
+        }
+    }
+}
+
+/// The settings in `zorg_index.db`, or the defaults when none are saved yet.
+pub fn read_settings(root: &Path) -> Result<Settings, String> {
+    let path = root.join("zorg_index.db");
+    if !path.exists() {
+        return Ok(Settings::default());
+    }
+    let error = |e: rusqlite::Error| format!("Could not read settings: {e}");
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Could not open database index: {e}"))?;
+    let saved: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !saved {
+        return Ok(Settings::default());
+    }
+    conn.query_row(
+        "SELECT default_account, hide_balances, server_test, server_main FROM settings",
+        [],
+        |row| {
+            Ok(Settings {
+                default_account: row.get(0)?,
+                hide_balances: row.get(1)?,
+                server_test: row.get(2)?,
+                server_main: row.get(3)?,
+            })
+        },
+    )
+    .map_err(error)
+}
+
+/// Runs `sql` on the settings row of `zorg_index.db`.
+fn update_settings(root: &Path, sql: &str, params: impl rusqlite::Params) -> Result<(), String> {
+    let index = open_index_for_write(root)?;
+    index
+        .execute(sql, params)
+        .and_then(|_| index.execute_batch("COMMIT"))
+        .map_err(|e| format!("Could not save settings: {e}"))
+}
+
+/// Makes `uuid` the account the app opens.
+pub fn set_default_account(root: &Path, uuid: &str) -> Result<(), String> {
+    update_settings(root, "UPDATE settings SET default_account = ?1", [uuid])
+}
+
+/// Sets whether the app shows balances as dots.
+pub fn set_hide_balances(root: &Path, hide: bool) -> Result<(), String> {
+    update_settings(root, "UPDATE settings SET hide_balances = ?1", [hide])
+}
+
+/// Saves `url` as `network`'s server, or none for the built-in list.
+pub fn set_server(root: &Path, network: WalletNetwork, url: Option<&str>) -> Result<(), String> {
+    let sql = match network {
+        WalletNetwork::Main => "UPDATE settings SET server_main = ?1",
+        WalletNetwork::Test => "UPDATE settings SET server_test = ?1",
+        WalletNetwork::Regtest => return Err("Regtest has no saved server; use --lwd".into()),
+    };
+    update_settings(root, sql, [url])
+}
+
+/// `account`'s unified full viewing key, read from its database.
+pub fn viewing_key(account: &Account) -> Result<String, String> {
+    ensure_database_exists(account)?;
+    let db = open_wallet_db_for_read(&account.db_path, account.network)?;
+    let id = parse_account_uuid(&account.uuid)?;
+    let key = db
+        .get_account(id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .and_then(|a| a.ufvk().cloned())
+        .ok_or_else(|| format!("Account not found: {}", account.uuid))?;
+    key.encode(&account.network)
+        .map_err(|e| format!("Could not encode viewing key: {e}"))
 }
 
 /// Adds `account` to `zorg_index.db` after checking that its name and seed
@@ -571,6 +683,7 @@ mod tests {
             db_path: db_str.into(),
         };
         index_new_account(root.path(), &account, &seed).unwrap();
+        set_default_account(root.path(), &account.uuid).unwrap();
         let chflags = |flag: &str| {
             assert!(std::process::Command::new("chflags")
                 .args([flag, db_str])
@@ -592,6 +705,7 @@ mod tests {
         delete_account(root.path(), &account).unwrap();
         assert!(!db.exists());
         assert!(read_index(root.path()).unwrap().is_empty());
+        assert_eq!(read_settings(root.path()).unwrap().default_account, None);
     }
 
     #[test]
