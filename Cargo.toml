@@ -19,7 +19,6 @@ path = "src/main.rs"
 [dependencies]
 sapling-crypto = { version = "0.9", default-features = false, features = ["circuit"] }
 uuid = "1.1"
-zip32 = "0.3"
 
 # Key generation
 bip0039 = "0.12"

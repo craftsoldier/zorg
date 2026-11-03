@@ -1,10 +1,8 @@
 use bip0039::{Count, English, Language, Mnemonic};
-use secrecy::{ExposeSecret, SecretVec};
+use secrecy::SecretVec;
 
-use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedSpendingKey};
+use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
 use zeroize::Zeroizing;
-
-use crate::network::WalletNetwork;
 
 pub fn generate_mnemonic() -> Zeroizing<String> {
     Zeroizing::new(Mnemonic::<English>::generate(Count::Words24).into_phrase())
@@ -34,23 +32,6 @@ pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
     Ok(secret_seed)
 }
 
-/// Convert an account index to the backend's ZIP-32 account id.
-pub fn zip32_account_id(account_index: u32) -> Result<zip32::AccountId, String> {
-    zip32::AccountId::try_from(account_index)
-        .map_err(|_| format!("Invalid ZIP32 account index: {account_index}"))
-}
-
-/// Derive the Unified Spending Key for an account index from the seed.
-fn unified_spending_key_for_account(
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-    account_index: u32,
-) -> Result<UnifiedSpendingKey, String> {
-    let account_id = zip32_account_id(account_index)?;
-    UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), account_id)
-        .map_err(|e| format!("USK derivation failed for account {account_index}: {e:?}"))
-}
-
 /// Standard shielded address request: Orchard + Sapling, no transparent.
 /// Matches the behavior of zodl/Zashi wallets.
 pub fn shielded_address_request() -> UnifiedAddressRequest {
@@ -60,20 +41,6 @@ pub fn shielded_address_request() -> UnifiedAddressRequest {
         ReceiverRequirement::Omit,    // Transparent
     )
     .expect("valid receiver requirements")
-}
-
-/// The default unified address for account `index`, derived from the seed.
-pub fn default_address_for_account(
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-    account_index: u32,
-) -> Result<String, String> {
-    let usk = unified_spending_key_for_account(network, seed, account_index)?;
-    let ufvk = usk.to_unified_full_viewing_key();
-    let (ua, _) = ufvk
-        .default_address(shielded_address_request())
-        .map_err(|e| format!("Failed to derive address: {e}"))?;
-    Ok(ua.encode(&network))
 }
 
 #[cfg(test)]
