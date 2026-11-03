@@ -370,7 +370,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             println!("{}", balance_row(account, hide));
             println!("{}\n", terminal::row("sync", 7, sync_text(account)));
             on_account_screen.store(true, std::sync::atomic::Ordering::SeqCst);
-            let choice = terminal::menu("q quit", &actions, 0);
+            let choice = terminal::menu_with_key(&actions[..3], 's', "settings");
             on_account_screen.store(false, std::sync::atomic::Ordering::SeqCst);
             let Some(choice) = choice? else {
                 return Ok(());

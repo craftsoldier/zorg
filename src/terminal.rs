@@ -304,6 +304,56 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Shows `items` as a menu like [`menu`], where pressing `key` answers
+/// `items.len()`, as if it were one more item named `name` in the hint.
+/// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. The menu is cleared after.
+pub fn menu_with_key(items: &[String], key: char, name: &str) -> Result<Option<usize>, String> {
+    let term = Term::stdout();
+    let hint = format!("↑↓ move · Enter pick · {key} {name} · q quit");
+    let draw = |current: usize| -> std::io::Result<()> {
+        term.write_line(&style(&hint).dim().to_string())?;
+        for (i, item) in items.iter().enumerate() {
+            if i == current {
+                term.write_line(&format!("{} {}", style("❯").cyan(), style(item).cyan()))?;
+            } else {
+                term.write_line(&format!("  {item}"))?;
+            }
+        }
+        Ok(())
+    };
+    let mut current = 0;
+    term.hide_cursor().map_err(|e| e.to_string())?;
+    draw(current).map_err(|e| e.to_string())?;
+    let answer = loop {
+        let answer = match term.read_key_raw().map_err(|e| e.to_string())? {
+            Key::ArrowUp => {
+                current = (current + items.len() - 1) % items.len();
+                None
+            }
+            Key::ArrowDown => {
+                current = (current + 1) % items.len();
+                None
+            }
+            Key::Enter => Some(Some(current)),
+            Key::Char(c) if c == key => Some(Some(items.len())),
+            Key::Escape | Key::Char('q') => Some(None),
+            Key::CtrlC => {
+                let _ = term.show_cursor();
+                return Err(INTERRUPTED.to_string());
+            }
+            _ => None,
+        };
+        term.clear_last_lines(items.len() + 1)
+            .map_err(|e| e.to_string())?;
+        match answer {
+            Some(answer) => break answer,
+            None => draw(current).map_err(|e| e.to_string())?,
+        }
+    };
+    term.show_cursor().map_err(|e| e.to_string())?;
+    Ok(answer)
+}
+
 /// Clears the terminal.
 pub fn clear() -> Result<(), String> {
     Term::stdout().clear_screen().map_err(|e| e.to_string())
