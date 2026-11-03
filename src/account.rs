@@ -166,35 +166,6 @@ pub fn init_db_and_create_account(
     })
 }
 
-/// Import a same-seed software account for a specific ZIP32 account index as a
-/// derived account. This is used only after the first seed-anchor account has
-/// initialized the wallet DB with the same seed.
-/// The account receives the supplied name.
-pub fn import_derived_account_at_index(
-    db_path: &str,
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-    birthday_height: Option<u64>,
-    account_index: u32,
-    name: &str,
-) -> Result<CreatedAccount, String> {
-    let birthday = make_birthday(network, birthday_height);
-    let account_id = zip32_account_id(account_index)?;
-    let address = default_address_for_account(network, seed, account_index)?;
-
-    let account = with_wallet_db_write_lock("keys.import_derived_account_at_index", || {
-        let mut db = open_wallet_db_for_mutation(db_path, network)?;
-        db.import_account_hd(name, seed, account_id, &birthday, None)
-            .map(|(account, _usk)| account)
-            .map_err(|e| format!("Failed to import derived account: {e}"))
-    })?;
-
-    Ok(CreatedAccount {
-        uuid: account.id().expose_uuid().to_string(),
-        unified_address: address,
-    })
-}
-
 /// The UUIDs of the accounts in the wallet database.
 pub fn list_accounts(db_path: &str, network: WalletNetwork) -> Result<Vec<String>, String> {
     let db = open_wallet_db_for_read(db_path, network)?;
