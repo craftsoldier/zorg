@@ -58,17 +58,6 @@ pub struct SyncProgressEvent {
     pub scanned_height: u64,
     pub chain_tip_height: u64,
     pub percentage: f64,
-    pub display_target_percentage: f64,
-    pub display_target_blocks: u64,
-    pub is_syncing: bool,
-    pub is_complete: bool,
-    pub has_new_tx: bool,
-    /// Current sync phase for UI display. One of:
-    /// - `"download"` — downloading compact blocks from lightwalletd
-    /// - `"scan"` — running `scan_cached_blocks` (CPU-intensive)
-    /// - `"enhance"` — fetching full transaction data
-    /// - `""` — completion event or unspecified
-    pub phase: String,
 }
 
 const BATCH_SIZE: u32 = 2000;
@@ -177,15 +166,6 @@ async fn maybe_sleep_for_e2e_sync_batch_delay() {
     tokio::time::sleep(std::time::Duration::from_millis(parsed.min(5_000))).await;
 }
 
-fn target_percentage_after_blocks(initial_total: u64, remaining: u64, blocks: u64) -> f64 {
-    if initial_total == 0 {
-        1.0
-    } else {
-        let target_remaining = remaining.saturating_sub(blocks);
-        (1.0 - (target_remaining as f64 / initial_total as f64)).clamp(0.0, 1.0)
-    }
-}
-
 fn chain_window_percentage(window_start_height: u64, tip_height: u64, scanned_height: u64) -> f64 {
     if tip_height <= window_start_height {
         return 1.0;
@@ -207,20 +187,6 @@ fn tail_repair_percentage(base_percentage: f64, total_blocks: u64, remaining_blo
 
 fn chain_window_frontier_height(ranges: &[ScanRange], fallback_height: u64) -> u64 {
     earliest_pending_scan_start(ranges).unwrap_or(fallback_height)
-}
-
-fn chain_window_target_height_after_batch(
-    ranges: &[ScanRange],
-    batch_start: BlockHeight,
-    batch_end: BlockHeight,
-    fallback_height: u64,
-) -> u64 {
-    let frontier = chain_window_frontier_height(ranges, fallback_height);
-    if frontier == u32::from(batch_start) as u64 {
-        u32::from(batch_end) as u64
-    } else {
-        frontier
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -261,35 +227,6 @@ impl ProgressDisplayMode {
         }
     }
 
-    fn target_percentage_after_blocks(
-        self,
-        initial_total: u64,
-        remaining_blocks: u64,
-        scanned_height: u64,
-        tip_height: u64,
-        blocks: u64,
-    ) -> f64 {
-        match self {
-            ProgressDisplayMode::Work => {
-                target_percentage_after_blocks(initial_total, remaining_blocks, blocks)
-            }
-            ProgressDisplayMode::ChainWindow {
-                window_start_height,
-            } => chain_window_percentage(
-                window_start_height,
-                tip_height,
-                scanned_height.saturating_add(blocks),
-            ),
-            ProgressDisplayMode::TailRepair {
-                base_percentage,
-                total_blocks,
-            } => {
-                let target_remaining = remaining_blocks.saturating_sub(blocks);
-                tail_repair_percentage(base_percentage, total_blocks, target_remaining)
-            }
-        }
-    }
-
     fn extend_work(&mut self, new_total: u64) {
         if let ProgressDisplayMode::TailRepair { total_blocks, .. } = self {
             *total_blocks = (*total_blocks).max(new_total);
@@ -320,39 +257,6 @@ impl ProgressDisplayMode {
             ProgressDisplayMode::Work | ProgressDisplayMode::TailRepair { .. } => {
                 u32::from(batch_end) as u64
             }
-        }
-    }
-
-    fn batch_target_percentage(
-        self,
-        initial_total: u64,
-        remaining_blocks: u64,
-        ranges: &[ScanRange],
-        batch_start: BlockHeight,
-        batch_end: BlockHeight,
-        tip_height: u64,
-    ) -> f64 {
-        match self {
-            ProgressDisplayMode::ChainWindow {
-                window_start_height,
-            } => chain_window_percentage(
-                window_start_height,
-                tip_height,
-                chain_window_target_height_after_batch(
-                    ranges,
-                    batch_start,
-                    batch_end,
-                    u32::from(batch_start) as u64,
-                ),
-            ),
-            ProgressDisplayMode::Work | ProgressDisplayMode::TailRepair { .. } => self
-                .target_percentage_after_blocks(
-                    initial_total,
-                    remaining_blocks,
-                    u32::from(batch_start) as u64,
-                    tip_height,
-                    u32::from(batch_end).saturating_sub(u32::from(batch_start)) as u64,
-                ),
         }
     }
 }
@@ -1508,25 +1412,11 @@ async fn run_sync_impl(
             display_scanned_height,
             current_tip_height,
         );
-        let display_target_percentage = progress_display_mode.batch_target_percentage(
-            initial_total,
-            prev_remaining,
-            &ranges,
-            start,
-            end,
-            current_tip_height,
-        );
         last_progress_percentage = current_pct.clamp(0.0, 1.0);
         progress_fn(SyncProgressEvent {
             scanned_height: u32::from(start) as u64,
             chain_tip_height: current_tip_height,
             percentage: last_progress_percentage,
-            display_target_percentage,
-            display_target_blocks: batch_blocks,
-            is_syncing: true,
-            is_complete: false,
-            has_new_tx: false,
-            phase: "download".into(),
         });
         log::info!(
             "[{}] sync: scanning {}-{} (priority {:?}{}, batch={})",
@@ -1733,8 +1623,8 @@ async fn run_sync_impl(
         // `MAX_REWINDS_PER_RUN`. A verify range that keeps flapping won't
         // exhaust the budget the main scan needs to handle an unrelated
         // later reorg.
-        let scan_summary = match scan_result {
-            Ok(s) => s,
+        match scan_result {
+            Ok(_) => {}
             Err(sync_err) => match sync_err.recovery_strategy() {
                 RecoveryStrategy::Rewind { to_height } => {
                     let (phase_name, current_rewinds) = if is_verify_phase {
@@ -1978,10 +1868,6 @@ async fn run_sync_impl(
             }
         }
         // Report progress
-        let has_new_tx = scan_summary.received_sapling_note_count() > 0
-            || scan_summary.spent_sapling_note_count() > 0
-            || scan_summary.received_orchard_note_count() > 0
-            || scan_summary.spent_orchard_note_count() > 0;
         let post_ranges = db
             .suggest_scan_ranges()
             .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
@@ -2016,47 +1902,10 @@ async fn run_sync_impl(
             display_scanned_height,
             current_tip_height,
         );
-        let next_display_range = post_ranges
-            .iter()
-            .find(|r| is_pending_scan_range(r))
-            .map(|r| {
-                let next_start = r.block_range().start;
-                let next_batch_size = batch_size_for_range(base_batch_size, next_start);
-                let next_end = std::cmp::min(next_start + next_batch_size, r.block_range().end);
-                (next_start, next_end)
-            });
-        let next_display_target_blocks = next_display_range
-            .map(|(next_start, next_end)| {
-                u32::from(next_end).saturating_sub(u32::from(next_start)) as u64
-            })
-            .unwrap_or(0);
-        let display_target_percentage = if let Some((next_start, next_end)) = next_display_range {
-            progress_display_mode.batch_target_percentage(
-                initial_total,
-                remaining,
-                &post_ranges,
-                next_start,
-                next_end,
-                current_tip_height,
-            )
-        } else {
-            progress_display_mode.percentage(
-                initial_total,
-                remaining,
-                current_tip_height,
-                current_tip_height,
-            )
-        };
         let progress = SyncProgressEvent {
             scanned_height: u32::from(end) as u64,
             chain_tip_height: current_tip_height,
             percentage: pct.clamp(0.0, 1.0),
-            display_target_percentage,
-            display_target_blocks: next_display_target_blocks,
-            is_syncing: true,
-            is_complete: false,
-            has_new_tx,
-            phase: "scan".into(),
         };
         last_progress_percentage = progress.percentage;
         log::info!(
@@ -2089,12 +1938,6 @@ async fn run_sync_impl(
         scanned_height: final_scanned_height,
         chain_tip_height: final_tip_height,
         percentage: 1.0,
-        display_target_percentage: 1.0,
-        display_target_blocks: 0,
-        is_syncing: false,
-        is_complete: true,
-        has_new_tx: false,
-        phase: String::new(),
     };
     progress_fn(final_progress);
 
@@ -2314,10 +2157,6 @@ mod tests {
         let mode = ProgressDisplayMode::Work;
 
         assert_pct(mode.percentage(1_000, 300, 0, 0), 0.7);
-        assert_pct(
-            mode.target_percentage_after_blocks(1_000, 300, 0, 0, 100),
-            0.8,
-        );
     }
 
     #[test]
@@ -2327,10 +2166,6 @@ mod tests {
         };
 
         assert_pct(mode.percentage(0, 0, 1_700, 2_000), 0.7);
-        assert_pct(
-            mode.target_percentage_after_blocks(0, 0, 1_700, 2_000, 100),
-            0.8,
-        );
     }
 
     #[test]
@@ -2351,10 +2186,6 @@ mod tests {
         let display_height = mode.batch_start_height(&ranges, high_range_start);
         assert_eq!(display_height, 1_700);
         assert_pct(mode.percentage(0, 0, display_height, 2_000), 0.7);
-        assert_pct(
-            mode.batch_target_percentage(0, 0, &ranges, high_range_start, high_range_end, 2_000),
-            0.7,
-        );
 
         let post_ranges = vec![ScanRange::from_parts(
             BlockHeight::from_u32(1_700)..BlockHeight::from_u32(1_800),
@@ -2373,10 +2204,6 @@ mod tests {
         };
 
         assert_pct(mode.percentage(100, 100, 50, 1_000), 0.95);
-        assert_pct(
-            mode.target_percentage_after_blocks(100, 100, 50, 1_000, 50),
-            0.975,
-        );
         assert_pct(mode.percentage(100, 0, 50, 1_000), 1.0);
     }
 
@@ -2388,10 +2215,6 @@ mod tests {
         };
 
         assert_pct(mode.percentage(100, 100, 50, 1_000), 0.8);
-        assert_pct(
-            mode.target_percentage_after_blocks(100, 100, 50, 1_000, 50),
-            0.9,
-        );
     }
 
     #[test]
