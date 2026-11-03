@@ -814,8 +814,7 @@ fn history(account: &zorg::account::Account) -> Result<(), String> {
         account.network,
         account.uuid.as_str(),
     );
-    let mut txs = sync::get_transaction_history(db, net, None, uuid)?;
-    txs.sort_by_key(|tx| (tx.mined_height != 0, std::cmp::Reverse(tx.mined_height)));
+    let txs = sync::get_transaction_history(db, net, None, uuid)?;
     if txs.is_empty() {
         println!("No transactions yet.\n");
         return terminal::wait_for("Esc back");
