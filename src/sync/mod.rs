@@ -172,13 +172,8 @@ pub fn validate_address(address: &str) -> Result<String, String> {
 
 // ======================== Send ========================
 
-/// Propose a transfer. Returns (proposal_id, needs_sapling_params, fee_zatoshi).
-/// The proposal is stored internally and referenced by proposal_id for execute_proposal.
 // In-memory proposal store (proposals are short-lived, between
-// propose and execute). Kept in `sync/mod.rs` because it is shared
-// between the software send flow (`send::execute_proposal`) and the
-// software send flow (`send::execute_proposal`); placing
-// it in either submodule would create a cross-submodule dependency.
+// propose and execute).
 use std::collections::HashMap;
 use std::sync::Mutex;
 

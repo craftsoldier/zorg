@@ -45,7 +45,6 @@ const SEND_PROPOSAL_LOCK_BLOCKS: u32 = 40;
 
 pub struct ProposalResult {
     pub proposal_id: u64,
-    pub needs_sapling_params: bool,
     pub fee_zatoshi: u64,
 }
 
@@ -257,10 +256,6 @@ pub fn propose_send(
         )
         .map_err(|e| format!("Propose transfer: {e}"))?;
 
-        let needs_sapling = proposal
-            .steps()
-            .iter()
-            .any(|s| s.involves(PoolType::Shielded(ShieldedPool::Sapling)));
         let fee: u64 = proposal
             .steps()
             .iter()
@@ -305,7 +300,6 @@ pub fn propose_send(
 
         Ok(ProposalResult {
             proposal_id: id,
-            needs_sapling_params: needs_sapling,
             fee_zatoshi: fee,
         })
     })
