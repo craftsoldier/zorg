@@ -341,8 +341,13 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             account.network.display_name()
         );
         println!("{}", terminal::row("balance", 7, balance));
-        let address = zorg::account::current_address(account)?;
-        let address = terminal::address(&address, false);
+        let address = match zorg::account::current_address(account) {
+            Ok(address) => terminal::address(&address, false),
+            Err(e) => {
+                eprintln!("{e}");
+                "(unavailable)".into()
+            }
+        };
         println!("{}\n", terminal::row("address", 7, address));
         if !terminal::read_key("all accounts", 'x')? {
             return Ok(());
