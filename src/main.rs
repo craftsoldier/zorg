@@ -24,6 +24,7 @@ COMMANDS:
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
     history [--limit <n>] [--account <name>]                Show transaction history
+    tx <txid> [--account <name>]                            Show one transaction in full
     recovery [--account <name>]                             Show the recovery phrase
     validate <address>                                      Validate a Zcash address
     delete --account <name>                                 Delete an account
@@ -134,6 +135,7 @@ fn command_spec(
             &["--account", "--limit"],
             0..=0,
         ),
+        "tx" => ("<txid> [--account <name>]", &["--account"], 1..=1),
         "validate" => ("<address>", &[], 0..=1),
         _ => return None,
     })
@@ -426,6 +428,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 .transpose()?;
             cmd_history(db, net, limit, uuid)
         }
+        "tx" => cmd_tx(selected, &args.positional[0]),
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
             if name.is_none() && !terminal::interactive() {
@@ -896,6 +899,80 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
     Ok(())
 }
 
+/// Prints the transaction `txid` in full: one section per history row it makes.
+fn cmd_tx(account: &zorg::account::AccountInfo, txid: &str) -> Result<(), String> {
+    let (db, net, uuid) = (
+        account.db_path.as_str(),
+        account.network,
+        account.uuid.as_str(),
+    );
+    let txid = parse_txid(txid)?;
+    let rows: Vec<_> = sync::get_transaction_history(db, net, None, uuid)?
+        .into_iter()
+        .filter(|tx| tx.txid == txid)
+        .collect();
+    if rows.is_empty() {
+        return Err(format!(
+            "No transaction {txid} in account {:?}",
+            account.name
+        ));
+    }
+    let unit = net.unit();
+    for tx in rows {
+        let detail = sync::get_transaction_detail(db, net, uuid, &txid, &tx.tx_kind)?;
+        let status = if tx.mined_height > 0 {
+            format!("mined at block {}", tx.mined_height)
+        } else if tx.expired_unmined {
+            "expired, never mined".to_string()
+        } else {
+            "pending".to_string()
+        };
+        let mut kind = tx.tx_kind.clone();
+        if let Some(first) = kind.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        println!(
+            "{kind} {} {unit}   {status}",
+            terminal::zec(tx.display_amount, 0)
+        );
+        if let Some(from) = &detail.source_address {
+            println!("{}", terminal::row("from", 4, from));
+        }
+        for output in &detail.outputs {
+            let to = output.address.as_deref().unwrap_or("(unknown)");
+            if detail.outputs.len() > 1 {
+                let amount = terminal::zec(output.amount_zatoshi, 0);
+                println!(
+                    "{}",
+                    terminal::row("to", 4, format!("{to}  {amount} {unit}"))
+                );
+            } else {
+                println!("{}", terminal::row("to", 4, to));
+            }
+        }
+        println!("{}", terminal::row("pool", 4, &tx.display_pool));
+        if tx.tx_kind != "received" && tx.tx_kind != "receiving" {
+            let fee = terminal::zec(tx.fee, 0);
+            println!("{}", terminal::row("fee", 4, format!("{fee} {unit}")));
+        }
+        if let Some(memo) = &detail.memo {
+            println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+        }
+    }
+    println!("{}", terminal::row("txid", 4, txid));
+    Ok(())
+}
+
+/// The txid in `text`, written the way block explorers and `zorg history` show it.
+fn parse_txid(text: &str) -> Result<zcash_primitives::transaction::TxId, String> {
+    let mut bytes: [u8; 32] = hex::decode(text.trim())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("Not a valid txid; expected 64 hexadecimal characters")?;
+    bytes.reverse();
+    Ok(zcash_primitives::transaction::TxId::from_bytes(bytes))
+}
+
 // ── helpers ──
 
 /// Testnet (and regtest) coins are worthless by design — say so.
@@ -1229,6 +1306,14 @@ mod tests {
             "Send 1.50000000 ZEC to\n  u1dest\nFee: 0.00010000 ZEC\nMemo: \"rent\"\n"
         );
         assert!(!send_summary("u1dest", 1, 10_000, None, WalletNetwork::Test).contains("Memo"));
+    }
+
+    #[test]
+    fn txids_are_read_the_way_they_are_shown() {
+        let shown = "02b17177492419c635fdcdc75cd5e12531d50bd6ffff59ffdfce5b36f5bf9220";
+        assert_eq!(parse_txid(shown).unwrap().to_string(), shown);
+        assert!(parse_txid("02b171").is_err());
+        assert!(parse_txid(&"zz".repeat(32)).is_err());
     }
 
     #[test]
