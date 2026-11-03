@@ -22,8 +22,8 @@ Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 | Command | Description |
 |---|---|
 | `zorg` / `zorg accounts` | List named accounts across known databases |
-| `zorg create [name]` | Create a new account and recovery phrase |
-| `zorg import [name] [--birthday <height>]` | Restore an account from a recovery phrase (index 0) |
+| `zorg create [name] [--network <net>]` | Create a new account and recovery phrase |
+| `zorg import [name] [--birthday <height>] [--network <net>]` | Restore an account from a recovery phrase (index 0) |
 | `zorg balance [--account <name>]` | Show spendable, pending, and locked balances |
 | `zorg address [--new] [--account <name>]` | Get a unified receiving address, or make a new one |
 | `zorg sync [--account <name>]` | Sync all databases, or the chosen account's database |
@@ -35,13 +35,12 @@ Run `zorg` to list accounts. Select an account by name with `--account Savings`.
 | `zorg validate <address>` | Validate a Zcash address |
 | `zorg delete --account <name>` | Delete an account after confirmation |
 
-Create and import ask for a name if omitted.
+Create and import ask for a name if omitted. `--network <main|test|regtest>` picks the new account's network (default main); other commands use the network the account was created on.
 
 ### Global flags
 
 | Flag | Meaning |
 |---|---|
-| `--network <main\|test\|regtest>` | Filter accounts by network; defaults to main for create/import |
 | `--lwd <url>` | lightwalletd endpoint override |
 | `--help`, `-h` | Show usage |
 | `--version`, `-V` | Show version |
