@@ -270,9 +270,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 terminal::menu_with_keys(&actions[..3], &[('b', balances), ('s', "settings")]);
             on_account_screen.store(false, std::sync::atomic::Ordering::SeqCst);
             let choice = match choice? {
-                None => return Ok(()),
+                None if hidden == saved.hide_balances => return Ok(()),
+                None => return zorg::account::set_hide_balances(&root, hidden),
                 Some(3) => {
-                    zorg::account::set_hide_balances(&root, !hidden)?;
                     hide.store(!hidden, std::sync::atomic::Ordering::SeqCst);
                     continue;
                 }
@@ -918,7 +918,12 @@ fn settings(
             _ => show_viewing_key(account).map(|()| false),
         };
         match result {
-            Ok(true) => return Err(reopen()),
+            Ok(true) => {
+                if hide != saved.hide_balances {
+                    zorg::account::set_hide_balances(root, hide)?;
+                }
+                return Err(reopen());
+            }
             Ok(false) => {}
             Err(e) if e == terminal::INTERRUPTED => return Err(e),
             Err(e) if e == terminal::CANCELLED => {}
