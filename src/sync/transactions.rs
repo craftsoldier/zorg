@@ -236,7 +236,7 @@ pub fn get_next_available_address(
     address_request: AddressRequestKind,
 ) -> Result<String, String> {
     let account_id = parse_account_uuid(account_uuid)?;
-    let req = address_request.to_unified_address_request()?;
+    let req = address_request.to_unified_address_request();
 
     let (ua, _) = with_wallet_db_write_lock("transactions.get_next_available_address", || {
         let mut db = open_wallet_db(db_path, network)?;
@@ -269,23 +269,12 @@ pub fn parse_address_request_kind(request: &str) -> Result<AddressRequestKind, S
 }
 
 impl AddressRequestKind {
-    fn to_unified_address_request(self) -> Result<zcash_keys::keys::UnifiedAddressRequest, String> {
+    fn to_unified_address_request(self) -> zcash_keys::keys::UnifiedAddressRequest {
         match self {
-            AddressRequestKind::Shielded => shielded_address_request(),
-            AddressRequestKind::Orchard => Ok(orchard_address_request()),
+            AddressRequestKind::Shielded => crate::keys::shielded_address_request(),
+            AddressRequestKind::Orchard => orchard_address_request(),
         }
     }
-}
-
-fn shielded_address_request() -> Result<zcash_keys::keys::UnifiedAddressRequest, String> {
-    use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
-
-    UnifiedAddressRequest::custom(
-        ReceiverRequirement::Require,
-        ReceiverRequirement::Require,
-        ReceiverRequirement::Omit,
-    )
-    .map_err(|_| "bad shielded address request".to_string())
 }
 
 fn orchard_address_request() -> zcash_keys::keys::UnifiedAddressRequest {
