@@ -490,16 +490,12 @@ async fn execute_stored(
 
 // ======================== Resubmit ========================
 
-pub(crate) async fn resubmit_pending_transactions<ShouldExit>(
+pub(crate) async fn resubmit_pending_transactions(
     db_path: &str,
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     current_height: u32,
     excluded: &HashSet<Vec<u8>>,
-    should_exit: ShouldExit,
-) -> Result<ResubmitStats, String>
-where
-    ShouldExit: Fn() -> bool,
-{
+) -> Result<ResubmitStats, String> {
     let txs = crate::sync::transactions::get_resubmittable_txs_excluding(
         db_path,
         current_height,
@@ -507,9 +503,6 @@ where
     )?;
     let mut stats = ResubmitStats::default();
     for tx in txs {
-        if should_exit() {
-            break;
-        }
         stats.attempted += 1;
         let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {

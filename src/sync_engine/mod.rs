@@ -1,6 +1,4 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use nonempty::NonEmpty;
 use rusqlite::{params, OptionalExtension};
@@ -1018,16 +1016,12 @@ async fn refresh_utxos(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
     network: WalletNetwork,
-    should_exit: &impl Fn() -> bool,
 ) -> Result<(), SyncError> {
     let query_network = network;
     for account_id in db
         .get_account_ids()
         .map_err(|e| SyncError::db(format!("get_account_ids: {e}")))?
     {
-        if should_exit() {
-            return Ok(());
-        }
         let start_height = db
             .utxo_query_height(account_id)
             .map_err(|e| SyncError::db(format!("utxo_query_height: {e}")))?;
@@ -1047,7 +1041,6 @@ async fn refresh_utxos(
                 start_height,
                 "transparent UTXOs",
                 || {},
-                should_exit,
             )
             .await?;
         }
@@ -1062,9 +1055,8 @@ async fn refresh_transparent_addresses(
     start_height: BlockHeight,
     label: &str,
     mut mark_cache_dirty: impl FnMut(),
-    should_exit: &impl Fn() -> bool,
 ) -> Result<bool, SyncError> {
-    if addresses.is_empty() || should_exit() {
+    if addresses.is_empty() {
         return Ok(false);
     }
 
@@ -1076,33 +1068,11 @@ async fn refresh_transparent_addresses(
         addresses.len(),
     );
 
-    let mut stream = tokio::select! {
-        biased;
-        _ = watch_for_exit(should_exit) => {
-            log::info!(
-                "[{}] sync: exiting during {} transparent UTXO stream start",
-                elapsed(),
-                label,
-            );
-            return Ok(false);
-        }
-        result = get_address_utxos_stream(client, addresses, start_height) => result?,
-    };
+    let mut stream = get_address_utxos_stream(client, addresses, start_height).await?;
 
     let mut received_any = false;
     loop {
-        let reply = tokio::select! {
-            biased;
-            _ = watch_for_exit(should_exit) => {
-                log::info!(
-                    "[{}] sync: exiting during {} transparent UTXO refresh",
-                    elapsed(),
-                    label,
-                );
-                return Ok(received_any);
-            }
-            result = next_stream_message(&mut stream, "get_address_utxos_stream") => result?,
-        };
+        let reply = next_stream_message(&mut stream, "get_address_utxos_stream").await?;
         let Some(reply) = reply else {
             break;
         };
@@ -1150,12 +1120,6 @@ async fn refresh_transparent_addresses(
     Ok(received_any)
 }
 
-async fn watch_for_exit(should_exit: &impl Fn() -> bool) {
-    while !should_exit() {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
 // ==================== Main sync ====================
 
 /// Run the full sync loop with automatic retry on failure.
@@ -1164,7 +1128,6 @@ pub async fn run_sync_inner(
     db_data_path: &str,
     lightwalletd_url: &str,
     network: WalletNetwork,
-    cancel: Arc<AtomicBool>,
     progress_fn: impl Fn(SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
     const MAX_RETRIES: u32 = 3;
@@ -1182,28 +1145,10 @@ pub async fn run_sync_inner(
                 delay_secs,
                 last_err
             );
-            for _ in 0..delay_secs {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if cancel.load(Ordering::Relaxed) {
-                    log::warn!(
-                        "[{}] sync: cancelled during retry wait (pending error: {})",
-                        elapsed(),
-                        last_err
-                    );
-                    return Ok(());
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         }
 
-        match run_sync_impl(
-            db_data_path,
-            lightwalletd_url,
-            network,
-            cancel.clone(),
-            &progress_fn,
-        )
-        .await
-        {
+        match run_sync_impl(db_data_path, lightwalletd_url, network, &progress_fn).await {
             Ok(()) => return Ok(()),
             Err(sync_err) => {
                 // Inspect the typed error's recovery strategy before
@@ -1253,7 +1198,6 @@ async fn run_sync_impl(
     db_data_path: &str,
     lightwalletd_url: &str,
     network: WalletNetwork,
-    cancel: Arc<AtomicBool>,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
     let default_batch_size = BATCH_SIZE;
@@ -1264,9 +1208,9 @@ async fn run_sync_impl(
         base_batch_size,
     );
 
-    // Persist the active session before any new sync work begins. A crash or
-    // mode handoff cannot leave the previous completed tip looking like the
-    // current run completed successfully.
+    // Persist the active session before any new sync work begins. A crash, or
+    // the process being killed or replaced mid-sync, cannot leave the previous
+    // completed tip looking like the current run completed successfully.
     with_wallet_db_write_lock("sync_engine.mark_sync_started", || {
         mark_sync_started(db_data_path)
     })
@@ -1305,24 +1249,7 @@ async fn run_sync_impl(
     // Retained send-lock expiry requires a usable target height.
     crate::sync::recover_orphaned_send_locks(db_data_path, network).map_err(SyncError::db)?;
 
-    if cancel.load(Ordering::Relaxed) {
-        log::info!(
-            "[{}] sync: cancel/mode observed before transparent UTXO refresh, skipping",
-            elapsed(),
-        );
-        return Ok(());
-    }
-
-    let should_exit = || cancel.load(Ordering::Relaxed);
-    refresh_utxos(&mut client, &mut db, network, &should_exit).await?;
-
-    if should_exit() {
-        log::info!(
-            "[{}] sync: cancel/mode observed after transparent UTXO refresh",
-            elapsed(),
-        );
-        return Ok(());
-    }
+    refresh_utxos(&mut client, &mut db, network).await?;
 
     // 2.5. Resubmit eligible unmined wallet txs now that we know the
     // current tip. Matches the first of the three
@@ -1331,32 +1258,17 @@ async fn run_sync_impl(
     // logged inside the helper and must not abort the sync.
     //
     // We reuse the same `client` instead of opening a fresh channel.
-    //
-    // Pre-flight cancel/mode check: `update_chain_tip` and
-    // `open_lwd_channel` can take a couple of seconds under a
-    // slow connection, which is long enough for the user to hit
-    // stop. Skip the whole pass in that case instead of sending
-    // one more round of broadcasts after the UI asked us to quit.
-    if cancel.load(Ordering::Relaxed) {
-        log::info!(
-            "[{}] sync: cancel/mode observed before startup resubmit, skipping",
-            elapsed(),
-        );
-    } else {
-        let startup_ranges = db
-            .suggest_scan_ranges()
-            .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
-        let startup_resubmit_exclusions =
-            recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
-        let _ = crate::sync::resubmit_pending_transactions(
-            db_data_path,
-            &mut client,
-            tip.height as u32,
-            &startup_resubmit_exclusions,
-            || cancel.load(Ordering::Relaxed),
-        )
-        .await;
-    }
+    let startup_ranges = db
+        .suggest_scan_ranges()
+        .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
+    let startup_resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
+    let _ = crate::sync::resubmit_pending_transactions(
+        db_data_path,
+        &mut client,
+        tip.height as u32,
+        &startup_resubmit_exclusions,
+    )
+    .await;
 
     // 3. Download subtree roots (incremental)
     download_subtree_roots(&mut client, &mut db, db_data_path, network).await?;
@@ -1429,9 +1341,9 @@ async fn run_sync_impl(
     >;
     /// Prefetched block download state. Implements `Drop` to
     /// abort the spawned tokio task when the loop exits for any
-    /// reason (cancel, mode change, error, break, reorg
-    /// `continue`) so detached downloads can't outlive the sync
-    /// session and leak network traffic after shutdown.
+    /// reason (error, break, reorg `continue`) so detached
+    /// downloads can't outlive the sync session and leak network
+    /// traffic after shutdown.
     struct Prefetch {
         handle: Option<tokio::task::JoinHandle<PrefetchResult>>,
         start: BlockHeight,
@@ -1448,11 +1360,6 @@ async fn run_sync_impl(
 
     // 5. Sync loop
     loop {
-        if cancel.load(Ordering::Relaxed) {
-            log::info!("[{}] sync: cancelled", elapsed());
-            return Ok(());
-        }
-
         // Periodic tip refresh: if we've been scanning for longer
         // than TIP_REFRESH_INTERVAL, re-fetch the chain tip so
         // new blocks that arrived during a long catch-up are
@@ -1668,11 +1575,6 @@ async fn run_sync_impl(
             (download_blocks(&mut client, start, end - 1).await?, None)
         };
 
-        if cancel.load(Ordering::Relaxed) {
-            log::info!("[{}] sync: exiting after download", elapsed());
-            return Ok(());
-        }
-
         if !block_source.contains_exact_range(u32::from(start), u32::from(end)) {
             return Err(SyncError::other(format!(
                 "downloaded compact blocks do not exactly cover {}..{}",
@@ -1692,7 +1594,7 @@ async fn run_sync_impl(
         // the prefetch — the next range comes from
         // suggest_scan_ranges() which needs the DB state the current
         // scan just committed, and we can't predict it in advance.
-        if end < range_end && !cancel.load(Ordering::Relaxed) {
+        if end < range_end {
             let pf_start = end;
             // Recompute batch_size for the prefetch range in case
             // it crosses a sandblasting boundary differently.
@@ -1984,11 +1886,6 @@ async fn run_sync_impl(
             },
         };
 
-        if cancel.load(Ordering::Relaxed) {
-            log::info!("[{}] sync: exiting after scan", elapsed());
-            return Ok(());
-        }
-
         // Truncation can temporarily clear a transaction's mined height while
         // retaining note positions that prove compact scanning found it mined.
         // Exclude those transactions from recovery resubmission while scanning
@@ -2020,27 +1917,11 @@ async fn run_sync_impl(
         // starts before the scan, so the tip is at most one scan
         // and enhancement old.
         //
-        // Pre-flight guard matches the one at the startup resubmit
-        // call site — if cancel or mode-change landed during
-        // `run_enhancement` (which can spend a second or two on a
-        // transparent-address scan), bail before opening a single
-        // new `send_transaction` RPC. The helper also consults the
-        // same closure between candidates and before each retry so
-        // a cancel arriving mid-pass stops initiating further
-        // broadcasts.
-        //
         // Best-effort: helper swallows per-tx failures, we ignore
         // the return value, and if the tip refresh itself fails we
         // log and skip the pass rather than falling back to the
         // stale height (the whole point of the refresh is to avoid
         // rebroadcasting against a stale expiry window).
-        if cancel.load(Ordering::Relaxed) {
-            log::info!(
-                "[{}] sync: cancel/mode observed before post-batch resubmit, exiting",
-                elapsed(),
-            );
-            return Ok(());
-        }
         match tip_fetch
             .await
             .map_err(|e| SyncError::other(format!("tip fetch task: {e}")))
@@ -2086,7 +1967,6 @@ async fn run_sync_impl(
                     &mut client,
                     fresh_tip_height,
                     &resubmit_exclusions,
-                    || cancel.load(Ordering::Relaxed),
                 )
                 .await;
             }
@@ -2097,11 +1977,6 @@ async fn run_sync_impl(
                 );
             }
         }
-        if cancel.load(Ordering::Relaxed) {
-            log::info!("[{}] sync: exiting after resubmit pass", elapsed());
-            return Ok(());
-        }
-
         // Report progress
         let has_new_tx = scan_summary.received_sapling_note_count() > 0
             || scan_summary.spent_sapling_note_count() > 0

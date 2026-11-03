@@ -184,9 +184,6 @@ pub use send::{
 
 // ======================== Sync State & Orchestration ========================
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 /// How much of the wallet, from its birthday to the chain tip, has been
 /// scanned, from 0 to 1, or none before the first sync.
 pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<f64>, String> {
@@ -211,11 +208,9 @@ pub fn run_full_sync_blocking(
     progress: impl Fn(crate::sync_engine::SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
     crate::account::ensure_db_migrated_once(db_path, network)?;
-    let cancel = Arc::new(AtomicBool::new(false));
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
-        crate::sync_engine::run_sync_inner(db_path, lightwalletd_url, network, cancel, progress)
-            .await
+        crate::sync_engine::run_sync_inner(db_path, lightwalletd_url, network, progress).await
     })
 }
