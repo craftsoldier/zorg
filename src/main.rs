@@ -381,14 +381,14 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                         .and_then(|url| cmd_send(account, &url, &[], None, &missing))
                 }),
                 1 => receive(account),
-                _ => cmd_history(&account.db_path, account.network, None, &account.uuid),
+                _ => history(account),
             };
             match result {
                 Err(e) if e == terminal::INTERRUPTED => return Err(e),
                 Err(e) if e == terminal::CANCELLED => terminal::note("Cancelled."),
                 Err(e) if e == terminal::REPORTED => {}
                 Err(e) => terminal::failure(&e),
-                Ok(()) if choice == 1 => continue,
+                Ok(()) if choice != 0 => continue,
                 Ok(()) => {}
             }
             println!();
@@ -803,6 +803,81 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
                 "New address.".into()
             }),
         };
+    }
+}
+
+/// The History screen: `account`'s transactions, pending first and then
+/// newest first, with Enter to show one in full, until Esc goes back.
+fn history(account: &zorg::account::Account) -> Result<(), String> {
+    let (db, net, uuid) = (
+        account.db_path.as_str(),
+        account.network,
+        account.uuid.as_str(),
+    );
+    let mut txs = sync::get_transaction_history(db, net, None, uuid)?;
+    txs.sort_by_key(|tx| (tx.mined_height != 0, std::cmp::Reverse(tx.mined_height)));
+    if txs.is_empty() {
+        println!("No transactions yet.\n");
+        return terminal::wait_for("Esc back");
+    }
+    let now = unix_now();
+    let items: Vec<String> = txs
+        .iter()
+        .map(|tx| {
+            let (arrow, sign) = match tx.tx_kind.as_str() {
+                "received" | "receiving" => (console::style("↓").green().to_string(), "+"),
+                "sent" => (console::style("↑").to_string(), "−"),
+                _ => ("↔".to_string(), " "),
+            };
+            let mut kind = tx.tx_kind.clone();
+            if let Some(first) = kind.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            let amount = format!(
+                "{sign}{} {}",
+                terminal::zec(tx.display_amount, 2),
+                net.unit()
+            );
+            let when = match tx.mined_height {
+                0 if tx.expired_unmined => "expired".to_string(),
+                0 => "pending".to_string(),
+                height if tx.block_time == 0 => format!("block {height}"),
+                _ => ago(now.saturating_sub(tx.block_time)),
+            };
+            format!("{arrow} {kind:<10} {amount:>18}   {when}")
+        })
+        .collect();
+    let mut current = 0;
+    loop {
+        terminal::clear()?;
+        println!("{}\n", console::style("History").bold());
+        let Some(choice) = terminal::menu("Esc back", &items, current)? else {
+            return Ok(());
+        };
+        current = choice;
+        terminal::clear()?;
+        if let Err(e) = cmd_tx(account, &txs[choice].txid.to_string()) {
+            terminal::failure(&e);
+        }
+        println!();
+        terminal::wait_for("Esc back")?;
+    }
+}
+
+/// How long ago `seconds` is, in words: "just now", "5 min ago", "yesterday".
+fn ago(seconds: u64) -> String {
+    const HOUR: u64 = 3_600;
+    const DAY: u64 = 24 * HOUR;
+    match seconds {
+        0..60 => "just now".into(),
+        60..HOUR => format!("{} min ago", seconds / 60),
+        HOUR..DAY => format!("{} h ago", seconds / HOUR),
+        DAY..172_800 => "yesterday".into(),
+        172_800..2_592_000 => format!("{} days ago", seconds / DAY),
+        2_592_000..5_184_000 => "a month ago".into(),
+        5_184_000..31_536_000 => format!("{} months ago", seconds / 2_592_000),
+        31_536_000..63_072_000 => "a year ago".into(),
+        _ => format!("{} years ago", seconds / 31_536_000),
     }
 }
 
