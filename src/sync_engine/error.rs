@@ -124,29 +124,6 @@ impl SyncError {
         SyncError::Other(msg)
     }
 
-    /// Whether this error is a chain reorg requiring rewind recovery.
-    #[allow(dead_code)] // currently unused outside recovery_strategy itself
-    pub(crate) fn is_continuity(&self) -> bool {
-        matches!(self, SyncError::Continuity { .. })
-    }
-
-    /// Whether the error looks transient and worth retrying via plain backoff
-    /// (no rewind, no caller intervention).
-    #[allow(dead_code)] // currently unused outside recovery_strategy itself
-    pub(crate) fn is_transient(&self) -> bool {
-        matches!(self, SyncError::Network(_) | SyncError::Other(_))
-    }
-
-    /// The height at which a continuity break was detected, if this is a
-    /// `Continuity` error.
-    #[allow(dead_code)] // currently unused outside recovery_strategy itself
-    pub(crate) fn continuity_height(&self) -> Option<u64> {
-        match self {
-            SyncError::Continuity { at_height, .. } => Some(*at_height),
-            _ => None,
-        }
-    }
-
     /// Map this error to the recovery action the sync loop should take.
     pub(crate) fn recovery_strategy(&self) -> RecoveryStrategy {
         match self {
@@ -256,33 +233,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn continuity_reports_its_height_and_classifies_itself() {
-        let e = SyncError::Continuity {
-            at_height: 2_500_000,
-            detail: "prev_hash mismatch".into(),
-        };
-        assert!(e.is_continuity());
-        assert!(!e.is_transient());
-        assert_eq!(e.continuity_height(), Some(2_500_000));
-    }
-
-    #[test]
-    fn network_is_transient_not_continuity() {
-        let e = SyncError::Network("connection reset by peer".into());
-        assert!(!e.is_continuity());
-        assert!(e.is_transient());
-        assert_eq!(e.continuity_height(), None);
-    }
-
-    #[test]
-    fn other_is_transient_as_conservative_default() {
-        // `Other` means we couldn't classify — err on the side of retry
-        // rather than bailing out.
-        let e = SyncError::Other("unknown".into());
-        assert!(e.is_transient());
-    }
-
-    #[test]
     fn db_and_parse_are_fatal() {
         assert_eq!(
             SyncError::Db("disk full".into()).recovery_strategy(),
@@ -388,8 +338,6 @@ mod tests {
         // `scan_cached_blocks` call site uses. The recovery loop matches
         // against this variant to decide whether to rewind.
         let e = SyncError::continuity(2_500_000, "prev_hash mismatch at 2500000");
-        assert!(e.is_continuity());
-        assert_eq!(e.continuity_height(), Some(2_500_000));
         match &e {
             SyncError::Continuity { at_height, detail } => {
                 assert_eq!(*at_height, 2_500_000);

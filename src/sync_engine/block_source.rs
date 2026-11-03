@@ -20,8 +20,6 @@
 //! [`MemoryBlockSource::new`] and hand it straight to
 //! `scan_cached_blocks`.
 
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::fmt;
 
 use zcash_client_backend::{
@@ -51,17 +49,6 @@ impl MemoryBlockSource {
                 .iter()
                 .enumerate()
                 .all(|(offset, block)| block.height == u64::from(start) + offset as u64)
-    }
-
-    /// Returns the block heights that scanning will add as Orchard subtree
-    /// checkpoints before Orchard checkpoint pruning runs.
-    #[cfg(test)]
-    pub(super) fn orchard_checkpoint_heights(&self) -> BTreeSet<u32> {
-        self.blocks
-            .iter()
-            .filter(|block| block.vtx.iter().any(|tx| !tx.actions.is_empty()))
-            .filter_map(|block| u32::try_from(block.height).ok())
-            .collect()
     }
 }
 
@@ -116,37 +103,6 @@ impl chain::BlockSource for MemoryBlockSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_client_backend::proto::compact_formats::{CompactOrchardAction, CompactTx};
-
-    #[test]
-    fn orchard_checkpoint_heights_exclude_later_cross_pool_checkpoints() {
-        let block = |height, tx: CompactTx| CompactBlock {
-            height,
-            vtx: vec![tx],
-            ..Default::default()
-        };
-        let sapling = CompactTx {
-            outputs: vec![Default::default()],
-            ..Default::default()
-        };
-        let orchard = CompactTx {
-            actions: vec![CompactOrchardAction::default()],
-            ..Default::default()
-        };
-        let ironwood = CompactTx {
-            ironwood_actions: vec![CompactOrchardAction::default()],
-            ..Default::default()
-        };
-
-        let source = MemoryBlockSource::new(vec![
-            block(10, CompactTx::default()),
-            block(11, sapling),
-            block(12, orchard),
-            block(13, ironwood),
-        ]);
-
-        assert_eq!(source.orchard_checkpoint_heights(), BTreeSet::from([12]));
-    }
 
     #[test]
     fn exact_range_requires_contiguous_order_and_no_extra_blocks() {
