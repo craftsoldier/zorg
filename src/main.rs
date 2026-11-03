@@ -236,21 +236,19 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
         let actions = ["Send", "Receive", "History", "Settings"].map(String::from);
-        let hide = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(saved.hide_balances));
+        let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
         log::set_max_level(log::LevelFilter::Off);
-        let on_account_screen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (send_update, sync_updates) = std::sync::mpsc::channel();
         {
-            let (account, lwd, hide, on_screen) = (
-                account.clone(),
-                server(account.network),
-                hide.clone(),
-                on_account_screen.clone(),
-            );
-            std::thread::spawn(move || auto_sync(account, lwd, hide, on_screen));
+            let (account, lwd) = (account.clone(), server(account.network));
+            std::thread::spawn(move || auto_sync(account, lwd, send_update));
         }
+        let mut sync_failure: Option<String> = None;
         loop {
-            let hidden = hide.load(std::sync::atomic::Ordering::SeqCst);
+            while let Ok(update) = sync_updates.try_recv() {
+                sync_failure = update.err();
+            }
             terminal::clear()?;
             let heading = format!("{} · {}", account.name, account.network.display_name());
             let width = usize::from(console::Term::stdout().size().1);
@@ -258,22 +256,35 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 "{}",
                 console::style(console::truncate_str(&heading, width, "…")).bold()
             );
+            let sync_row = |failure: &Option<String>| {
+                let text = failure.clone().unwrap_or_else(|| sync_text(account));
+                terminal::row("sync", 7, text)
+            };
             println!("{}", balance_row(account, hidden));
-            println!("{}\n", terminal::row("sync", 7, sync_text(account)));
-            on_account_screen.store(true, std::sync::atomic::Ordering::SeqCst);
+            println!("{}\n", sync_row(&sync_failure));
             let balances = if hidden {
                 "show balances"
             } else {
                 "hide balances"
             };
-            let choice =
-                terminal::menu_with_keys(&actions[..3], &[('b', balances), ('s', "settings")]);
-            on_account_screen.store(false, std::sync::atomic::Ordering::SeqCst);
+            let mut repaint = || {
+                let mut changed = false;
+                while let Ok(update) = sync_updates.try_recv() {
+                    sync_failure = update.err();
+                    changed = true;
+                }
+                if changed {
+                    terminal::paint_line(2, &balance_row(account, hidden));
+                    terminal::paint_line(3, &sync_row(&sync_failure));
+                }
+            };
+            let keys = [('b', balances), ('s', "settings")];
+            let choice = terminal::menu_with_keys(&actions[..3], &keys, &mut repaint);
             let choice = match choice? {
                 None if hidden == saved.hide_balances => return Ok(()),
                 None => return zorg::account::set_hide_balances(&root, hidden),
                 Some(3) => {
-                    hide.store(!hidden, std::sync::atomic::Ordering::SeqCst);
+                    hidden = !hidden;
                     continue;
                 }
                 Some(4) => 3,
@@ -439,13 +450,13 @@ fn balance_row(account: &zorg::account::Account, hide: bool) -> String {
     terminal::row("balance", 7, balance)
 }
 
-/// The account screen's sync row text: "up to date", or a bar showing how
+/// The account screen's sync row text: "synced", or a bar showing how
 /// much of the wallet has been scanned.
 fn sync_text(account: &zorg::account::Account) -> String {
     let synced =
         sync::get_sync_progress(&account.db_path, account.network).is_ok_and(|p| p.is_complete);
     match sync::scan_progress(&account.db_path, account.network) {
-        _ if synced => "up to date".into(),
+        _ if synced => "synced".into(),
         Ok(Some(done)) => {
             let done = done.min(0.99);
             format!("{} {:>2.0}%", terminal::bar(done, 24), done * 100.0)
@@ -456,24 +467,14 @@ fn sync_text(account: &zorg::account::Account) -> String {
 
 /// Keeps `account` synced while the app is open: checks the chain tip every
 /// 10 seconds and syncs when the wallet is behind. A chosen server `lwd` is
-/// checked once; the built-in list is resolved each time, for failover. While `on_account_screen`
-/// is set, it paints its progress on the sync row, and the balance row after
-/// each sync. Runs until the process exits.
+/// checked once; the built-in list is resolved each time, for failover. It
+/// never draws: after each step it sends `Ok`, or `Err` with the sync row's
+/// text when a sync fails. Runs until the process exits.
 fn auto_sync(
     account: zorg::account::Account,
     lwd: Option<String>,
-    hide: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    on_account_screen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    updates: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
-    let paint = |text: &str, balance: bool| {
-        if on_account_screen.load(std::sync::atomic::Ordering::SeqCst) {
-            terminal::paint_line(3, &terminal::row("sync", 7, text));
-            if balance {
-                let hidden = hide.load(std::sync::atomic::Ordering::SeqCst);
-                terminal::paint_line(2, &balance_row(&account, hidden));
-            }
-        }
-    };
     let mut checked: Option<String> = None;
     loop {
         let url = match &checked {
@@ -489,18 +490,18 @@ fn auto_sync(
             if progress.is_complete && tip <= progress.chain_tip_height {
                 return Ok(());
             }
-            paint(&sync_text(&account), false);
+            let _ = updates.send(Ok(()));
             sync::run_full_sync_blocking(&account.db_path, &url, account.network, |_| {
-                paint(&sync_text(&account), false)
+                let _ = updates.send(Ok(()));
             })
         });
-        match result {
-            Ok(()) => paint("up to date", true),
-            Err(e) if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) => {
-                paint("server unreachable · retrying", false)
+        let _ = updates.send(result.map_err(|e| {
+            if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) {
+                "server unreachable · retrying".to_string()
+            } else {
+                "failed · retrying".to_string()
             }
-            Err(_) => paint("failed · retrying", false),
-        }
+        }));
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }

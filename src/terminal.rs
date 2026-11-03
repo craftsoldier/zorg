@@ -306,9 +306,14 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
 
 /// Shows `items` as a menu like [`menu`], where pressing the `i`th of `keys`
 /// answers `items.len() + i`, as if it were one more item, named in the hint.
+/// While it waits for a key it calls `idle` about every 100 ms.
 /// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. Lines are cut to the
 /// terminal's width, and the menu is cleared after.
-pub fn menu_with_keys(items: &[String], keys: &[(char, &str)]) -> Result<Option<usize>, String> {
+pub fn menu_with_keys(
+    items: &[String],
+    keys: &[(char, &str)],
+    idle: &mut dyn FnMut(),
+) -> Result<Option<usize>, String> {
     let term = Term::stdout();
     let width = usize::from(term.size().1).saturating_sub(2);
     let fit = |text: &str| console::truncate_str(text, width, "…").into_owned();
@@ -333,7 +338,7 @@ pub fn menu_with_keys(items: &[String], keys: &[(char, &str)]) -> Result<Option<
     term.hide_cursor().map_err(|e| e.to_string())?;
     draw(current).map_err(|e| e.to_string())?;
     let answer = loop {
-        let answer = match term.read_key_raw().map_err(|e| e.to_string())? {
+        let answer = match read_key_while(idle)? {
             Key::ArrowUp => {
                 current = (current + items.len() - 1) % items.len();
                 None
@@ -363,6 +368,23 @@ pub fn menu_with_keys(items: &[String], keys: &[(char, &str)]) -> Result<Option<
     };
     term.show_cursor().map_err(|e| e.to_string())?;
     Ok(answer)
+}
+
+/// Waits for a key, calling `idle` about every 100 ms until one arrives. The
+/// key is read on a short-lived thread that ends once it has the key, so no
+/// read is left waiting to take a later screen's keys.
+fn read_key_while(idle: &mut dyn FnMut()) -> Result<Key, String> {
+    let (send_key, key) = std::sync::mpsc::channel();
+    std::thread::spawn(move || send_key.send(Term::stdout().read_key_raw()));
+    loop {
+        match key.recv_timeout(Duration::from_millis(100)) {
+            Ok(key) => return key.map_err(|e| e.to_string()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => idle(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Could not read a key".into())
+            }
+        }
+    }
 }
 
 /// Clears the terminal.
