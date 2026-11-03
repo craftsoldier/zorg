@@ -10,7 +10,6 @@ use zcash_client_backend::data_api::{
     chain::ChainState, Account as _, AccountBirthday, WalletRead, WalletWrite,
 };
 use zcash_client_sqlite::{wallet::init::init_wallet_db, AccountUuid};
-use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
@@ -47,13 +46,6 @@ fn open_wallet_db_for_init(
     network: WalletNetwork,
 ) -> Result<WalletDatabase, String> {
     open_wallet_db_with_timeout(db_path, network, WALLET_DB_BUSY_TIMEOUT)
-}
-
-fn open_wallet_db_for_mutation(
-    db_path: &str,
-    network: WalletNetwork,
-) -> Result<WalletDatabase, String> {
-    open_wallet_db_with_timeout(db_path, network, ACCOUNT_MUTATION_DB_BUSY_TIMEOUT)
 }
 
 fn open_wallet_db_for_read(
@@ -95,21 +87,6 @@ pub fn ensure_db_migrated_once(db_path: &str, network: WalletNetwork) -> Result<
     Ok(())
 }
 
-/// Initialize DB with seed for the first account (creates a Derived account).
-/// The seed is needed so that seed-requiring migrations can run in the future.
-fn ensure_db_initialized_with_seed(
-    db_path: &str,
-    network: WalletNetwork,
-    seed: &SecretVec<u8>,
-) -> Result<(), String> {
-    with_wallet_db_write_lock("keys.ensure_db_initialized_with_seed", || {
-        let mut db = open_wallet_db_for_init(db_path, network)?;
-        init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().to_vec())))
-            .map_err(|e| format!("Failed to init wallet DB: {e}"))?;
-        Ok(())
-    })
-}
-
 fn make_birthday(network: WalletNetwork, birthday_height: Option<u64>) -> AccountBirthday {
     let height = match birthday_height {
         Some(h) => BlockHeight::from_u32(h as u32),
@@ -130,12 +107,19 @@ pub fn init_db_and_create_account(
     birthday_height: Option<u64>,
     name: &str,
 ) -> Result<CreatedAccount, String> {
-    ensure_db_initialized_with_seed(db_path, network, seed)?;
+    // The seed is needed so that seed-requiring migrations can run in the future.
+    with_wallet_db_write_lock("keys.ensure_db_initialized_with_seed", || {
+        let mut db = open_wallet_db_for_init(db_path, network)?;
+        init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().to_vec())))
+            .map_err(|e| format!("Failed to init wallet DB: {e}"))?;
+        Ok::<_, String>(())
+    })?;
 
     let birthday = make_birthday(network, birthday_height);
 
     let (account_id, usk) = with_wallet_db_write_lock("keys.create_account", || {
-        let mut db = open_wallet_db_for_mutation(db_path, network)?;
+        let mut db =
+            open_wallet_db_with_timeout(db_path, network, ACCOUNT_MUTATION_DB_BUSY_TIMEOUT)?;
 
         let (account_id, usk) = db
             .create_account(name, seed, &birthday, None)
@@ -188,7 +172,13 @@ pub fn current_address(account: &Account) -> Result<String, String> {
         .map_err(|e| format!("Failed to get account: {e}"))?
         .and_then(|a| a.ufvk().cloned())
         .ok_or_else(|| format!("Account not found: {}", account.uuid))?;
-    current_receive_address(&db, account.network, id, &ufvk)
+    let (default, _) = ufvk
+        .default_address(shielded_address_request())
+        .map_err(|e| format!("Failed to derive shielded address: {e}"))?;
+    let last = db
+        .get_last_generated_address_matching(id, shielded_address_request())
+        .map_err(|e| format!("Failed to get last generated shielded address: {e}"))?;
+    Ok(last.unwrap_or(default).encode(&account.network))
 }
 
 /// The height `account` scans from, read from its database.
@@ -206,24 +196,6 @@ pub fn birthday_height(account: &Account) -> Result<u32, String> {
 pub fn parse_account_uuid(s: &str) -> Result<AccountUuid, String> {
     let uuid = uuid::Uuid::parse_str(s).map_err(|e| format!("Invalid account UUID: {e}"))?;
     Ok(AccountUuid::from_uuid(uuid))
-}
-
-fn current_receive_address(
-    db: &WalletDatabase,
-    network: WalletNetwork,
-    account_id: AccountUuid,
-    ufvk: &UnifiedFullViewingKey,
-) -> Result<String, String> {
-    let (default, _) = ufvk
-        .default_address(shielded_address_request())
-        .map_err(|e| format!("Failed to derive shielded address: {e}"))?;
-
-    let last = db
-        .get_last_generated_address_matching(account_id, shielded_address_request())
-        .map_err(|e| format!("Failed to get last generated shielded address: {e}"))?;
-
-    let address = last.unwrap_or(default);
-    Ok(address.encode(&network))
 }
 
 /// zorg's data directory: `~/Library/Application Support/zorg`.
