@@ -15,18 +15,18 @@ USAGE:
     zorg [command] [options]
 
 COMMANDS:
-    accounts                                           List named accounts
-    create [name]                                      Create an account with a new recovery phrase
-    import [name] [--birthday <height>]                 Import a recovery phrase at account index 0
-    balance [--account <name>]                         Show balance
-    address [--account <name>]                         Show receive address
-    sync [--account <name>]                            Sync all accounts, or the chosen account's database
-    status [--account <name>]                          Show sync progress
-    send <to> <amount> [--memo <text>] [--account <name>] Send ZEC
-    history [--limit <n>] [--account <name>]             Show transaction history
-    recovery [--account <name>]                        Show the recovery phrase
-    validate <address>                                 Validate a Zcash address
-    delete --account <name>                            Delete an account
+    accounts                                                List named accounts
+    create [name]                                           Create an account with a new recovery phrase
+    import [name] [--birthday <height>]                     Import a recovery phrase at account index 0
+    balance [--account <name>]                              Show balance
+    address [--account <name>]                              Show receive address
+    sync [--account <name>]                                 Sync all accounts, or the chosen account's database
+    status [--account <name>]                               Show sync progress
+    send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
+    history [--limit <n>] [--account <name>]                Show transaction history
+    recovery [--account <name>]                             Show the recovery phrase
+    validate <address>                                      Validate a Zcash address
+    delete --account <name>                                 Delete an account
 
 OPTIONS:
     --network <net>      main | test | regtest

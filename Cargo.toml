@@ -50,6 +50,8 @@ log = "0.4"
 
 # Hex encoding
 hex = "0.4"
+
+# Terminal interface
 console = "0.16.6"
 indicatif = "0.18.6"
 dialoguer = "0.12.0"
