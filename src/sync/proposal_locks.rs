@@ -1,7 +1,7 @@
 //! Durable bookkeeping for owner-scoped locks held by in-memory send proposals.
 //!
-//! `PROPOSAL_STORE` deliberately remains process-local, but the wallet locks it
-//! owns live in SQLite. This side table records enough generic `OutputRef`
+//! Send proposals live only in the process, but the wallet locks they
+//! own live in SQLite. This side table records enough generic `OutputRef`
 //! information to release locks left by a previous process without touching
 //! long-lived migration owners.
 
