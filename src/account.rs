@@ -269,6 +269,7 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
     secure_wallet_db_file(&path)?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
+         BEGIN IMMEDIATE;
          CREATE TABLE IF NOT EXISTS accounts (
              uuid TEXT PRIMARY KEY NOT NULL,
              name TEXT NOT NULL UNIQUE,
@@ -283,8 +284,7 @@ pub fn open_index_for_write(root: &Path) -> Result<rusqlite::Connection, String>
              server_test TEXT,
              server_main TEXT
          );
-         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');
-         BEGIN IMMEDIATE;",
+         INSERT OR IGNORE INTO settings (id, user_name) VALUES (1, 'ZORG');",
     )
     .map_err(|e| format!("Could not lock database index: {e}"))?;
     Ok(conn)
@@ -316,14 +316,31 @@ fn indexed_accounts(conn: &rusqlite::Connection) -> Result<Vec<Account>, String>
 
 /// The accounts in `zorg_index.db`, or none when it does not exist.
 pub fn read_index(root: &Path) -> Result<Vec<Account>, String> {
+    match open_index_for_read(root, "accounts")? {
+        Some(conn) => indexed_accounts(&conn),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Opens `zorg_index.db` to read `table`, or none when the index has no such
+/// table yet: no file, or a first write that never finished. It opens
+/// read-write, without creating the file, so SQLite can roll back that write.
+fn open_index_for_read(root: &Path, table: &str) -> Result<Option<rusqlite::Connection>, String> {
     let path = root.join("zorg_index.db");
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let conn =
-        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(|e| format!("Could not open database index: {e}"))?;
-    indexed_accounts(&conn)
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Could not read database index: {e}"))?;
+    Ok(exists.then_some(conn))
 }
 
 /// What the settings row of `zorg_index.db` holds.
@@ -352,24 +369,9 @@ impl Settings {
 
 /// The settings in `zorg_index.db`, or the defaults when none are saved yet.
 pub fn read_settings(root: &Path) -> Result<Settings, String> {
-    let path = root.join("zorg_index.db");
-    if !path.exists() {
+    let Some(conn) = open_index_for_read(root, "settings")? else {
         return Ok(Settings::default());
-    }
-    let error = |e: rusqlite::Error| format!("Could not read settings: {e}");
-    let conn =
-        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("Could not open database index: {e}"))?;
-    let saved: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if !saved {
-        return Ok(Settings::default());
-    }
+    };
     conn.query_row(
         "SELECT default_account, hide_balances, server_test, server_main FROM settings",
         [],
@@ -382,7 +384,7 @@ pub fn read_settings(root: &Path) -> Result<Settings, String> {
             })
         },
     )
-    .map_err(error)
+    .map_err(|e| format!("Could not read settings: {e}"))
 }
 
 /// Runs `sql` on the settings row of `zorg_index.db`.

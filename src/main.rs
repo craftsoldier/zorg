@@ -236,19 +236,19 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
         let actions = ["Send", "Receive", "History", "Settings"].map(String::from);
-        let hide = saved.hide_balances;
+        let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
         log::set_max_level(log::LevelFilter::Off);
-        let on_account_screen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (send_update, sync_updates) = std::sync::mpsc::channel();
         {
-            let (account, lwd, on_screen) = (
-                account.clone(),
-                server(account.network),
-                on_account_screen.clone(),
-            );
-            std::thread::spawn(move || auto_sync(account, lwd, hide, on_screen));
+            let (account, lwd) = (account.clone(), server(account.network));
+            std::thread::spawn(move || auto_sync(account, lwd, send_update));
         }
+        let mut sync_failure: Option<String> = None;
         loop {
+            while let Ok(update) = sync_updates.try_recv() {
+                sync_failure = update.err();
+            }
             terminal::clear()?;
             let heading = format!("{} · {}", account.name, account.network.display_name());
             let width = usize::from(console::Term::stdout().size().1);
@@ -256,13 +256,39 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 "{}",
                 console::style(console::truncate_str(&heading, width, "…")).bold()
             );
-            println!("{}", balance_row(account, hide));
-            println!("{}\n", terminal::row("sync", 7, sync_text(account)));
-            on_account_screen.store(true, std::sync::atomic::Ordering::SeqCst);
-            let choice = terminal::menu_with_key(&actions[..3], 's', "settings");
-            on_account_screen.store(false, std::sync::atomic::Ordering::SeqCst);
-            let Some(choice) = choice? else {
-                return Ok(());
+            let sync_row = |failure: &Option<String>| {
+                let text = failure.clone().unwrap_or_else(|| sync_text(account));
+                terminal::row("sync", 7, text)
+            };
+            println!("{}", balance_row(account, hidden));
+            println!("{}\n", sync_row(&sync_failure));
+            let balances = if hidden {
+                "show balances"
+            } else {
+                "hide balances"
+            };
+            let mut repaint = || {
+                let mut changed = false;
+                while let Ok(update) = sync_updates.try_recv() {
+                    sync_failure = update.err();
+                    changed = true;
+                }
+                if changed {
+                    terminal::paint_line(2, &balance_row(account, hidden));
+                    terminal::paint_line(3, &sync_row(&sync_failure));
+                }
+            };
+            let keys = [('b', balances), ('s', "settings")];
+            let choice = terminal::menu_with_keys(&actions[..3], &keys, &mut repaint);
+            let choice = match choice? {
+                None if hidden == saved.hide_balances => return Ok(()),
+                None => return zorg::account::set_hide_balances(&root, hidden),
+                Some(3) => {
+                    hidden = !hidden;
+                    continue;
+                }
+                Some(4) => 3,
+                Some(choice) => choice,
             };
             terminal::clear()?;
             println!("{}\n", console::style(&actions[choice]).bold());
@@ -273,8 +299,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                         .and_then(|url| cmd_send(account, &url, &[], None, &missing))
                 }),
                 1 => receive(account),
-                2 => history(account, hide),
-                _ => settings(&root, account, &accounts, &saved, &args.options),
+                2 => history(account, hidden),
+                _ => settings(&root, account, &accounts, &saved, &args.options, hidden),
             };
             match result {
                 Err(e) if e == terminal::INTERRUPTED => return Err(e),
@@ -396,7 +422,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 .transpose()?;
             cmd_history(db, net, limit, uuid)
         }
-        "tx" => cmd_tx(selected, &args.positional[0]),
+        "tx" => cmd_tx(selected, &args.positional[0], false),
         "recovery" => cmd_recovery(net, selected),
         "delete" => {
             if name.is_none() && !terminal::interactive() {
@@ -424,13 +450,13 @@ fn balance_row(account: &zorg::account::Account, hide: bool) -> String {
     terminal::row("balance", 7, balance)
 }
 
-/// The account screen's sync row text: "up to date", or a bar showing how
+/// The account screen's sync row text: "synced", or a bar showing how
 /// much of the wallet has been scanned.
 fn sync_text(account: &zorg::account::Account) -> String {
     let synced =
         sync::get_sync_progress(&account.db_path, account.network).is_ok_and(|p| p.is_complete);
     match sync::scan_progress(&account.db_path, account.network) {
-        _ if synced => "up to date".into(),
+        _ if synced => "synced".into(),
         Ok(Some(done)) => {
             let done = done.min(0.99);
             format!("{} {:>2.0}%", terminal::bar(done, 24), done * 100.0)
@@ -441,23 +467,14 @@ fn sync_text(account: &zorg::account::Account) -> String {
 
 /// Keeps `account` synced while the app is open: checks the chain tip every
 /// 10 seconds and syncs when the wallet is behind. A chosen server `lwd` is
-/// checked once; the built-in list is resolved each time, for failover. While `on_account_screen`
-/// is set, it paints its progress on the sync row, and the balance row after
-/// each sync. Runs until the process exits.
+/// checked once; the built-in list is resolved each time, for failover. It
+/// never draws: after each step it sends `Ok`, or `Err` with the sync row's
+/// text when a sync fails. Runs until the process exits.
 fn auto_sync(
     account: zorg::account::Account,
     lwd: Option<String>,
-    hide: bool,
-    on_account_screen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    updates: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
-    let paint = |text: &str, balance: bool| {
-        if on_account_screen.load(std::sync::atomic::Ordering::SeqCst) {
-            terminal::paint_line(3, &terminal::row("sync", 7, text));
-            if balance {
-                terminal::paint_line(2, &balance_row(&account, hide));
-            }
-        }
-    };
     let mut checked: Option<String> = None;
     loop {
         let url = match &checked {
@@ -473,18 +490,18 @@ fn auto_sync(
             if progress.is_complete && tip <= progress.chain_tip_height {
                 return Ok(());
             }
-            paint(&sync_text(&account), false);
+            let _ = updates.send(Ok(()));
             sync::run_full_sync_blocking(&account.db_path, &url, account.network, |_| {
-                paint(&sync_text(&account), false)
+                let _ = updates.send(Ok(()));
             })
         });
-        match result {
-            Ok(()) => paint("up to date", true),
-            Err(e) if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) => {
-                paint("server unreachable · retrying", false)
+        let _ = updates.send(result.map_err(|e| {
+            if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) {
+                "server unreachable · retrying".to_string()
+            } else {
+                "failed · retrying".to_string()
             }
-            Err(_) => paint("failed · retrying", false),
-        }
+        }));
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }
@@ -878,14 +895,13 @@ fn settings(
     accounts: &[zorg::account::Account],
     saved: &zorg::account::Settings,
     options: &HashMap<&'static str, String>,
+    hide: bool,
 ) -> Result<(), String> {
     let server = |url: &Option<String>| url.clone().unwrap_or_else(|| "built-in".into());
-    let hidden = if saved.hide_balances { "on" } else { "off" };
     let items = [
         format!("{:<15} {}", "Accounts", account.name),
         format!("{:<15} {}", "Testnet server", server(&saved.server_test)),
         format!("{:<15} {}", "Mainnet server", server(&saved.server_main)),
-        format!("{:<15} {hidden}", "Hide balances"),
         "Viewing key".to_string(),
     ];
     let mut current = 0;
@@ -897,14 +913,18 @@ fn settings(
         };
         current = choice;
         let result = match choice {
-            0 => switch_account(root, account, accounts, options, saved),
+            0 => switch_account(root, account, accounts, options, saved, hide),
             1 => choose_server(root, WalletNetwork::Test),
             2 => choose_server(root, WalletNetwork::Main),
-            3 => zorg::account::set_hide_balances(root, !saved.hide_balances).map(|()| true),
             _ => show_viewing_key(account).map(|()| false),
         };
         match result {
-            Ok(true) => return Err(reopen()),
+            Ok(true) => {
+                if hide != saved.hide_balances {
+                    zorg::account::set_hide_balances(root, hide)?;
+                }
+                return Err(reopen());
+            }
             Ok(false) => {}
             Err(e) if e == terminal::INTERRUPTED => return Err(e),
             Err(e) if e == terminal::CANCELLED => {}
@@ -926,6 +946,7 @@ fn switch_account(
     accounts: &[zorg::account::Account],
     options: &HashMap<&'static str, String>,
     saved: &zorg::account::Settings,
+    hide: bool,
 ) -> Result<bool, String> {
     terminal::clear()?;
     println!("{}\n", console::style("Accounts").bold());
@@ -975,7 +996,7 @@ fn switch_account(
         return Ok(true);
     }
     terminal::clear()?;
-    cmd_delete(root, picked, saved.hide_balances)?;
+    cmd_delete(root, picked, hide)?;
     let deleted = zorg::account::read_index(root)?.len() < accounts.len();
     if !deleted {
         println!();
@@ -1081,7 +1102,7 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
         };
         current = choice;
         terminal::clear()?;
-        if let Err(e) = cmd_tx(account, &txs[choice].txid.to_string()) {
+        if let Err(e) = cmd_tx(account, &txs[choice].txid.to_string(), hide) {
             terminal::failure(&e);
         }
         println!();
@@ -1411,8 +1432,9 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
     Ok(())
 }
 
-/// Prints the transaction `txid` in full: one section per history row it makes.
-fn cmd_tx(account: &zorg::account::Account, txid: &str) -> Result<(), String> {
+/// Prints the transaction `txid` in full: one section per history row it makes,
+/// with amounts as dots when `hide` is set.
+fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<(), String> {
     let (db, net, uuid) = (
         account.db_path.as_str(),
         account.network,
@@ -1430,6 +1452,13 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str) -> Result<(), String> {
         ));
     }
     let unit = net.unit();
+    let zec = |zatoshis| {
+        if hide {
+            "••••".into()
+        } else {
+            terminal::zec(zatoshis, 0)
+        }
+    };
     for tx in rows {
         let detail = sync::get_transaction_detail(db, net, uuid, &txid, &tx.tx_kind)?;
         let status = if tx.mined_height > 0 {
@@ -1443,17 +1472,14 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str) -> Result<(), String> {
         if let Some(first) = kind.get_mut(..1) {
             first.make_ascii_uppercase();
         }
-        println!(
-            "{kind} {} {unit}   {status}",
-            terminal::zec(tx.display_amount, 0)
-        );
+        println!("{kind} {} {unit}   {status}", zec(tx.display_amount));
         if let Some(from) = &detail.source_address {
             println!("{}", terminal::row("from", 4, from));
         }
         for output in &detail.outputs {
             let to = output.address.as_deref().unwrap_or("(unknown)");
             if detail.outputs.len() > 1 {
-                let amount = terminal::zec(output.amount_zatoshi, 0);
+                let amount = zec(output.amount_zatoshi);
                 println!(
                     "{}",
                     terminal::row("to", 4, format!("{to}  {amount} {unit}"))
@@ -1467,7 +1493,7 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str) -> Result<(), String> {
         }
         println!("{}", terminal::row("pool", 4, &tx.display_pool));
         if tx.tx_kind != "received" && tx.tx_kind != "receiving" {
-            let fee = terminal::zec(tx.fee, 0);
+            let fee = zec(tx.fee);
             println!("{}", terminal::row("fee", 4, format!("{fee} {unit}")));
         }
         if let [output] = detail.outputs.as_slice() {
