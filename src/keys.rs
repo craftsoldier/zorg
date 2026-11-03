@@ -34,11 +34,6 @@ pub fn mnemonic_to_seed(phrase: &str) -> Result<SecretVec<u8>, String> {
     Ok(secret_seed)
 }
 
-/// Parse network string to wallet network enum.
-pub fn parse_network(network: &str) -> Result<WalletNetwork, String> {
-    network.parse()
-}
-
 /// Convert an account index to the backend's ZIP-32 account id.
 pub fn zip32_account_id(account_index: u32) -> Result<zip32::AccountId, String> {
     zip32::AccountId::try_from(account_index)
@@ -131,16 +126,5 @@ mod tests {
         let phrase = vec!["abandon"; 24].join(" ");
         let error = mnemonic_to_seed(&phrase).err().unwrap();
         assert_eq!(error, "Recovery phrase checksum is invalid");
-    }
-
-    #[test]
-    fn test_parse_network() {
-        assert!(matches!(parse_network("main"), Ok(WalletNetwork::Main)));
-        assert!(matches!(parse_network("test"), Ok(WalletNetwork::Test)));
-        assert!(matches!(
-            parse_network("regtest"),
-            Ok(WalletNetwork::Regtest)
-        ));
-        assert!(parse_network("invalid").is_err());
     }
 }

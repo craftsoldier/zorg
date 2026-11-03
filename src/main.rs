@@ -208,7 +208,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
-    let network = network.as_deref().map(keys::parse_network).transpose()?;
+    let network = network.as_deref().map(str::parse).transpose()?;
     let databases = zorg::account::read_database_paths(&root)?;
     let (accounts, unavailable) = zorg::account::accounts_from_databases(&databases)?;
     for message in &unavailable {
@@ -244,15 +244,10 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             } else {
                 ("Import", "import", "imported")
             };
-            let network_name = |net: WalletNetwork| match net {
-                WalletNetwork::Main => "mainnet",
-                WalletNetwork::Test => "testnet",
-                WalletNetwork::Regtest => "regtest",
-            };
             let card = |_full: bool| {
                 let mut lines = vec![
                     format!("{title} account {}", console::style(&name).bold()),
-                    terminal::row("network", 8, network_name(net.get())),
+                    terminal::row("network", 8, net.get().display_name()),
                 ];
                 if cmd == "import" {
                     let from = birthday.map_or("the start".to_string(), |h| h.to_string());
@@ -261,12 +256,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 lines
             };
             let mut switch = || {
-                let networks = [
-                    WalletNetwork::Main,
-                    WalletNetwork::Test,
-                    WalletNetwork::Regtest,
-                ];
-                let names = ["mainnet", "testnet", "regtest"].map(String::from);
+                let networks = WalletNetwork::ALL;
+                let names = networks.map(|n| n.display_name().to_string());
                 let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
                 net.set(networks[terminal::pick("Network", &names, current)?]);
                 Ok(())
@@ -355,7 +346,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 let balance = sync::get_wallet_balance(&a.db_path, a.network, &a.uuid)
                     .map(|b| terminal::zec(b.total, 2))
                     .unwrap_or_else(|_| "?".into());
-                format!("{:<20} {balance} {}", a.name, zec_unit(a.network))
+                format!("{:<20} {balance} {}", a.name, a.network.unit())
             })
             .collect();
         Some(&visible[terminal::pick("Which account?", &items, 0)?])
@@ -431,7 +422,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
 
 /// Syncs one wallet database with the chain.
 fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
-    sync::run_full_sync_blocking(db_path, lwd_url, net.as_str())?;
+    sync::run_full_sync_blocking(db_path, lwd_url, net)?;
     println!("Sync complete.");
     Ok(())
 }
@@ -455,7 +446,7 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<St
         return Ok(resolve_default_lwd_url(net, cmd));
     };
     let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
-    let served = network_with_sapling_activation_height(height);
+    let served = WalletNetwork::from_sapling_activation_height(height);
     if served != Some(*net) {
         let served = served.map_or("an unknown network".into(), |n| {
             format!("the {} network", n.as_str())
@@ -466,21 +457,6 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork, cmd: &str) -> Result<St
         ));
     }
     Ok(url.to_string())
-}
-
-/// The network whose Sapling activation height is `height`.
-fn network_with_sapling_activation_height(height: u64) -> Option<WalletNetwork> {
-    use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
-    [
-        WalletNetwork::Main,
-        WalletNetwork::Test,
-        WalletNetwork::Regtest,
-    ]
-    .into_iter()
-    .find(|net| {
-        net.activation_height(NetworkUpgrade::Sapling)
-            .is_some_and(|h| u64::from(u32::from(h)) == height)
-    })
 }
 
 fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
@@ -614,7 +590,7 @@ fn cmd_import(
 fn cmd_delete(root: &std::path::Path, account: &zorg::account::AccountInfo) -> Result<(), String> {
     let interactive = terminal::interactive();
     if interactive {
-        let unit = zec_unit(account.network);
+        let unit = account.network.unit();
         let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
             .map_or("unknown".to_string(), |b| {
                 format!("{} {unit}", terminal::zec(b.total, 2))
@@ -722,7 +698,7 @@ fn cmd_send(
         account.uuid.as_str(),
     );
     let interactive = terminal::interactive();
-    let unit = zec_unit(net);
+    let unit = net.unit();
     let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
     let guided = positional.len() < 2;
     let to = match positional.first() {
@@ -856,14 +832,6 @@ fn cmd_send(
     }
 }
 
-/// "ZEC" on mainnet, "TAZ" on test networks.
-fn zec_unit(net: WalletNetwork) -> &'static str {
-    match net {
-        WalletNetwork::Main => "ZEC",
-        WalletNetwork::Test | WalletNetwork::Regtest => "TAZ",
-    }
-}
-
 /// The amount, recipient, fee and memo of a send, shown before it is authorized.
 fn send_summary(
     to: &str,
@@ -910,11 +878,7 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
 
 /// Testnet (and regtest) coins are worthless by design — say so.
 fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
-    let unit = match net {
-        WalletNetwork::Main => "ZEC",
-        WalletNetwork::Test | WalletNetwork::Regtest => "TAZ",
-    };
-    format!("{:.8} {unit}", zatoshis as f64 / 100_000_000.0)
+    format!("{:.8} {}", zatoshis as f64 / 100_000_000.0, net.unit())
 }
 
 /// Unix seconds since the epoch (0 if the clock is somehow before 1970).
@@ -1010,26 +974,9 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
     Ok(zatoshis)
 }
 
-/// Candidate lightwalletd endpoints per network, in priority order.
-fn default_lwd_urls(net: &WalletNetwork) -> &'static [&'static str] {
-    match net {
-        WalletNetwork::Main => &[
-            "https://zec.rocks:443",
-            "https://us.zec.stardust.rest:443",
-            "https://eu.zec.stardust.rest:443",
-            "https://eu.zec.rocks:443",
-            "https://na.zec.rocks:443",
-            "https://ap.zec.rocks:443",
-            "https://sa.zec.rocks:443",
-        ],
-        WalletNetwork::Test => &["https://testnet.zec.rocks:443"],
-        WalletNetwork::Regtest => &["http://localhost:9067"],
-    }
-}
-
 /// Pick a lightwalletd endpoint when the user did not specify one.
 fn resolve_default_lwd_url(net: &WalletNetwork, cmd: &str) -> String {
-    let candidates = default_lwd_urls(net);
+    let candidates = net.default_lightwalletd_urls();
     let needs_network = matches!(cmd, "sync" | "create" | "send");
     let Some((first_alive, attempts)) = candidates.iter().enumerate().find_map(|(i, url)| {
         if !needs_network {
@@ -1190,23 +1137,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         super::run_in(root.path().to_path_buf(), parse_args(&[]).unwrap()).unwrap();
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn sapling_activation_height_identifies_the_network() {
-        assert_eq!(
-            network_with_sapling_activation_height(419_200),
-            Some(WalletNetwork::Main)
-        );
-        assert_eq!(
-            network_with_sapling_activation_height(280_000),
-            Some(WalletNetwork::Test)
-        );
-        assert_eq!(
-            network_with_sapling_activation_height(1),
-            Some(WalletNetwork::Regtest)
-        );
-        assert_eq!(network_with_sapling_activation_height(5), None);
     }
 
     #[test]
