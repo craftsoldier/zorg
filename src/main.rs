@@ -223,11 +223,27 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             unavailable += 1;
         }
     }
-    let cmd = if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
-        first_run()?
-    } else {
-        cmd
-    };
+    if args.command.is_none() && accounts.is_empty() && terminal::interactive() {
+        let command = first_run()?;
+        let mut args = args;
+        run_in(
+            root.clone(),
+            Args {
+                command: Some(command.into()),
+                positional: Vec::new(),
+                options: args.options.clone(),
+                help: false,
+                version: false,
+            },
+        )?;
+        if zorg::account::read_index(&root)?.is_empty() {
+            return Ok(());
+        }
+        println!();
+        terminal::wait_for("Enter to open your account")?;
+        args.options.remove("--network");
+        return run_in(root, args);
+    }
     if matches!(cmd, "create" | "import") {
         let interactive = terminal::interactive();
         let name = match args.positional.first() {
@@ -331,29 +347,29 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .iter()
         .find(|a| zorg::account::ensure_database_exists(a).is_ok());
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        let actions = ["Send", "Receive", "History", "Sync"].map(String::from);
+        let actions = ["Send", "Receive", "History"].map(String::from);
+        // Warnings would print over the screen; sync failures show in the sync row.
+        log::set_max_level(log::LevelFilter::Off);
+        let on_account_screen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (account, lwd, on_screen) =
+                (account.clone(), lwd.clone(), on_account_screen.clone());
+            std::thread::spawn(move || auto_sync(account, lwd, on_screen));
+        }
         loop {
             terminal::clear()?;
-            let balance =
-                sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-                    .map_or("unknown".to_string(), |b| {
-                        format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
-                    });
+            let heading = format!("{} · {}", account.name, account.network.display_name());
+            let width = usize::from(console::Term::stdout().size().1);
             println!(
-                "{} · {}",
-                console::style(&account.name).bold(),
-                account.network.display_name()
+                "{}",
+                console::style(console::truncate_str(&heading, width, "…")).bold()
             );
-            println!("{}", terminal::row("balance", 7, balance));
-            let short = match zorg::account::current_address(account) {
-                Ok(address) => terminal::address(&address, false),
-                Err(e) => {
-                    eprintln!("{e}");
-                    "(unavailable)".into()
-                }
-            };
-            println!("{}\n", terminal::row("address", 7, short));
-            let Some(choice) = terminal::menu("q quit", &actions, 0)? else {
+            println!("{}", balance_row(account));
+            println!("{}\n", terminal::row("sync", 7, sync_text(account)));
+            on_account_screen.store(true, std::sync::atomic::Ordering::SeqCst);
+            let choice = terminal::menu("q quit", &actions, 0);
+            on_account_screen.store(false, std::sync::atomic::Ordering::SeqCst);
+            let Some(choice) = choice? else {
                 return Ok(());
             };
             terminal::clear()?;
@@ -365,9 +381,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                         .and_then(|url| cmd_send(account, &url, &[], None, &missing))
                 }),
                 1 => receive(account),
-                2 => cmd_history(&account.db_path, account.network, None, &account.uuid),
-                _ => endpoint(lwd.as_deref(), &account.network)
-                    .and_then(|url| sync_database(&account.db_path, account.network, &url)),
+                _ => cmd_history(&account.db_path, account.network, None, &account.uuid),
             };
             match result {
                 Err(e) if e == terminal::INTERRUPTED => return Err(e),
@@ -378,7 +392,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 Ok(()) => {}
             }
             println!();
-            terminal::wait_for_back()?;
+            terminal::wait_for("Esc back")?;
         }
     }
     if cmd == "accounts" {
@@ -501,6 +515,70 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     };
     zorg::account::secure_wallet_db_file(std::path::Path::new(db))?;
     result
+}
+
+/// The account screen's balance row for `account`.
+fn balance_row(account: &zorg::account::Account) -> String {
+    let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+        .map_or("unknown".to_string(), |b| {
+            format!("{} {}", terminal::zec(b.total, 2), account.network.unit())
+        });
+    terminal::row("balance", 7, balance)
+}
+
+/// The account screen's sync row text: "up to date", or a bar showing how
+/// much of the wallet has been scanned.
+fn sync_text(account: &zorg::account::Account) -> String {
+    let synced =
+        sync::get_sync_progress(&account.db_path, account.network).is_ok_and(|p| p.is_complete);
+    match sync::scan_progress(&account.db_path, account.network) {
+        _ if synced => "up to date".into(),
+        Ok(Some(done)) => {
+            let done = done.min(0.99);
+            format!("{} {:>2.0}%", terminal::bar(done, 24), done * 100.0)
+        }
+        _ => "syncing…".into(),
+    }
+}
+
+/// Keeps `account` synced while the app is open: checks the chain tip every
+/// 10 seconds and syncs when the wallet is behind. While `on_account_screen`
+/// is set, it paints its progress on the sync row, and the balance row after
+/// each sync. Runs until the process exits.
+fn auto_sync(
+    account: zorg::account::Account,
+    lwd: Option<String>,
+    on_account_screen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let paint = |text: &str, balance: bool| {
+        if on_account_screen.load(std::sync::atomic::Ordering::SeqCst) {
+            terminal::paint_line(3, &terminal::row("sync", 7, text));
+            if balance {
+                terminal::paint_line(2, &balance_row(&account));
+            }
+        }
+    };
+    loop {
+        let result = endpoint(lwd.as_deref(), &account.network).and_then(|url| {
+            let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
+            let progress = sync::get_sync_progress(&account.db_path, account.network)?;
+            if progress.is_complete && tip <= progress.chain_tip_height {
+                return Ok(());
+            }
+            paint(&sync_text(&account), false);
+            sync::run_full_sync_blocking(&account.db_path, &url, account.network, |_| {
+                paint(&sync_text(&account), false)
+            })
+        });
+        match result {
+            Ok(()) => paint("up to date", true),
+            Err(e) if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) => {
+                paint("server unreachable · retrying", false)
+            }
+            Err(_) => paint("failed · retrying", false),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
 }
 
 /// Syncs one wallet database with the chain.
@@ -1208,7 +1286,7 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
         match zorg::sync_engine::get_latest_block_height(url) {
             Ok(_) => Some((url, i + 1)),
             Err(e) => {
-                eprintln!("note: {url} unreachable ({e}); trying next endpoint");
+                log::warn!("{url} unreachable ({e}); trying next endpoint");
                 None
             }
         }
@@ -1218,7 +1296,7 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
         return candidates[0].to_string();
     };
     if attempts > 1 {
-        eprintln!("note: failing over to {first_alive}");
+        log::warn!("failing over to {first_alive}");
     }
     first_alive.to_string()
 }
