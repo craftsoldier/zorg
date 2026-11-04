@@ -985,8 +985,8 @@ fn reopen() -> String {
     }
 }
 
-/// The Settings screen: accounts, the server for `account`'s network, and
-/// `account`'s viewing key, until Esc goes back. A saved change reopens zorg.
+/// The Settings screen: accounts, the server for `account`'s network, its
+/// viewing key and recovery phrase, until Esc goes back. A saved change reopens zorg.
 fn settings(
     root: &std::path::Path,
     account: &zorg::account::Account,
@@ -1002,6 +1002,7 @@ fn settings(
         format!("{:<11} {}", "Accounts", account.name),
         format!("{:<11} {server}", "Server"),
         "Viewing key".to_string(),
+        "Recovery phrase".to_string(),
     ];
     let mut current = 0;
     loop {
@@ -1014,7 +1015,8 @@ fn settings(
         let result = match choice {
             0 => switch_account(root, account, accounts, options, saved, hide),
             1 => choose_server(root, account.network),
-            _ => show_viewing_key(account).map(|()| false),
+            2 => show_viewing_key(account).map(|()| false),
+            _ => show_recovery_phrase(account).map(|()| false),
         };
         match result {
             Ok(true) => {
@@ -1334,6 +1336,31 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
          zorg create {name:?} --import{network} --birthday {birthday}",
         name = account.name,
     )
+}
+
+fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> {
+    let birthday = zorg::account::birthday_height(account)?;
+    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(
+        account.network,
+        &account.uuid,
+    )?
+    .ok_or_else(|| missing_phrase_error(account, birthday))?;
+    let copy = ["Copy phrase".to_string()];
+    let mut status: Result<String, String> = Ok(String::new());
+    terminal::clear()?;
+    loop {
+        print!("{}", *recovery_phrase_text(&mnemonic, u64::from(birthday)));
+        match &status {
+            Ok(message) => terminal::note(message),
+            Err(error) => terminal::failure(error),
+        }
+        let choice = terminal::menu_with_keys("Esc back", &copy, 0, &[], &mut || {});
+        terminal::clear()?;
+        status = match choice? {
+            None => return Ok(()),
+            Some(_) => terminal::copy(&mnemonic).map(|()| "Copied.".into()),
+        };
+    }
 }
 
 fn cmd_recovery(net: WalletNetwork, account: &zorg::account::Account) -> Result<(), String> {
