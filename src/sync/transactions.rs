@@ -4560,6 +4560,7 @@ mod tests {
 
         assert_eq!(got.tx_kind, "shielded");
         assert_eq!(got.outputs.len(), 1);
+        assert_eq!(got.outputs[0].address.as_deref(), Some("u-shielded-self"));
         assert_eq!(got.outputs[0].amount_zatoshi, 1_000_000);
     }
 
