@@ -347,9 +347,7 @@ pub struct TransactionInfo {
 pub struct TransactionDetail {
     pub txid: TxId,
     pub tx_kind: String,
-    pub primary_address: Option<String>,
     pub source_address: Option<String>,
-    pub source_pool: Option<String>,
     pub outputs: Vec<TransactionDetailOutput>,
 }
 
@@ -632,22 +630,13 @@ pub fn get_transaction_detail(
         .iter()
         .filter(|output| detail_includes_output(&base, output, uuid_bytes.as_slice(), tx_kind))
         .collect::<Vec<_>>();
-    let primary_address = if tx_kind == "sent" {
-        visible_outputs
-            .iter()
-            .find_map(|output| output.detail_address(tx_kind))
-    } else {
-        None
-    };
-    let source = if matches!(tx_kind, "received" | "receiving") && !visible_outputs.is_empty() {
-        let raw_tx = read_raw_transaction_for_tx(&read_tx, &uuid_bytes, txid.as_ref())?;
-        Some(received_source_from_raw_transaction(
-            network,
-            raw_tx.as_deref(),
-        ))
-    } else {
-        None
-    };
+    let source_address =
+        if matches!(tx_kind, "received" | "receiving") && !visible_outputs.is_empty() {
+            let raw_tx = read_raw_transaction_for_tx(&read_tx, &uuid_bytes, txid.as_ref())?;
+            received_source_from_raw_transaction(network, raw_tx.as_deref())
+        } else {
+            None
+        };
     let outputs = visible_outputs
         .into_iter()
         .map(|output| TransactionDetailOutput {
@@ -661,56 +650,19 @@ pub fn get_transaction_detail(
     Ok(TransactionDetail {
         txid: *txid,
         tx_kind: tx_kind.to_string(),
-        primary_address,
-        source_address: source.as_ref().and_then(|s| s.address.clone()),
-        source_pool: source.map(|s| s.pool.to_string()),
+        source_address,
         outputs,
     })
-}
-
-struct TransactionSource {
-    address: Option<String>,
-    pool: &'static str,
 }
 
 fn received_source_from_raw_transaction(
     network: WalletNetwork,
     raw_tx: Option<&[u8]>,
-) -> TransactionSource {
-    let Some(raw_tx) = raw_tx else {
-        return TransactionSource {
-            address: None,
-            pool: "unknown",
-        };
-    };
-
-    let Ok(tx) = Transaction::read(raw_tx, BranchId::Sapling) else {
-        return TransactionSource {
-            address: None,
-            pool: "unknown",
-        };
-    };
-
-    let Some(bundle) = tx.transparent_bundle() else {
-        return TransactionSource {
-            address: None,
-            pool: "shielded",
-        };
-    };
-
-    if bundle.vin.is_empty() {
-        return TransactionSource {
-            address: None,
-            pool: "shielded",
-        };
-    }
-
-    TransactionSource {
-        address: bundle.vin.iter().find_map(|input| {
-            transparent_source_address_from_script_sig(network, input.script_sig().0 .0.as_slice())
-        }),
-        pool: "transparent",
-    }
+) -> Option<String> {
+    let tx = Transaction::read(raw_tx?, BranchId::Sapling).ok()?;
+    tx.transparent_bundle()?.vin.iter().find_map(|input| {
+        transparent_source_address_from_script_sig(network, input.script_sig().0 .0.as_slice())
+    })
 }
 
 fn transparent_source_address_from_script_sig(
@@ -3973,7 +3925,6 @@ mod tests {
 
         assert_eq!(got.txid, TxId::from_bytes(txid));
         assert_eq!(got.tx_kind, "sent");
-        assert_eq!(got.primary_address.as_deref(), Some("u-recipient"));
         assert_eq!(got.outputs[0].memo.as_deref(), Some("hello from activity"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("u-recipient"));
@@ -4043,7 +3994,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(got.primary_address.as_deref(), Some("t-recipient"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("t-recipient"));
         assert_eq!(got.outputs[0].amount_zatoshi, 100_000);
@@ -4119,7 +4069,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(got.primary_address.as_deref(), Some("t-recipient"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("t-recipient"));
         assert_eq!(got.outputs[0].amount_zatoshi, 1_200_000);
@@ -4195,7 +4144,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(got.primary_address.as_deref(), Some("t-known-receiver"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("t-known-receiver"));
         assert_eq!(got.outputs[0].amount_zatoshi, 11_000_000);
@@ -4244,9 +4192,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.tx_kind, "received");
-        assert_eq!(got.primary_address, None);
         assert_eq!(got.source_address, None);
-        assert_eq!(got.source_pool.as_deref(), Some("unknown"));
         assert_eq!(got.outputs[0].memo.as_deref(), Some("incoming memo"));
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].address.as_deref(), Some("u-my-receiver"));
@@ -4397,12 +4343,10 @@ mod tests {
         .unwrap();
 
         let expected_source = transparent_source_test_address();
-        assert_eq!(got.primary_address, None);
         assert_eq!(
             got.source_address.as_deref(),
             Some(expected_source.as_str())
         );
-        assert_eq!(got.source_pool.as_deref(), Some("transparent"));
         assert_eq!(got.outputs.len(), 1);
     }
 
@@ -4448,9 +4392,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.tx_kind, "receiving");
-        assert_eq!(got.primary_address, None);
         assert_eq!(got.source_address, None);
-        assert_eq!(got.source_pool.as_deref(), Some("unknown"));
         assert_eq!(
             got.outputs[0].memo.as_deref(),
             Some("pending incoming memo")
@@ -4522,11 +4464,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(sent.primary_address.as_deref(), Some("u-self"));
+        assert_eq!(sent.outputs[0].address.as_deref(), Some("u-self"));
         assert_eq!(sent.outputs[0].memo.as_deref(), Some("self memo"));
         assert_eq!(sent.outputs.len(), 1);
         assert_eq!(sent.outputs[0].amount_zatoshi, 1_000_000);
-        assert_eq!(received.primary_address, None);
         assert_eq!(received.outputs[0].memo.as_deref(), Some("self memo"));
         assert_eq!(received.outputs.len(), 1);
         assert_eq!(received.outputs[0].amount_zatoshi, 1_000_000);
@@ -4573,13 +4514,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(got.primary_address, None);
         assert!(got.outputs.iter().all(|output| output.memo.is_none()));
         assert!(got.outputs.is_empty());
     }
 
     #[test]
-    fn detail_shielding_row_has_no_primary_address() {
+    fn detail_shielding_row_shows_its_output() {
         let db = fresh_history_db();
         let account = test_account_uuid();
         let txid = fake_txid(0xD5);
@@ -4619,7 +4559,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(got.tx_kind, "shielded");
-        assert_eq!(got.primary_address, None);
         assert_eq!(got.outputs.len(), 1);
         assert_eq!(got.outputs[0].amount_zatoshi, 1_000_000);
     }
