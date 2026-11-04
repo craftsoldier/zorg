@@ -560,15 +560,34 @@ fn auto_sync(
 /// Syncs one wallet database with the chain.
 fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
     let progress = terminal::Progress::hidden_bar();
-    let result = sync::run_full_sync_blocking(db_path, lwd_url, net, |event| {
-        if terminal::interactive() && event.chain_tip_height > 0 {
-            progress.set_percent((event.percentage * 100.0) as u64);
-            progress.show(&format!(
-                "block {} of {}",
-                event.scanned_height.min(event.chain_tip_height),
-                event.chain_tip_height
-            ));
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let result = std::thread::scope(|scope| {
+        // The bar shows the same scan progress as the app's sync row, read about
+        // once a second so the scan never waits on it.
+        if terminal::interactive() {
+            let progress = &progress;
+            scope.spawn(move || loop {
+                if let Ok(Some(done)) = sync::scan_progress(db_path, net) {
+                    progress.set_percent((done * 100.0) as u64);
+                }
+                if stopped.recv_timeout(std::time::Duration::from_secs(1))
+                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    break;
+                }
+            });
         }
+        let result = sync::run_full_sync_blocking(db_path, lwd_url, net, |event| {
+            if terminal::interactive() && event.chain_tip_height > 0 {
+                progress.show(&format!(
+                    "block {} of {}",
+                    event.scanned_height.min(event.chain_tip_height),
+                    event.chain_tip_height
+                ));
+            }
+        });
+        drop(stop);
+        result
     });
     progress.clear();
     result?;
