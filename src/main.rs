@@ -1390,9 +1390,12 @@ fn cmd_send(
         }
         memo => memo,
     };
-    let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
-    let fee = proposal.fee_zatoshi;
-    let summary = send_summary(to, amount_zat, fee, memo, net);
+    // The card shows an estimate, so nothing is locked while it waits.
+    let fee = if interactive {
+        sync::estimate_fee(db, net, uuid, to, amount_zat, memo)?
+    } else {
+        0
+    };
     let card = |full: bool| {
         let total = amount_zat + fee;
         let mut lines = vec![
@@ -1423,31 +1426,45 @@ fn cmd_send(
     let progress = terminal::Progress::hidden();
     let broadcasting = std::cell::Cell::new(false);
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(sync::execute_proposal_with_seed_loader(
-        lwd_url,
-        proposal,
-        |network, account| {
-            // A failed seed load releases the proposal's inputs, so cancelling here does too.
-            if interactive {
-                terminal::confirm("send", to.len(), None, card)?;
-                progress.show("Waiting for Touch ID…");
-            } else {
-                print!("{summary}");
-            }
-            let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
-            if interactive {
-                progress.show("Building the transaction…");
-            }
-            Ok(seed)
-        },
-        &|| {
-            broadcasting.set(true);
-            if interactive {
-                progress.show("Broadcasting…");
-            }
-        },
-    ));
+    let confirmed = if interactive {
+        terminal::confirm("send", to.len(), None, card)
+    } else {
+        Ok(())
+    };
+    let result = confirmed.and_then(|()| {
+        let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
+        let proposed_fee = proposal.fee_zatoshi;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(sync::execute_proposal_with_seed_loader(
+            lwd_url,
+            proposal,
+            |network, account| {
+                // A failed seed load releases the proposal's inputs, so failing here does too.
+                if interactive {
+                    if proposed_fee != fee {
+                        return Err(format!(
+                            "the fee changed to {} {unit}; send again",
+                            terminal::zec(proposed_fee, 0)
+                        ));
+                    }
+                    progress.show("Waiting for Touch ID…");
+                } else {
+                    print!("{}", send_summary(to, amount_zat, proposed_fee, memo, net));
+                }
+                let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
+                if interactive {
+                    progress.show("Building the transaction…");
+                }
+                Ok(seed)
+            },
+            &|| {
+                broadcasting.set(true);
+                if interactive {
+                    progress.show("Broadcasting…");
+                }
+            },
+        ))
+    });
     progress.clear();
     match result {
         Ok(result) if interactive => {
