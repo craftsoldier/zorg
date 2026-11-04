@@ -5,6 +5,7 @@ use std::{
 };
 
 use secrecy::{ExposeSecret, SecretVec};
+use transparent::keys::IncomingViewingKey;
 
 use zcash_client_backend::data_api::{
     chain::ChainState, Account as _, AccountBirthday, WalletRead, WalletWrite,
@@ -175,6 +176,28 @@ pub fn current_address(account: &Account) -> Result<String, String> {
         .get_last_generated_address_matching(id, shielded_address_request())
         .map_err(|e| format!("Failed to get last generated shielded address: {e}"))?;
     Ok(last.unwrap_or(default).encode(&account.network))
+}
+
+/// `account`'s transparent receiving address: external index 0 of its viewing key.
+pub fn transparent_address(account: &Account) -> Result<String, String> {
+    ensure_database_exists(account)?;
+    let db = open_wallet_db_for_read(&account.db_path, account.network)?;
+    let id = parse_account_uuid(&account.uuid)?;
+    let ufvk = db
+        .get_account(id)
+        .map_err(|e| format!("Failed to get account: {e}"))?
+        .and_then(|a| a.ufvk().cloned())
+        .ok_or_else(|| format!("Account not found: {}", account.uuid))?;
+    let (address, _) = ufvk
+        .p2pkh()
+        .ok_or("Account has no transparent key")?
+        .derive_external_ivk()
+        .map_err(|e| format!("Failed to derive transparent key: {e}"))?
+        .default_address();
+    Ok(zcash_keys::encoding::encode_transparent_address_p(
+        &account.network,
+        &address,
+    ))
 }
 
 /// The height `account` scans from, read from its database.

@@ -61,16 +61,9 @@ pub struct WalletBalance {
     pub orchard: u64,
     pub ironwood: u64,
     pub transparent_locked: u64,
-    pub sapling_locked: u64,
-    pub orchard_locked: u64,
-    pub ironwood_locked: u64,
     pub transparent_pending: u64,
-    pub sapling_pending: u64,
-    pub orchard_pending: u64,
-    pub ironwood_pending: u64,
     pub change_pending_confirmation: u64,
     pub value_pending_spendability: u64,
-    pub uneconomic_value: u64,
     /// Sum of spendable shielded balances. Use this for "available to send".
     pub spendable: u64,
     /// Sum of owner-locked balances across all pools.
@@ -89,16 +82,9 @@ impl WalletBalance {
             orchard: 0,
             ironwood: 0,
             transparent_locked: 0,
-            sapling_locked: 0,
-            orchard_locked: 0,
-            ironwood_locked: 0,
             transparent_pending: 0,
-            sapling_pending: 0,
-            orchard_pending: 0,
-            ironwood_pending: 0,
             change_pending_confirmation: 0,
             value_pending_spendability: 0,
-            uneconomic_value: 0,
             spendable: 0,
             locked: 0,
             total: 0,
@@ -177,13 +163,7 @@ pub fn get_wallet_balances(
                         orchard: u64::from(b.orchard_balance().spendable_value()),
                         ironwood: u64::from(b.ironwood_balance().spendable_value()),
                         transparent_locked: u64::from(b.unshielded_balance().locked_value()),
-                        sapling_locked: u64::from(b.sapling_balance().locked_value()),
-                        orchard_locked: u64::from(b.orchard_balance().locked_value()),
-                        ironwood_locked: u64::from(b.ironwood_balance().locked_value()),
                         transparent_pending: transparent_change + transparent_pending,
-                        sapling_pending: sapling_change + sapling_pending,
-                        orchard_pending: orchard_change + orchard_pending,
-                        ironwood_pending: ironwood_change + ironwood_pending,
                         change_pending_confirmation: transparent_change
                             + sapling_change
                             + orchard_change
@@ -192,10 +172,6 @@ pub fn get_wallet_balances(
                             + sapling_pending
                             + orchard_pending
                             + ironwood_pending,
-                        uneconomic_value: u64::from(b.unshielded_balance().uneconomic_value())
-                            + u64::from(b.sapling_balance().uneconomic_value())
-                            + u64::from(b.orchard_balance().uneconomic_value())
-                            + u64::from(b.ironwood_balance().uneconomic_value()),
                         spendable: u64::from(b.sapling_balance().spendable_value())
                             + u64::from(b.orchard_balance().spendable_value())
                             + u64::from(b.ironwood_balance().spendable_value()),
@@ -362,7 +338,6 @@ pub struct TransactionInfo {
     pub account_balance_delta: i64,
     pub fee: u64,
     pub block_time: u64,
-    pub is_transparent: bool,
     pub tx_kind: String,
     pub display_amount: u64,
     pub display_pool: String,
@@ -1486,9 +1461,7 @@ fn classify_history_tx(
         } else {
             base.total_received
         };
-        return vec![build_classified_tx(
-            base, "shielded", amount, "shielded", false, 0,
-        )];
+        return vec![build_classified_tx(base, "shielded", amount, "shielded", 0)];
     }
 
     if is_internal_ironwood_transition(base, summary) {
@@ -1497,7 +1470,6 @@ fn classify_history_tx(
             "migration",
             summary.internal_ironwood_transition.amount,
             "ironwood",
-            false,
             1,
         )];
     }
@@ -1509,7 +1481,6 @@ fn classify_history_tx(
             "sent",
             summary.sent.amount,
             summary.sent.display_pool(),
-            summary.sent.has_transparent,
             1,
             base.fee.saturating_add(extra_sent_fee),
         ));
@@ -1520,7 +1491,6 @@ fn classify_history_tx(
             receiving_tx_kind(base),
             summary.received.amount,
             summary.received.display_pool(),
-            summary.received.has_transparent,
             2,
         ));
     }
@@ -1532,14 +1502,7 @@ fn classify_history_tx(
                 .unsigned_abs()
                 .saturating_sub(base.fee);
             if sent_amount > 0 {
-                rows.push(build_classified_tx(
-                    base,
-                    "sent",
-                    sent_amount,
-                    "unknown",
-                    false,
-                    1,
-                ));
+                rows.push(build_classified_tx(base, "sent", sent_amount, "unknown", 1));
                 return rows;
             }
         }
@@ -1552,11 +1515,10 @@ fn classify_history_tx(
                 receiving_tx_kind(base),
                 base.account_balance_delta as u64,
                 "unknown",
-                false,
                 2,
             ));
         } else {
-            rows.push(build_classified_tx(base, "unknown", 0, "unknown", false, 3));
+            rows.push(build_classified_tx(base, "unknown", 0, "unknown", 3));
         }
     }
 
@@ -1585,7 +1547,6 @@ fn build_classified_tx(
     tx_kind: &str,
     display_amount: u64,
     display_pool: &str,
-    is_transparent: bool,
     row_order: u8,
 ) -> ClassifiedTx {
     build_classified_tx_with_fee(
@@ -1593,7 +1554,6 @@ fn build_classified_tx(
         tx_kind,
         display_amount,
         display_pool,
-        is_transparent,
         row_order,
         base.fee,
     )
@@ -1604,7 +1564,6 @@ fn build_classified_tx_with_fee(
     tx_kind: &str,
     display_amount: u64,
     display_pool: &str,
-    is_transparent: bool,
     row_order: u8,
     fee: u64,
 ) -> ClassifiedTx {
@@ -1622,7 +1581,6 @@ fn build_classified_tx_with_fee(
             account_balance_delta: base.account_balance_delta,
             fee,
             block_time: base.block_time,
-            is_transparent,
             tx_kind: tx_kind.to_string(),
             display_amount,
             display_pool: display_pool.to_string(),
@@ -1804,11 +1762,8 @@ mod tests {
             assert_eq!(balance.sapling, 0);
             assert_eq!(balance.orchard, 0);
             assert_eq!(balance.transparent_pending, 0);
-            assert_eq!(balance.sapling_pending, 0);
-            assert_eq!(balance.orchard_pending, 0);
             assert_eq!(balance.change_pending_confirmation, 0);
             assert_eq!(balance.value_pending_spendability, 0);
-            assert_eq!(balance.uneconomic_value, 0);
         }
     }
 
