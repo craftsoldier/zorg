@@ -764,6 +764,10 @@ async fn repair_anchor_root_mismatch_if_needed(
     else {
         return Ok(None);
     };
+    // A height-0 anchor is the empty birthday tree, and lightwalletd reads height 0 as unset.
+    if u32::from(anchor_height) == 0 {
+        return Ok(None);
+    }
 
     let local_sapling = db
         .with_sapling_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
