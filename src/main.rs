@@ -607,12 +607,18 @@ fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Re
     Ok(())
 }
 
-/// The lightwalletd endpoint for `net`: the explicit one, which must not serve
-/// a different network, or a default one.
+/// The lightwalletd endpoint for `net`: the explicit one, which must start
+/// with `https://` or `http://` and not serve a different network, or a
+/// default one.
 fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, String> {
     let Some(url) = explicit else {
         return Ok(resolve_default_lwd_url(net));
     };
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!(
+            "{url} must start with https:// or http://, for example https://zec.rocks:443"
+        ));
+    }
     let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
     let served = WalletNetwork::from_sapling_activation_height(height);
     if served != Some(*net) {
