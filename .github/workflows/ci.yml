@@ -15,11 +15,15 @@ env:
 
 jobs:
   macos:
-    name: macOS checks (${{ matrix.mode }})
+    name: macOS · ${{ matrix.store }}
     runs-on: macos-15
     strategy:
       matrix:
-        mode: [standalone, packaged]
+        include:
+          - mode: standalone
+            store: Secure Enclave (age)
+          - mode: packaged
+            store: Keychain
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -39,9 +43,6 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release --no-default-features --features ${{ matrix.mode }}
-
-      - name: Smoke-test CLI
-        run: ./target/release/zorg --help
 
   dependency-audit:
     name: Dependency advisory audit

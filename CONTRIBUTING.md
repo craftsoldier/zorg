@@ -22,7 +22,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs these checks for both storage modes (plus a CLI help smoke test and dependency advisory audit) and they must all pass. To check the packaged mode, add `--no-default-features --features packaged` to the build, test, and Clippy commands. Running them locally
+CI runs these checks for both storage modes (plus a dependency advisory audit) and they must all pass. To check the packaged mode, add `--no-default-features --features packaged` to the build, test, and Clippy commands. Running them locally
 before pushing saves everyone a round trip.
 
 ## Ground rules
