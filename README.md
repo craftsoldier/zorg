@@ -1,66 +1,98 @@
-# Zorg
+# zorg
+
 ```text
- ______   ______     ______     ______    
-/\___  \ /\  __ \   /\  == \   /\  ___\   
-\/_/  /__\ \ \/\ \  \ \  __<   \ \ \__ \  
-  /\_____\\ \_____\  \ \_\ \_\  \ \_____\ 
-  \/_____/ \/_____/   \/_/ /_/   \/_____/ 
+ ______   ______     ______      _____
+/\___  \ /\  __ \   /\  == \    / ____|
+\/_/  /__\ \ \/\ \  \ \  __<    | |  __
+  /\_____\\ \_____\  \ \_\ \_\  | | |_ |
+  \/_____/ \/_____/   \/_/ /_/   \_____|
 ```
 
-Zorg is a fast, lightweight, and CLI-only Zcash wallet written in Rust. It provides a simple and secure interface for managing accounts, syncing with the Zcash network, and sending shielded transactions natively from your terminal.
+**Zcash, in your terminal.**
 
-## Features
-- **CLI Native:** Clean and simple commands to manage your Zcash wallet.
-- **Secure by Default:** Automatically uses the macOS Keychain to securely store your mnemonic phrases.
-- **Shielded Transactions:** Fully supports Sapling and Orchard shielded pools.
-- **Multi-Account:** Easily manage multiple accounts and track your balance securely.
+A macOS wallet for shielded payments, named accounts, and transaction history. Open the interactive wallet with `zorg`, or use explicit commands from your terminal and scripts.
 
-## Commands
+## Open your wallet
 
-Run `zorg` to list accounts. Select an account by name with `--account Savings`.
+```sh
+zorg
+```
 
-| Command | Description |
+On first run, zorg helps you create an account or import a recovery phrase. With an existing account, it requests protected Keychain access before opening the account home screen and syncing in the background. macOS handles authentication with Touch ID or your login password.
+
+| Screen | What you can do |
 |---|---|
-| `zorg` / `zorg accounts` | List named accounts across known databases |
-| `zorg create [name] --new [--network <net>]` | Create an account with a new recovery phrase |
-| `zorg create [name] --import [--birthday <height>] [--network <net>]` | Create an account from an existing recovery phrase (index 0) |
-| `zorg balance [--account <name>]` | Show spendable, pending, and locked balances |
-| `zorg address [--new] [--account <name>]` | Get a unified receiving address, or make a new one |
-| `zorg sync [--account <name>]` | Sync all databases, or the chosen account's database |
-| `zorg status [--account <name>]` | Check sync status for all databases, or the chosen account's database |
-| `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send Zcash (TAZ on testnet) |
-| `zorg history [--account <name>] [--limit <n>]` | View transaction history |
-| `zorg tx <txid> [--account <name>]` | Show one transaction in full |
-| `zorg recovery [--account <name>]` | Show the recovery phrase |
-| `zorg validate <address>` | Validate a Zcash address |
-| `zorg delete --account <name>` | Delete an account after confirmation |
+| **Send** | Enter a recipient, amount, and optional memo; review the fee before confirming. |
+| **Receive** | Show or copy your receiving address, generate a new shielded address, or show your transparent address. |
+| **Transactions** | Browse up to 10 entries per page, move between Older and Newer pages, and open transaction details. |
+| **Settings** | Switch accounts, choose a server, export a viewing key, or show and copy your recovery phrase. |
 
-Create asks for a name if omitted, and in a terminal asks whether to import or start a new account when neither `--new` nor `--import` is given; without a terminal one of them is required. `--network <main|test|regtest>` picks the new account's network (default main); other commands use the network the account was created on.
+Press `b` on the home screen to hide or show balances, `s` for Settings, and `q` to quit. **Shield** appears when the account has enough transparent funds to offer shielding.
 
-### Global flags
+Recovery words are displayed with numbers for readability. **Copy phrase** copies the plain words so they can be imported.
 
-| Flag | Meaning |
+## Use commands
+
+For example, create a testnet account named Savings:
+
+```sh
+zorg create Savings --new --network test
+zorg sync --account Savings
+zorg balance --account Savings
+```
+
+| Command | Purpose |
 |---|---|
-| `--lwd <url>` | lightwalletd endpoint override |
-| `--help`, `-h` | Show usage |
-| `--version`, `-V` | Show version |
+| `zorg accounts` | List named accounts. |
+| `zorg create [name] --new [--network <net>]` | Create an account with a new recovery phrase. |
+| `zorg create [name] --import [--birthday <height>] [--network <net>]` | Import an existing recovery phrase. |
+| `zorg balance [--account <name>]` | Show spendable, pending, locked, and total balances. |
+| `zorg address [--new \| --transparent] [--account <name>]` | Show a receiving address, generate a new shielded address, or show the transparent address. |
+| `zorg sync [--account <name>]` | Sync all accounts, or one named account. |
+| `zorg status [--account <name>]` | Show account sync status. |
+| `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send a payment. |
+| `zorg send --shield [--account <name>]` | Move transparent funds into the shielded balance. |
+| `zorg history [--limit <n>] [--account <name>]` | Print transaction history. |
+| `zorg tx <txid> [--account <name>]` | Show a transaction in full. |
+| `zorg recovery [--account <name>]` | Show the numbered recovery phrase and wallet birthday. |
+| `zorg validate <address>` | Check an address. |
+| `zorg delete --account <name>` | Delete an account. |
 
-## Requirements
-- Rust & Cargo
-- macOS (Required for Keychain integration)
+Account names are case-sensitive. Use `--account <name>` to select one; each account has its own database.
 
-## Building from Source
-```bash
+`--network main`, `--network test`, or `--network regtest` chooses the network when creating or importing an account. The default is mainnet. Other commands use the account’s saved network. Amounts are in ZEC on mainnet and TAZ on testnet.
+
+Without flags, `zorg create` guides you through choosing a name and creating or importing an account. Without a terminal, provide an account name and specify `--new` or `--import`. Explicit commands skip terminal menus and confirmation cards when run without a terminal; operations that read recovery phrases still require protected Keychain access.
+
+| Global option | Purpose |
+|---|---|
+| `--lwd <url>` | Use a specific lightwalletd endpoint. |
+| `--help`, `-h` | Show command help. |
+| `--version`, `-V` | Show the version. |
+
+## Recovery and storage
+
+Keep an offline copy of your recovery words and wallet birthday. Import accepts a 12- or 24-word phrase without numbering. Supplying its birthday avoids scanning from the beginning.
+
+The account index and individual account databases live in `~/Library/Application Support/zorg/`. Recovery phrases are stored separately in this Mac’s protected Keychain. Those Keychain entries do not move to another Mac; keep your own recovery copy.
+
+## Build from source
+
+Requires **macOS** and the **stable Rust toolchain**.
+
+```sh
 git clone https://github.com/craftsoldier/zorg.git
 cd zorg
-cargo build --release
+cargo build --locked --release
+./target/release/zorg --help
 ```
-The compiled binary will be available at `target/release/zorg`.
 
-## Contributing
+The executable is `target/release/zorg`. Accessing recovery phrases requires the signed `zorg.app` bundle with its provisioning profile and Keychain entitlements; a Cargo build alone does not assemble or sign that bundle.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+## Contribute
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and testing instructions.
 
 ## License
 
-Zorg is dual-licensed under the [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) licenses; you may choose either.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
