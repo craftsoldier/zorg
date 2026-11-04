@@ -246,6 +246,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
+        zorg::secret_store::mnemonic_from_macos_keychain(account.network, &account.uuid)?;
         let actions = ["Send", "Receive", "Transactions", "Settings", "Shield"].map(String::from);
         let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
