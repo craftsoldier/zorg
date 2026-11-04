@@ -19,10 +19,11 @@ COMMANDS:
     create [name] --new [--network <net>]                   Create an account with a new recovery phrase
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
-    address [--new] [--account <name>]                      Show the receive address, or make a new one
+    address [--new | --transparent] [--account <name>]      Show the receive address, make a new one, or show the transparent one
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
+    send --shield [--account <name>]                        Move transparent funds into the shielded balance
     history [--limit <n>] [--account <name>]                Show transaction history
     tx <txid> [--account <name>]                            Show one transaction in full
     recovery [--account <name>]                             Show the recovery phrase
@@ -79,7 +80,7 @@ const VALUE_OPTIONS: [&str; 6] = [
 ];
 
 /// Options that take no value.
-const FLAG_OPTIONS: [&str; 2] = ["--new", "--import"];
+const FLAG_OPTIONS: [&str; 4] = ["--new", "--import", "--transparent", "--shield"];
 
 /// A command line parsed by [`parse_args`].
 struct Args {
@@ -108,11 +109,15 @@ fn command_spec(
             },
         ),
         "balance" | "sync" | "status" | "recovery" => ("[--account <name>]", &["--account"], 0..=0),
-        "address" => ("[--new] [--account <name>]", &["--new", "--account"], 0..=0),
+        "address" => (
+            "[--new | --transparent] [--account <name>]",
+            &["--new", "--transparent", "--account"],
+            0..=0,
+        ),
         "delete" => ("--account <name>", &["--account"], 0..=0),
         "send" => (
             "<to> <amount> [--memo <text>] [--account <name>]",
-            &["--account", "--memo"],
+            &["--account", "--memo", "--shield"],
             if terminal::interactive() {
                 0..=2
             } else {
@@ -173,6 +178,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         {
             return Err(format!("{option} is not an option of zorg {command}"));
         }
+        let count = if options.contains_key("--shield") {
+            0..=0
+        } else {
+            count
+        };
         if !count.contains(&positional.len()) {
             let hint = if positional.len() > *count.end() {
                 " (quote values that contain spaces)"
@@ -236,7 +246,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        let actions = ["Send", "Receive", "History", "Settings"].map(String::from);
+        let actions = ["Send", "Receive", "History", "Settings", "Shield"].map(String::from);
         let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
         log::set_max_level(log::LevelFilter::Off);
@@ -280,15 +290,31 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 }
             };
             let keys = [('b', balances), ('s', "settings")];
-            let choice = terminal::menu_with_keys(&actions[..3], &keys, &mut repaint);
+            let shieldable =
+                sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
+                    .is_ok_and(|b| {
+                        b.transparent + b.transparent_pending >= sync::SHIELDING_THRESHOLD
+                    });
+            let items = if shieldable {
+                vec![
+                    actions[0].clone(),
+                    actions[1].clone(),
+                    actions[2].clone(),
+                    actions[4].clone(),
+                ]
+            } else {
+                actions[..3].to_vec()
+            };
+            let choice = terminal::menu_with_keys("q quit", &items, &keys, &mut repaint);
             let choice = match choice? {
                 None if hidden == saved.hide_balances => return Ok(()),
                 None => return zorg::account::set_hide_balances(&root, hidden),
-                Some(3) => {
+                Some(i) if i == items.len() => {
                     hidden = !hidden;
                     continue;
                 }
-                Some(4) => 3,
+                Some(i) if i == items.len() + 1 => 3,
+                Some(3) => 4,
                 Some(choice) => choice,
             };
             terminal::clear()?;
@@ -301,6 +327,11 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 }),
                 1 => receive(account),
                 2 => history(account, hidden),
+                4 => zorg::account::birthday_height(account).and_then(|birthday| {
+                    let missing = missing_phrase_error(account, birthday);
+                    endpoint(server(account.network).as_deref(), &account.network)
+                        .and_then(|url| cmd_shield(account, &url, &missing))
+                }),
                 _ => settings(&root, account, &accounts, &saved, &args.options, hidden),
             };
             match result {
@@ -308,7 +339,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 Err(e) if e == terminal::CANCELLED => terminal::note("Cancelled."),
                 Err(e) if e == terminal::REPORTED => {}
                 Err(e) => terminal::failure(&e),
-                Ok(()) if choice != 0 => continue,
+                Ok(()) if !matches!(choice, 0 | 4) => continue,
                 Ok(()) => {}
             }
             println!();
@@ -396,7 +427,12 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let uuid = &selected.uuid;
     let result = match cmd {
         "address" => {
-            let address = if args.options.contains_key("--new") {
+            let address = if args.options.contains_key("--transparent") {
+                if args.options.contains_key("--new") {
+                    return Err("--new and --transparent cannot be used together".into());
+                }
+                sync::get_transparent_address(db, uuid)?
+            } else if args.options.contains_key("--new") {
                 sync::get_next_available_address(db, net, uuid, sync::AddressRequestKind::Shielded)?
             } else {
                 zorg::account::current_address(selected)?
@@ -405,6 +441,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             Ok(())
         }
         "balance" => cmd_balance(db, net, uuid),
+        "send" if args.options.contains_key("--shield") => {
+            if args.options.contains_key("--memo") {
+                return Err("--memo cannot be used with --shield".into());
+            }
+            let birthday = zorg::account::birthday_height(selected)?;
+            let missing = missing_phrase_error(selected, birthday);
+            endpoint(server(net).as_deref(), &net)
+                .and_then(|url| cmd_shield(selected, &url, &missing))
+        }
         "send" => {
             let memo = option("--memo");
             let birthday = zorg::account::birthday_height(selected)?;
@@ -441,12 +486,17 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
 fn balance_row(account: &zorg::account::Account, hide: bool) -> String {
     let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
         .map_or("unknown".to_string(), |b| {
-            let amount = if hide {
-                "••••".into()
-            } else {
-                terminal::zec(b.total, 2)
-            };
-            format!("{amount} {}", account.network.unit())
+            let unit = account.network.unit();
+            let transparent = b.transparent + b.transparent_pending + b.transparent_locked;
+            match (hide, transparent) {
+                (true, _) => format!("•••• {unit}"),
+                (false, 0) => format!("{} {unit}", terminal::zec(b.total, 2)),
+                (false, t) => format!(
+                    "{} {unit} · {} transparent",
+                    terminal::zec(b.total, 2),
+                    terminal::zec(t, 2)
+                ),
+            }
         });
     terminal::row("balance", 7, balance)
 }
@@ -850,19 +900,42 @@ fn cmd_import(
 fn receive(account: &zorg::account::Account) -> Result<(), String> {
     let mut address = zorg::account::current_address(account)?;
     let mut status: Result<String, String> = Ok(String::new());
-    let actions = ["Copy address", "New address"].map(String::from);
+    let mut transparent: Option<String> = None;
     loop {
         terminal::clear()?;
         println!("{}\n", console::style("Receive").bold());
-        println!("{address}\n");
+        println!("{}\n", transparent.as_ref().unwrap_or(&address));
         match &status {
             Ok(message) if message.is_empty() => {}
             Ok(message) => terminal::note(&format!("{message}\n")),
             Err(e) => terminal::failure(&format!("{e}\n")),
         }
-        status = match terminal::menu("Esc back", &actions, 0)? {
+        let (actions, key) = match transparent {
+            Some(_) => (&["Copy address".to_string()][..], ('t', "shielded")),
+            None => (
+                &["Copy address", "New address"].map(String::from)[..],
+                ('t', "transparent"),
+            ),
+        };
+        let choice = terminal::menu_with_keys("Esc back", actions, &[key], &mut || {})?;
+        status = match choice {
             None => return Ok(()),
-            Some(0) => terminal::copy(&address).map(|()| "Copied.".into()),
+            Some(i) if i == actions.len() => {
+                transparent = match transparent {
+                    Some(_) => None,
+                    None => match sync::get_transparent_address(&account.db_path, &account.uuid) {
+                        Ok(t) => Some(t),
+                        Err(e) => {
+                            status = Err(e);
+                            continue;
+                        }
+                    },
+                };
+                Ok(String::new())
+            }
+            Some(0) => {
+                terminal::copy(transparent.as_ref().unwrap_or(&address)).map(|()| "Copied.".into())
+            }
             Some(_) => sync::get_next_available_address(
                 &account.db_path,
                 account.network,
@@ -1388,6 +1461,97 @@ fn cmd_send(
                 ));
             } else {
                 terminal::failure(&format!("Not sent: {e}"));
+            }
+            Err(terminal::REPORTED.into())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Moves `account`'s transparent funds into its shielded balance, after the
+/// same authorization as a send.
+fn cmd_shield(
+    account: &zorg::account::Account,
+    lwd_url: &str,
+    missing_phrase: &str,
+) -> Result<(), String> {
+    let net = account.network;
+    let interactive = terminal::interactive();
+    let unit = net.unit();
+    let proposal = sync::propose_shield(&account.db_path, net, &account.uuid)?;
+    let fee = proposal.fee_zatoshi;
+    let amount = proposal.transparent_input_zatoshi().saturating_sub(fee);
+    let card = |_full: bool| {
+        vec![
+            format!(
+                "Shield {} {unit}   {}",
+                console::style(terminal::zec(amount, 0)).bold(),
+                terminal::privacy_tag("unified")
+            ),
+            terminal::row("from", 5, format!("{} · transparent", account.name)),
+            terminal::row("fee", 5, format!("{} {unit}", terminal::zec(fee, 0))),
+        ]
+    };
+    let progress = terminal::Progress::hidden();
+    let broadcasting = std::cell::Cell::new(false);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(sync::execute_proposal_with_seed_loader(
+        lwd_url,
+        proposal,
+        |network, account| {
+            // A failed seed load releases the proposal's inputs, so cancelling here does too.
+            if interactive {
+                terminal::confirm("shield", 0, None, card)?;
+                progress.show("Waiting for Touch ID…");
+            } else {
+                print!(
+                    "Shield {}\nFee: {}\n",
+                    fmt_zec(amount, net),
+                    fmt_zec(fee, net)
+                );
+            }
+            let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
+            if interactive {
+                progress.show("Building the transaction…");
+            }
+            Ok(seed)
+        },
+        &|| {
+            broadcasting.set(true);
+            if interactive {
+                progress.show("Broadcasting…");
+            }
+        },
+    ));
+    progress.clear();
+    match result {
+        Ok(result) if interactive => {
+            terminal::success(&format!("Shielded {} {unit}", terminal::zec(amount, 0)));
+            for txid in &result.txids {
+                println!("  {txid}");
+            }
+            terminal::note("  Pending · confirms in about a minute · zorg history");
+            Ok(())
+        }
+        Ok(result) => {
+            for txid in &result.txids {
+                println!("Broadcasted: {txid}");
+            }
+            Ok(())
+        }
+        Err(e) if interactive && e == terminal::CANCELLED => {
+            terminal::note("Cancelled. Nothing was shielded.");
+            Ok(())
+        }
+        Err(e) if interactive && e != terminal::INTERRUPTED => {
+            if broadcasting.get() {
+                terminal::failure(&format!(
+                    "Broadcast failed: {e}. The transaction is saved and zorg retries it on \
+                     the next sync — check zorg history before shielding again."
+                ));
+            } else {
+                terminal::failure(&format!("Not shielded: {e}"));
             }
             Err(terminal::REPORTED.into())
         }

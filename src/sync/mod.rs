@@ -27,8 +27,8 @@ mod transactions;
 pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address, get_transaction_detail,
-    get_transaction_history, get_wallet_balance, get_wallet_balances, AddressRequestKind,
-    WalletBalance,
+    get_transaction_history, get_transparent_address, get_wallet_balance, get_wallet_balances,
+    AddressRequestKind, WalletBalance,
 };
 
 pub(super) fn open_wallet_db(
@@ -175,7 +175,8 @@ pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send
 // ======================== Re-exports from send.rs ========================
 pub(crate) use send::resubmit_pending_transactions;
 pub use send::{
-    estimate_fee, execute_proposal_with_seed_loader, propose_send, ExecuteProposalResult,
+    estimate_fee, execute_proposal_with_seed_loader, propose_send, propose_shield,
+    ExecuteProposalResult, SHIELDING_THRESHOLD,
 };
 
 // ======================== Sync State & Orchestration ========================

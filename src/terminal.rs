@@ -304,12 +304,14 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
         .map_err(|e| e.to_string())
 }
 
-/// Shows `items` as a menu like [`menu`], where pressing the `i`th of `keys`
-/// answers `items.len() + i`, as if it were one more item, named in the hint.
+/// Shows `items` as a menu like [`menu`], with `leave` in the hint, where
+/// pressing the `i`th of `keys` answers `items.len() + i`, as if it were one
+/// more item, named in the hint.
 /// While it waits for a key it calls `idle` about every 100 ms.
 /// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. Lines are cut to the
 /// terminal's width, and the menu is cleared after.
 pub fn menu_with_keys(
+    leave: &str,
     items: &[String],
     keys: &[(char, &str)],
     idle: &mut dyn FnMut(),
@@ -321,7 +323,7 @@ pub fn menu_with_keys(
         .iter()
         .map(|(key, name)| format!("{key} {name} · "))
         .collect();
-    let hint = fit(&format!("↑↓ move · Enter pick · {}q quit", named.concat()));
+    let hint = fit(&format!("↑↓ move · Enter pick · {}{leave}", named.concat()));
     let items: Vec<String> = items.iter().map(|item| fit(item)).collect();
     let draw = |current: usize| -> std::io::Result<()> {
         term.write_line(&style(&hint).dim().to_string())?;

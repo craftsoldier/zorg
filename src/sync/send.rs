@@ -4,16 +4,20 @@
 //! pipeline.
 
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretVec};
 
+use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
 use zcash_client_backend::{
     data_api::{
-        wallet::{self, create_proposed_transactions, ConfirmationsPolicy, SpendingKeys},
-        Account as _, OutputLockStore, WalletRead,
+        wallet::{
+            self, create_proposed_transactions, ConfirmationsPolicy, LockRequest, SpendingKeys,
+        },
+        Account as _, CoinbaseFilter, OutputLockStore, TransparentKeyOrigin, WalletRead,
     },
     fees::{zip317::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule},
     wallet::{LockOwner, OvkPolicy},
@@ -41,13 +45,25 @@ const SEND_PROPOSAL_LOCK_BLOCKS: u32 = 40;
 // ======================== Result Structs ========================
 
 /// A send proposal whose inputs are locked to `owner` until it is executed or released.
-pub struct ProposalResult {
-    proposal: zcash_client_backend::proposal::Proposal<WalletFeeRule, ReceivedNoteId>,
+pub struct ProposalResult<N = ReceivedNoteId> {
+    proposal: zcash_client_backend::proposal::Proposal<WalletFeeRule, N>,
     network: WalletNetwork,
     account_id: AccountUuid,
     db_path: String,
     owner: LockOwner,
     pub fee_zatoshi: u64,
+}
+
+impl<N> ProposalResult<N> {
+    /// The value of the proposal's transparent inputs.
+    pub fn transparent_input_zatoshi(&self) -> u64 {
+        self.proposal
+            .steps()
+            .iter()
+            .flat_map(|s| s.transparent_inputs())
+            .map(|utxo| u64::from(utxo.txout().value()))
+            .sum()
+    }
 }
 
 pub struct ExecuteProposalResult {
@@ -164,8 +180,8 @@ pub(super) async fn live_send_expiry_height(
     Ok(std::cmp::max(tip_h, min_target) + SEND_PROPOSAL_LOCK_BLOCKS)
 }
 
-pub(super) fn proposal_input_refs(
-    proposal: &zcash_client_backend::proposal::Proposal<WalletFeeRule, ReceivedNoteId>,
+pub(super) fn proposal_input_refs<N>(
+    proposal: &zcash_client_backend::proposal::Proposal<WalletFeeRule, N>,
 ) -> Vec<zcash_client_backend::wallet::OutputRef> {
     proposal
         .steps()
@@ -222,6 +238,7 @@ pub fn propose_send(
         let request = build_send_request(to_address, amount_zatoshi, memo_str)?;
         let (change_strategy, input_selector) = zip317_helper();
         let spend_policy = ordinary_send_spend_policy();
+        let owner = LockOwner::random(&mut UnwrapErr(SysRng));
 
         let proposal = wallet::propose_transfer::<
             _,
@@ -238,7 +255,7 @@ pub fn propose_send(
             request,
             ConfirmationsPolicy::default(),
             &spend_policy,
-            None,
+            Some(LockRequest::new(owner, SEND_PROPOSAL_LOCK_BLOCKS)),
             None,
         )
         .map_err(|e| format!("Propose transfer: {e}"))?;
@@ -249,14 +266,12 @@ pub fn propose_send(
             .map(|s| u64::from(s.balance().fee_required()))
             .sum();
 
-        let lock_owner = LockOwner::random(&mut UnwrapErr(SysRng));
         let lock_expiry =
             send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        proposal_locks::persist(db_path, lock_owner, &input_refs, lock_expiry)?;
-        if let Err(e) = db.lock_outputs(&input_refs, lock_owner, lock_expiry) {
-            let _ = proposal_locks::remove(db_path, lock_owner);
-            return Err(format!("Lock inputs: {e:?}"));
+        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs, lock_expiry) {
+            let _ = wallet::unlock_proposal_inputs(&mut db, &proposal, owner);
+            return Err(e);
         }
 
         Ok(ProposalResult {
@@ -264,7 +279,7 @@ pub fn propose_send(
             network,
             account_id,
             db_path: db_path.to_string(),
-            owner: lock_owner,
+            owner,
             fee_zatoshi: fee,
         })
     })
@@ -311,7 +326,7 @@ pub fn estimate_fee(
 // ======================== Execute ========================
 
 /// Forgets `stored`'s lock record, first unlocking its inputs when `release_inputs`.
-fn finish_proposal(stored: &ProposalResult, release_inputs: bool) -> Result<(), String> {
+fn finish_proposal<N>(stored: &ProposalResult<N>, release_inputs: bool) -> Result<(), String> {
     if !release_inputs {
         return proposal_locks::remove(&stored.db_path, stored.owner);
     }
@@ -323,9 +338,9 @@ fn finish_proposal(stored: &ProposalResult, release_inputs: bool) -> Result<(), 
     })
 }
 
-pub async fn execute_proposal_with_seed_loader<F>(
+pub async fn execute_proposal_with_seed_loader<F, N: std::fmt::Display>(
     lightwalletd_url: &str,
-    stored: ProposalResult,
+    stored: ProposalResult<N>,
     load_seed: F,
     on_broadcast: &dyn Fn(),
 ) -> Result<ExecuteProposalResult, String>
@@ -338,9 +353,9 @@ where
     execute_stored(lightwalletd_url, stored, seed, on_broadcast).await
 }
 
-async fn execute_stored(
+async fn execute_stored<N: std::fmt::Display>(
     lightwalletd_url: &str,
-    stored: ProposalResult,
+    stored: ProposalResult<N>,
     seed: SecretVec<u8>,
     on_broadcast: &dyn Fn(),
 ) -> Result<ExecuteProposalResult, String> {
@@ -471,6 +486,96 @@ async fn execute_stored(
 }
 
 // ======================== Shield ========================
+
+/// The least transparent value worth shielding, 0.001 ZEC, in zatoshis.
+pub const SHIELDING_THRESHOLD: u64 = 100_000;
+
+/// Proposes moving the account's transparent funds into its shielded balance.
+/// All external and change addresses are shielded together; ephemeral
+/// addresses are shielded one per transaction, so they are never linked.
+pub fn propose_shield(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<ProposalResult<Infallible>, String> {
+    with_wallet_db_write_lock("send.propose_shield", || {
+        let mut db = open_wallet_db(db_path, network)?;
+        let account_id = parse_account_uuid(account_uuid)?;
+        let tip = db
+            .chain_height()
+            .map_err(|e| format!("Read chain height: {e}"))?
+            .ok_or("Sync this account before shielding")?;
+        let balances = db
+            .get_transparent_balances(account_id, (tip + 1).into(), ConfirmationsPolicy::MIN)
+            .map_err(|e| format!("Read transparent balances: {e}"))?;
+        let (ephemeral, regular): (Vec<_>, Vec<_>) = balances
+            .into_iter()
+            .map(|(address, (origin, balance))| (address, origin, balance.spendable_value()))
+            .filter(|(_, _, value)| *value > Zatoshis::ZERO)
+            .partition(|(_, origin, _)| {
+                matches!(
+                    origin,
+                    TransparentKeyOrigin::Derived {
+                        scope: TransparentKeyScope::EPHEMERAL
+                    }
+                )
+            });
+        let from_addrs: Vec<TransparentAddress> = if regular.is_empty() {
+            ephemeral
+                .into_iter()
+                .max_by_key(|(_, _, value)| u64::from(*value))
+                .map(|(address, _, _)| address)
+                .into_iter()
+                .collect()
+        } else {
+            regular.into_iter().map(|(address, _, _)| address).collect()
+        };
+        if from_addrs.is_empty() {
+            return Err("No transparent funds to shield".into());
+        }
+        let (change_strategy, input_selector) = zip317_helper();
+        let owner = LockOwner::random(&mut UnwrapErr(SysRng));
+        let proposal = wallet::propose_shielding::<
+            _,
+            _,
+            _,
+            _,
+            shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
+        >(
+            &mut db,
+            &network,
+            &input_selector,
+            &change_strategy,
+            Zatoshis::const_from_u64(SHIELDING_THRESHOLD),
+            &from_addrs,
+            account_id,
+            ConfirmationsPolicy::MIN,
+            CoinbaseFilter::AllTransparentOutputs,
+            Some(LockRequest::new(owner, SEND_PROPOSAL_LOCK_BLOCKS)),
+        )
+        .map_err(|e| format!("Propose shielding: {e}"))?;
+        let fee: u64 = proposal
+            .steps()
+            .iter()
+            .map(|s| u64::from(s.balance().fee_required()))
+            .sum();
+        let lock_expiry =
+            send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
+        let input_refs = proposal_input_refs(&proposal);
+        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs, lock_expiry) {
+            let _ = wallet::unlock_proposal_inputs(&mut db, &proposal, owner);
+            return Err(e);
+        }
+        Ok(ProposalResult {
+            proposal,
+            network,
+            account_id,
+            db_path: db_path.to_string(),
+            owner,
+            fee_zatoshi: fee,
+        })
+    })
+}
 
 // ======================== Resubmit ========================
 

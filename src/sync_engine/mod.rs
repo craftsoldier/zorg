@@ -937,91 +937,62 @@ async fn refresh_utxos(
             .map(|addr| addr.encode(&query_network))
             .collect();
 
-        if !addresses.is_empty() {
-            refresh_transparent_addresses(
-                client,
-                db,
-                addresses,
-                start_height,
-                "transparent UTXOs",
-                || {},
+        if addresses.is_empty() {
+            continue;
+        }
+
+        log::info!(
+            "[{}] sync: refreshing transparent UTXOs from height {} ({} addresses)",
+            elapsed(),
+            u32::from(start_height),
+            addresses.len(),
+        );
+
+        let mut stream = get_address_utxos_stream(client, addresses, start_height).await?;
+
+        loop {
+            let reply = next_stream_message(&mut stream, "get_address_utxos_stream").await?;
+            let Some(reply) = reply else {
+                break;
+            };
+            let txid: [u8; 32] = reply
+                .txid
+                .try_into()
+                .map_err(|_| SyncError::parse("transparent UTXO txid was not 32 bytes"))?;
+            let index = u32::try_from(reply.index).map_err(|_| {
+                SyncError::parse(format!("invalid transparent UTXO index: {}", reply.index))
+            })?;
+            let height = u32::try_from(reply.height).map_err(|_| {
+                SyncError::parse(format!("invalid transparent UTXO height: {}", reply.height))
+            })?;
+            let value = Zatoshis::from_nonnegative_i64(reply.value_zat).map_err(|_| {
+                SyncError::parse(format!(
+                    "invalid transparent UTXO value: {}",
+                    reply.value_zat
+                ))
+            })?;
+
+            let mut script = Script::default();
+            script.0 .0 = reply.script;
+            let output = WalletTransparentOutput::from_parts(
+                OutPoint::new(txid, index),
+                TxOut::new(value, script),
+                Some(BlockHeight::from_u32(height)),
+                None,
+                None,
+                None,
             )
-            .await?;
+            .ok_or_else(|| {
+                SyncError::parse("transparent UTXO script did not decode to a wallet address")
+            })?;
+
+            with_wallet_db_write_lock("sync_engine.put_received_transparent_utxo", || {
+                db.put_received_transparent_utxo(&output)
+                    .map_err(|e| SyncError::db(format!("put_received_transparent_utxo: {e}")))
+            })?;
         }
     }
     Ok(())
-}
-
-async fn refresh_transparent_addresses(
-    client: &mut CompactTxStreamerClient<Channel>,
-    db: &mut WalletDatabase,
-    addresses: Vec<String>,
-    start_height: BlockHeight,
-    label: &str,
-    mut mark_cache_dirty: impl FnMut(),
-) -> Result<bool, SyncError> {
-    if addresses.is_empty() {
-        return Ok(false);
-    }
-
-    log::info!(
-        "[{}] sync: refreshing {} from height {} ({} addresses)",
-        elapsed(),
-        label,
-        u32::from(start_height),
-        addresses.len(),
-    );
-
-    let mut stream = get_address_utxos_stream(client, addresses, start_height).await?;
-
-    let mut received_any = false;
-    loop {
-        let reply = next_stream_message(&mut stream, "get_address_utxos_stream").await?;
-        let Some(reply) = reply else {
-            break;
-        };
-        let txid: [u8; 32] = reply
-            .txid
-            .try_into()
-            .map_err(|_| SyncError::parse("transparent UTXO txid was not 32 bytes"))?;
-        let index = u32::try_from(reply.index).map_err(|_| {
-            SyncError::parse(format!("invalid transparent UTXO index: {}", reply.index))
-        })?;
-        let height = u32::try_from(reply.height).map_err(|_| {
-            SyncError::parse(format!("invalid transparent UTXO height: {}", reply.height))
-        })?;
-        let value = Zatoshis::from_nonnegative_i64(reply.value_zat).map_err(|_| {
-            SyncError::parse(format!(
-                "invalid transparent UTXO value: {}",
-                reply.value_zat
-            ))
-        })?;
-
-        let mut script = Script::default();
-        script.0 .0 = reply.script;
-        let output = WalletTransparentOutput::from_parts(
-            OutPoint::new(txid, index),
-            TxOut::new(value, script),
-            Some(BlockHeight::from_u32(height)),
-            None,
-            None,
-            None,
-        )
-        .ok_or_else(|| {
-            SyncError::parse("transparent UTXO script did not decode to a wallet address")
-        })?;
-
-        with_wallet_db_write_lock("sync_engine.put_received_transparent_utxo", || {
-            db.put_received_transparent_utxo(&output)
-                .map_err(|e| SyncError::db(format!("put_received_transparent_utxo: {e}")))
-        })?;
-        if !received_any {
-            mark_cache_dirty();
-        }
-        received_any = true;
-    }
-
-    Ok(received_any)
 }
 
 // ==================== Main sync ====================
