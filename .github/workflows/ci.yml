@@ -15,8 +15,15 @@ env:
 
 jobs:
   macos:
-    name: macOS checks
+    name: macOS · ${{ matrix.store }}
     runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - mode: standalone
+            store: Secure Enclave (age)
+          - mode: packaged
+            store: Keychain
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -29,16 +36,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features --features ${{ matrix.mode }} -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --no-default-features --features ${{ matrix.mode }}
 
       - name: Build release binary
-        run: cargo build --locked --release
-
-      - name: Smoke-test CLI
-        run: ./target/release/zorg --help
+        run: cargo build --locked --release --no-default-features --features ${{ matrix.mode }}
 
   dependency-audit:
     name: Dependency advisory audit

@@ -248,7 +248,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        zorg::secret_store::mnemonic_from_macos_keychain(account.network, &account.uuid)?;
+        zorg::secret_store::mnemonic(&account.db_path, account.network, &account.uuid)?;
         let actions = ["Send", "Receive", "Transactions", "Settings", "Shield"].map(String::from);
         let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
@@ -641,7 +641,7 @@ fn first_run() {
         "{}",
         console::style("zorg · a Zcash wallet for your terminal").bold()
     );
-    terminal::note("Recovery phrases stay in this Mac's Keychain, behind Touch ID.");
+    terminal::note("Recovery phrases stay on this Mac, behind macOS authentication.");
     terminal::note("Run zorg --help to see every command.");
     println!();
 }
@@ -781,7 +781,7 @@ fn create_account(
         .and_then(|()| zorg::account::index_new_account(root, &new_account, &created.seed))
     {
         let _ = zorg::account::remove_wallet_files(db);
-        let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, &created.uuid);
+        let _ = zorg::secret_store::delete_mnemonic(db, net, &created.uuid);
         return Err(e);
     }
     if let Some(birthday) = created.birthday {
@@ -824,7 +824,7 @@ fn cmd_create(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created =
         zorg::account::init_db_and_create_account(db, net, &seed, Some(account_birthday), name)?;
-    store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
+    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -834,10 +834,10 @@ fn cmd_create(
     })
 }
 
-/// Stores the mnemonic in the protected Keychain, then reads it back (which
-/// asks for Touch ID or the login password) and checks it yields `seed`. On a
-/// failed read-back the stored entry is removed.
+/// Stores the mnemonic, then authenticates a read-back and checks it yields
+/// `seed`. On a failed read-back the stored entry is removed.
 fn store_and_verify_mnemonic(
+    db: &str,
     net: WalletNetwork,
     account_uuid: &str,
     mnemonic: &str,
@@ -845,19 +845,19 @@ fn store_and_verify_mnemonic(
 ) -> Result<(), String> {
     use secrecy::ExposeSecret;
 
-    zorg::secret_store::store_mnemonic_in_macos_keychain(net, account_uuid, mnemonic)
-        .map_err(|e| format!("Failed to store mnemonic in keychain: {e}"))?;
-    let verified = zorg::secret_store::seed_from_macos_stored_mnemonic(net, account_uuid)
-        .map_err(|e| format!("Failed to read the mnemonic back from keychain: {e}"))
+    zorg::secret_store::store_mnemonic(db, net, account_uuid, mnemonic)
+        .map_err(|e| format!("Failed to store mnemonic: {e}"))?;
+    let verified = zorg::secret_store::seed_from_stored_mnemonic(db, net, account_uuid)
+        .map_err(|e| format!("Failed to read the mnemonic back: {e}"))
         .and_then(|stored| {
             if stored.expose_secret() == seed.expose_secret() {
                 Ok(())
             } else {
-                Err("Keychain returned a different mnemonic than the one just stored".into())
+                Err("The store returned a different mnemonic than the one just stored".into())
             }
         });
     if verified.is_err() {
-        let _ = zorg::secret_store::delete_mnemonic_from_macos_keychain(net, account_uuid);
+        let _ = zorg::secret_store::delete_mnemonic(db, net, account_uuid);
     }
     verified
 }
@@ -882,7 +882,7 @@ fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> zeroize::Zeroizing<Str
         text.push('\n');
     }
     let _ = writeln!(text, "Wallet birthday: {birthday}");
-    text.push_str("A Touch ID-protected copy stays in this Mac's Keychain.\n");
+    text.push_str("A protected copy stays on this Mac.\n");
     text
 }
 
@@ -912,7 +912,7 @@ fn cmd_import(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     zorg::account::ensure_new_seed(accounts, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    store_and_verify_mnemonic(net, &created.uuid, &mnemonic, &seed)?;
+    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -1258,7 +1258,7 @@ fn ago(seconds: u64) -> String {
 }
 
 /// Deletes `account` after confirming: its index entry, its database if one is
-/// left, and its Keychain phrase. The card shows the balance as dots when
+/// left, and its stored recovery phrase. The card shows the balance as dots when
 /// `hide` is set.
 fn cmd_delete(
     root: &std::path::Path,
@@ -1318,9 +1318,9 @@ fn cmd_delete(
         }
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
     }
-    zorg::secret_store::mnemonic_from_macos_keychain_if_present(account.network, &account.uuid)?;
+    zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?;
     zorg::account::delete_account(root, account)?;
-    zorg::secret_store::delete_mnemonic_from_macos_keychain(account.network, &account.uuid)?;
+    zorg::secret_store::delete_mnemonic(&account.db_path, account.network, &account.uuid)?;
     if interactive {
         terminal::success(&format!("Deleted account {}", account.name));
     } else {
@@ -1329,16 +1329,15 @@ fn cmd_delete(
     Ok(())
 }
 
-/// The error for an account whose recovery phrase is not in this Mac's
-/// Keychain, with the commands that restore it.
+/// The error for an account with no recovery phrase in the selected store.
 fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> String {
     let network = match account.network {
         WalletNetwork::Main => String::new(),
         net => format!(" --network {}", net.as_str()),
     };
     format!(
-        "The recovery phrase for {name:?} isn't in this Mac's Keychain \
-         (Keychain entries don't move to a new Mac). Restore it with your written-down phrase:\n  \
+        "The recovery phrase for {name:?} isn't in this build's store on this Mac. \
+         Restore it with your written-down phrase:\n  \
          zorg delete --account {name:?}\n  \
          zorg create {name:?} --import{network} --birthday {birthday}",
         name = account.name,
@@ -1347,11 +1346,9 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
 
 fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
-    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(
-        account.network,
-        &account.uuid,
-    )?
-    .ok_or_else(|| missing_phrase_error(account, birthday))?;
+    let mnemonic =
+        zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?
+            .ok_or_else(|| missing_phrase_error(account, birthday))?;
     let copy = ["Copy phrase".to_string()];
     let mut status: Result<String, String> = Ok(String::new());
     terminal::clear()?;
@@ -1372,7 +1369,7 @@ fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> 
 
 fn cmd_recovery(net: WalletNetwork, account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
-    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, &account.uuid)?
+    let mnemonic = zorg::secret_store::mnemonic_if_present(&account.db_path, net, &account.uuid)?
         .ok_or_else(|| missing_phrase_error(account, birthday))?;
     print!("{}", *recovery_phrase_text(&mnemonic, u64::from(birthday)));
     Ok(())
@@ -1509,7 +1506,12 @@ fn cmd_send(
                 } else {
                     print!("{}", send_summary(to, amount_zat, proposed_fee, memo, net));
                 }
-                let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
+                let seed = load_seed(
+                    db,
+                    network,
+                    &account.expose_uuid().to_string(),
+                    missing_phrase,
+                )?;
                 if interactive {
                     progress.show("Building the transaction…");
                 }
@@ -1569,6 +1571,7 @@ fn cmd_shield(
     lwd_url: &str,
     missing_phrase: &str,
 ) -> Result<(), String> {
+    let db = &account.db_path;
     let net = account.network;
     let interactive = terminal::interactive();
     let unit = net.unit();
@@ -1605,7 +1608,12 @@ fn cmd_shield(
                     fmt_zec(fee, net)
                 );
             }
-            let seed = load_seed(network, &account.expose_uuid().to_string(), missing_phrase)?;
+            let seed = load_seed(
+                db,
+                network,
+                &account.expose_uuid().to_string(),
+                missing_phrase,
+            )?;
             if interactive {
                 progress.show("Building the transaction…");
             }
@@ -1902,14 +1910,14 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
     first_alive.to_string()
 }
 
-/// The account's seed from Keychain; fails with `missing_phrase` when
-/// Keychain has no entry for the account.
+/// The account's stored seed; fails with `missing_phrase` when no phrase exists.
 fn load_seed(
+    db: &str,
     net: WalletNetwork,
     account_uuid: &str,
     missing_phrase: &str,
 ) -> Result<secrecy::SecretVec<u8>, String> {
-    let mnemonic = zorg::secret_store::mnemonic_from_macos_keychain_if_present(net, account_uuid)?
+    let mnemonic = zorg::secret_store::mnemonic_if_present(db, net, account_uuid)?
         .ok_or_else(|| missing_phrase.to_string())?;
     keys::mnemonic_to_seed(&mnemonic)
 }

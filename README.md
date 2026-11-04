@@ -18,7 +18,7 @@ A macOS wallet for shielded payments, named accounts, and transaction history. O
 zorg
 ```
 
-On first run, zorg helps you create an account or import a recovery phrase. With an existing account, it requests protected Keychain access before opening the account home screen and syncing in the background. macOS handles authentication with Touch ID or your login password.
+On first run, zorg helps you create an account or import a recovery phrase. With an existing account, it requests access to the protected recovery phrase before opening the account home screen and syncing in the background. macOS handles authentication with Touch ID or your login password.
 
 | Screen | What you can do |
 |---|---|
@@ -62,7 +62,7 @@ Account names are case-sensitive. Use `--account <name>` to select one; each acc
 
 `--network main`, `--network test`, or `--network regtest` chooses the network when creating or importing an account. The default is mainnet. Other commands use the account’s saved network. Amounts are in ZEC on mainnet and TAZ on testnet.
 
-Without flags, `zorg create` guides you through choosing a name and creating or importing an account. Without a terminal, provide an account name and specify `--new` or `--import`. Explicit commands skip terminal menus and confirmation cards when run without a terminal; operations that read recovery phrases still require protected Keychain access.
+Without flags, `zorg create` guides you through choosing a name and creating or importing an account. Without a terminal, provide an account name and specify `--new` or `--import`. Explicit commands skip terminal menus and confirmation cards when run without a terminal; operations that read recovery phrases still require macOS authentication.
 
 | Global option | Purpose |
 |---|---|
@@ -74,20 +74,38 @@ Without flags, `zorg create` guides you through choosing a name and creating or 
 
 Keep an offline copy of your recovery words and wallet birthday. Import accepts a 12- or 24-word phrase without numbering. Supplying its birthday avoids scanning from the beginning.
 
-The account index and individual account databases live in `~/Library/Application Support/zorg/`. Recovery phrases are stored separately in this Mac’s protected Keychain. Those Keychain entries do not move to another Mac; keep your own recovery copy.
+The two builds keep separate wallets:
+
+| Build | Wallet directory | Recovery phrase storage |
+|---|---|---|
+| `standalone` (default) | `~/.zorg/` | age-encrypted files with a Secure Enclave identity per account. |
+| `packaged` | `~/Library/Application Support/zorg/` | This Mac’s protected Keychain, as before. |
+
+Standalone secrets are under the wallet directory’s `secrets/` folder. The identity files are required to decrypt the phrases, and work only on the original Mac. Neither copying these files nor copying Keychain-backed databases to another Mac replaces a recovery backup. Keep your written recovery words and birthday.
+
+The builds do not discover or migrate each other’s accounts. To use an account in the other build, import its recovery words and birthday there. Both builds authorize phrase access with Touch ID or the Mac password; macOS controls prompts and any authorization reuse.
 
 ## Build from source
 
-Requires **macOS** and the **stable Rust toolchain**.
+Requires **macOS 14 or later**, a Mac with a **Secure Enclave**, the **stable Rust toolchain**, and Homebrew’s `age` and `age-plugin-se` tools.
 
 ```sh
+brew install age age-plugin-se
 git clone https://github.com/craftsoldier/zorg.git
 cd zorg
 cargo build --locked --release
 ./target/release/zorg --help
 ```
 
-The executable is `target/release/zorg`. Accessing recovery phrases requires the signed `zorg.app` bundle with its provisioning profile and Keychain entitlements; a Cargo build alone does not assemble or sign that bundle.
+The executable is `target/release/zorg`. This default `standalone` build uses age-plugin-se without a provisioning profile or developer certificate. Identity files are created exclusively with private permissions, and a phrase is decrypted and checked before account creation succeeds.
+
+The `packaged` build retains the existing Keychain storage:
+
+```sh
+cargo build --locked --release --no-default-features --features packaged
+```
+
+Running phrase operations in that build requires the signed `zorg.app` bundle with its provisioning profile and Keychain entitlements. The feature selects storage behavior; it does not assemble or sign a bundle. Enable exactly one of `standalone` and `packaged`.
 
 ## Contribute
 
