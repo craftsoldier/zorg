@@ -8,6 +8,8 @@ use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
 
+const BANNER: &str = include_str!("../.github/assets/zorg.txt");
+
 const USAGE: &str = "\
 zorg — a modern Zcash CLI wallet
 
@@ -262,8 +264,13 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 sync_failure = update.err();
             }
             terminal::clear()?;
-            let heading = format!("{} · {}", account.name, account.network.display_name());
             let width = usize::from(console::Term::stdout().size().1);
+            for line in BANNER.lines() {
+                println!("{}", console::truncate_str(line, width, ""));
+            }
+            println!();
+            let banner_height = BANNER.lines().count() + 1;
+            let heading = format!("{} · {}", account.name, account.network.display_name());
             println!(
                 "{}",
                 console::style(console::truncate_str(&heading, width, "…")).bold()
@@ -286,8 +293,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                     changed = true;
                 }
                 if changed {
-                    terminal::paint_line(2, &balance_row(account, hidden));
-                    terminal::paint_line(3, &sync_row(&sync_failure));
+                    terminal::paint_line(banner_height + 2, &balance_row(account, hidden));
+                    terminal::paint_line(banner_height + 3, &sync_row(&sync_failure));
                 }
             };
             let keys = [('b', balances), ('s', "settings")];
