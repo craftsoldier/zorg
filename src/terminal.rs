@@ -313,17 +313,18 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
 pub fn menu_with_keys(
     leave: &str,
     items: &[String],
+    default: usize,
     keys: &[(char, &str)],
     idle: &mut dyn FnMut(),
 ) -> Result<Option<usize>, String> {
     let term = Term::stdout();
     let width = usize::from(term.size().1).saturating_sub(2);
     let fit = |text: &str| console::truncate_str(text, width, "…").into_owned();
-    let named: Vec<String> = keys
+    let named: String = keys
         .iter()
         .map(|(key, name)| format!("{key} {name} · "))
         .collect();
-    let hint = fit(&format!("↑↓ move · Enter pick · {}{leave}", named.concat()));
+    let hint = fit(&format!("{named}{leave} · ↑↓ · Enter"));
     let items: Vec<String> = items.iter().map(|item| fit(item)).collect();
     let draw = |current: usize| -> std::io::Result<()> {
         term.write_line(&style(&hint).dim().to_string())?;
@@ -336,7 +337,7 @@ pub fn menu_with_keys(
         }
         Ok(())
     };
-    let mut current = 0;
+    let mut current = default;
     term.hide_cursor().map_err(|e| e.to_string())?;
     draw(current).map_err(|e| e.to_string())?;
     let answer = loop {

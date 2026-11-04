@@ -306,7 +306,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             } else {
                 actions[..3].to_vec()
             };
-            let choice = terminal::menu_with_keys("q quit", &items, &keys, &mut repaint);
+            let choice = terminal::menu_with_keys("q quit", &items, 0, &keys, &mut repaint);
             let choice = match choice? {
                 None if hidden == saved.hide_balances => return Ok(()),
                 None => return zorg::account::set_hide_balances(&root, hidden),
@@ -937,7 +937,7 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
                 ('t', "transparent"),
             ),
         };
-        let choice = terminal::menu_with_keys("Esc back", actions, &[key], &mut || {})?;
+        let choice = terminal::menu_with_keys("Esc back", actions, 0, &[key], &mut || {})?;
         status = match choice {
             None => return Ok(()),
             Some(i) if i == actions.len() => {
@@ -1194,13 +1194,40 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
     let mut current = 0;
     loop {
         terminal::clear()?;
-        println!("{}\n", console::style("Transactions").bold());
-        let Some(choice) = terminal::menu("Esc back", &items, current)? else {
+        let page_size = usize::from(console::Term::stdout().size().0)
+            .saturating_sub(6)
+            .clamp(1, 10);
+        let start = current / page_size * page_size;
+        let end = (start + page_size).min(items.len());
+        println!("{}", console::style("Transactions").bold());
+        println!("{}–{} of {}\n", start + 1, end, items.len());
+        let mut keys = Vec::new();
+        if end < items.len() {
+            keys.push(('n', "Older"));
+        }
+        if start > 0 {
+            keys.push(('p', "Newer"));
+        }
+        let Some(choice) = terminal::menu_with_keys(
+            "Esc back",
+            &items[start..end],
+            current - start,
+            &keys,
+            &mut || {},
+        )?
+        else {
             return Ok(());
         };
-        current = choice;
+        if choice >= end - start {
+            current = match keys[choice - (end - start)].0 {
+                'n' => end,
+                _ => start.saturating_sub(page_size),
+            };
+            continue;
+        }
+        current = start + choice;
         terminal::clear()?;
-        if let Err(e) = cmd_tx(account, &txs[choice].txid.to_string(), hide) {
+        if let Err(e) = cmd_tx(account, &txs[current].txid.to_string(), hide) {
             terminal::failure(&e);
         }
         println!();
