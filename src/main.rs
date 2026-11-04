@@ -246,7 +246,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        let actions = ["Send", "Receive", "History", "Settings", "Shield"].map(String::from);
+        let actions = ["Send", "Receive", "Transactions", "Settings", "Shield"].map(String::from);
         let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
         log::set_max_level(log::LevelFilter::Off);
@@ -1193,7 +1193,7 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
     let mut current = 0;
     loop {
         terminal::clear()?;
-        println!("{}\n", console::style("History").bold());
+        println!("{}\n", console::style("Transactions").bold());
         let Some(choice) = terminal::menu("Esc back", &items, current)? else {
             return Ok(());
         };
