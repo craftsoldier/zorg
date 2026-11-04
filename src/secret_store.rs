@@ -3,12 +3,15 @@ use secrecy::SecretVec;
 use std::path::Path;
 use zeroize::Zeroizing;
 
-#[cfg(feature = "packaged")]
-#[path = "secret_store/packaged.rs"]
-mod backend;
 #[cfg(not(feature = "packaged"))]
-#[path = "secret_store/standalone.rs"]
-mod backend;
+mod age;
+#[cfg(feature = "packaged")]
+mod keychain;
+
+#[cfg(not(feature = "packaged"))]
+use age as backend;
+#[cfg(feature = "packaged")]
+use keychain as backend;
 
 pub fn seed_from_stored_mnemonic(
     db: &str,
