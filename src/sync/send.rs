@@ -52,17 +52,6 @@ pub struct ProposalResult {
 
 pub struct ExecuteProposalResult {
     pub txids: Vec<TxId>,
-    pub status: String,
-    pub broadcasted_count: u32,
-    pub total_count: u32,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ResubmitStats {
-    pub attempted: usize,
-    pub succeeded: usize,
-    pub failed: usize,
 }
 
 /// The file at `path`, opened and rewound, if its BLAKE2b-512 hash is `expected`.
@@ -476,13 +465,8 @@ async fn execute_stored(
         broadcast_ok.push(*txid);
         log::info!("send: broadcast {txid}");
     }
-    let count = broadcast_ok.len() as u32;
     Ok(ExecuteProposalResult {
         txids: broadcast_ok,
-        status: "broadcasted".to_string(),
-        broadcasted_count: count,
-        total_count: count,
-        message: None,
     })
 }
 
@@ -495,32 +479,26 @@ pub(crate) async fn resubmit_pending_transactions(
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     current_height: u32,
     excluded: &HashSet<Vec<u8>>,
-) -> Result<ResubmitStats, String> {
+) -> Result<(), String> {
     let txs = crate::sync::transactions::get_resubmittable_txs_excluding(
         db_path,
         current_height,
         excluded,
     )?;
-    let mut stats = ResubmitStats::default();
     for tx in txs {
-        stats.attempted += 1;
         let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {
             Ok(resp) => {
                 if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
                     log::warn!("resubmit: {} rejected: {err}", tx.txid);
-                    stats.failed += 1;
-                } else {
-                    stats.succeeded += 1;
                 }
             }
             Err(e) => {
                 log::warn!("resubmit: {} failed: {e}", tx.txid);
-                stats.failed += 1;
             }
         }
     }
-    Ok(stats)
+    Ok(())
 }
 
 // ======================== Public broadcast (for API layer) ========================

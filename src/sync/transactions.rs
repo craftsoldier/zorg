@@ -24,7 +24,7 @@ use std::{
 
 use rusqlite::{types::Value, vtab::array::Array, OptionalExtension};
 use transparent::address::TransparentAddress;
-use zcash_client_backend::data_api::{WalletRead, WalletWrite};
+use zcash_client_backend::data_api::WalletWrite;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
@@ -35,7 +35,7 @@ use crate::account::parse_account_uuid;
 use crate::db::with_wallet_db_write_lock;
 use crate::network::WalletNetwork;
 
-use super::{open_readonly_conn, open_wallet_db, open_wallet_db_for_read};
+use super::{open_readonly_conn, open_wallet_db};
 
 const ORCHARD_NOTE_VERSION: i64 = 2;
 const IRONWOOD_NOTE_VERSION: i64 = 3;
@@ -255,81 +255,14 @@ pub fn get_next_available_address(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddressRequestKind {
     Shielded,
-    Orchard,
-}
-
-pub fn parse_address_request_kind(request: &str) -> Result<AddressRequestKind, String> {
-    match request {
-        "shielded" => Ok(AddressRequestKind::Shielded),
-        "orchard" => Ok(AddressRequestKind::Orchard),
-        _ => Err(format!(
-            "Unsupported address request '{request}'. Expected 'shielded' or 'orchard'."
-        )),
-    }
 }
 
 impl AddressRequestKind {
     fn to_unified_address_request(self) -> zcash_keys::keys::UnifiedAddressRequest {
         match self {
             AddressRequestKind::Shielded => crate::keys::shielded_address_request(),
-            AddressRequestKind::Orchard => orchard_address_request(),
         }
     }
-}
-
-fn orchard_address_request() -> zcash_keys::keys::UnifiedAddressRequest {
-    zcash_keys::keys::UnifiedAddressRequest::ORCHARD
-}
-
-// ======================== Transaction Enhancement Requests ========================
-
-pub struct TxDataRequest {
-    pub request_type: String, // "get_status", "enhancement", "address_txids"
-    pub txid: Option<String>,
-    pub address: Option<String>,
-    pub block_range_start: Option<u64>,
-    pub block_range_end: Option<u64>,
-}
-
-pub fn get_transaction_data_requests(
-    db_path: &str,
-    network: WalletNetwork,
-) -> Result<Vec<TxDataRequest>, String> {
-    use zcash_client_backend::data_api::TransactionDataRequest;
-
-    let db = open_wallet_db_for_read(db_path, network)?;
-    let requests = db.transaction_data_requests().map_err(|e| format!("{e}"))?;
-
-    Ok(requests
-        .into_iter()
-        .map(|r| match r {
-            TransactionDataRequest::GetStatus(txid) => TxDataRequest {
-                request_type: "get_status".into(),
-                txid: Some(format!("{txid}")),
-                address: None,
-                block_range_start: None,
-                block_range_end: None,
-            },
-            TransactionDataRequest::Enhancement(txid) => TxDataRequest {
-                request_type: "enhancement".into(),
-                txid: Some(format!("{txid}")),
-                address: None,
-                block_range_start: None,
-                block_range_end: None,
-            },
-            TransactionDataRequest::TransactionsInvolvingAddress(req) => {
-                let addr =
-                    zcash_keys::encoding::encode_transparent_address_p(&network, &req.address());
-                TxDataRequest {
-                    request_type: "address_txids".into(),
-                    txid: None,
-                    address: Some(addr),
-                    block_range_start: Some(u32::from(req.block_range_start()) as u64),
-                    block_range_end: req.block_range_end().map(|h| u32::from(h) as u64),
-                }
-            }
-        })
-        .collect())
 }
 
 /// Returns unmined transactions that the wallet previously discovered in a
@@ -694,54 +627,6 @@ fn assemble_history(
     }
 
     visible.into_iter().map(|tx| tx.info).collect()
-}
-
-pub fn get_previous_transaction_count_for_address(
-    db_path: &str,
-    _network: WalletNetwork,
-    account_uuid: &str,
-    address: &str,
-) -> Result<u32, String> {
-    let uuid = uuid::Uuid::parse_str(account_uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
-    let uuid_bytes = uuid.as_bytes().to_vec();
-    let address = address.trim();
-    if address.is_empty() {
-        return Ok(0);
-    }
-
-    let conn = open_readonly_conn(db_path)?;
-    let count = conn
-        .query_row(
-            r#"
-        SELECT COUNT(*)
-        FROM (
-            SELECT DISTINCT tx.txid
-            FROM sent_notes sn
-            JOIN transactions tx ON tx.id_tx = sn.transaction_id
-            JOIN accounts from_acc ON from_acc.id = sn.from_account_id
-            JOIN v_transactions vt ON vt.txid = tx.txid
-            WHERE from_acc.uuid = ?1
-              AND vt.account_uuid = ?1
-              AND sn.to_address = ?2
-              AND COALESCE(sn.value, 0) > 0
-
-            UNION
-
-            SELECT DISTINCT txo.txid
-            FROM v_tx_outputs txo
-            JOIN v_transactions vt ON vt.txid = txo.txid
-            WHERE txo.from_account_uuid = ?1
-              AND vt.account_uuid = ?1
-              AND txo.to_address = ?2
-              AND COALESCE(txo.value, 0) > 0
-        ) matched
-        "#,
-            rusqlite::params![uuid_bytes.as_slice(), address],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("Previous transaction count query error: {e}"))?;
-
-    Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 pub fn get_transaction_detail(
@@ -2604,173 +2489,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(changed, 1);
-    }
-
-    #[test]
-    fn previous_transaction_count_for_address_counts_distinct_sent_transactions() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let other_account = second_test_account_uuid();
-        let target = "u1contactaddress";
-        let other_target = "u1otheraddress";
-
-        let txid_a = fake_txid(0xC1);
-        insert_history_tx(
-            &db,
-            account,
-            &txid_a,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -5_000_000,
-            5_000_000,
-            0,
-            false,
-            Some("2026-04-28T14:03:00Z"),
-        );
-        let output_index = insert_output_with_address(
-            &db,
-            &txid_a,
-            3,
-            Some(account),
-            None,
-            5_000_000,
-            false,
-            Some(target),
-            None,
-        );
-        insert_sent_note(
-            &db,
-            &txid_a,
-            3,
-            output_index,
-            account,
-            None,
-            Some(target),
-            5_000_000,
-            None,
-        );
-
-        let txid_b = fake_txid(0xC2);
-        insert_history_tx(
-            &db,
-            account,
-            &txid_b,
-            Some(1_000_001),
-            2,
-            Some(1_000_101),
-            -7_000_000,
-            7_000_000,
-            0,
-            false,
-            Some("2026-04-28T14:04:00Z"),
-        );
-        let output_index = insert_output_with_address(
-            &db,
-            &txid_b,
-            3,
-            Some(account),
-            None,
-            7_000_000,
-            false,
-            Some(target),
-            None,
-        );
-        insert_sent_note(
-            &db,
-            &txid_b,
-            3,
-            output_index,
-            account,
-            None,
-            Some(target),
-            7_000_000,
-            None,
-        );
-
-        let txid_c = fake_txid(0xC3);
-        insert_history_tx(
-            &db,
-            account,
-            &txid_c,
-            Some(1_000_002),
-            3,
-            Some(1_000_102),
-            -9_000_000,
-            9_000_000,
-            0,
-            false,
-            Some("2026-04-28T14:05:00Z"),
-        );
-        let output_index = insert_output_with_address(
-            &db,
-            &txid_c,
-            3,
-            Some(account),
-            None,
-            9_000_000,
-            false,
-            Some(other_target),
-            None,
-        );
-        insert_sent_note(
-            &db,
-            &txid_c,
-            3,
-            output_index,
-            account,
-            None,
-            Some(other_target),
-            9_000_000,
-            None,
-        );
-
-        let txid_d = fake_txid(0xC4);
-        insert_history_tx(
-            &db,
-            other_account,
-            &txid_d,
-            Some(1_000_003),
-            4,
-            Some(1_000_103),
-            -11_000_000,
-            11_000_000,
-            0,
-            false,
-            Some("2026-04-28T14:06:00Z"),
-        );
-        let output_index = insert_output_with_address(
-            &db,
-            &txid_d,
-            3,
-            Some(other_account),
-            None,
-            11_000_000,
-            false,
-            Some(target),
-            None,
-        );
-        insert_sent_note(
-            &db,
-            &txid_d,
-            3,
-            output_index,
-            other_account,
-            None,
-            Some(target),
-            11_000_000,
-            None,
-        );
-
-        let got = get_previous_transaction_count_for_address(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &format!(" {target} "),
-        )
-        .unwrap();
-
-        assert_eq!(got, 2);
     }
 
     fn mark_expired_unmined(db: &NamedTempFile, txid: &[u8]) {

@@ -26,10 +26,9 @@ mod transactions;
 // exactly).
 pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
-    decrypt_and_store_transaction, get_next_available_address,
-    get_previous_transaction_count_for_address, get_transaction_data_requests,
-    get_transaction_detail, get_transaction_history, get_wallet_balance, get_wallet_balances,
-    parse_address_request_kind, AddressRequestKind, WalletBalance,
+    decrypt_and_store_transaction, get_next_available_address, get_transaction_detail,
+    get_transaction_history, get_wallet_balance, get_wallet_balances, AddressRequestKind,
+    WalletBalance,
 };
 
 pub(super) fn open_wallet_db(
@@ -65,7 +64,6 @@ pub fn update_chain_tip(db_path: &str, network: WalletNetwork, height: u64) -> R
 pub struct SyncProgress {
     pub scanned_height: u64,
     pub chain_tip_height: u64,
-    pub is_syncing: bool,
     pub is_complete: bool,
 }
 
@@ -133,7 +131,6 @@ pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncPr
             Ok(SyncProgress {
                 scanned_height,
                 chain_tip_height,
-                is_syncing: scanned_height < chain_tip_height,
                 is_complete: is_completed_sync_status(
                     scanned_height,
                     chain_tip_height,
@@ -144,7 +141,6 @@ pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncPr
         None => Ok(SyncProgress {
             scanned_height: 0,
             chain_tip_height: 0,
-            is_syncing: false,
             is_complete: false,
         }),
     }
