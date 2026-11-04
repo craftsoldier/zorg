@@ -6,8 +6,9 @@ need to know to get a patch merged.
 ## Development environment
 
 - **Rust** (stable toolchain) — `rustup` is the easiest way to get it.
-- **macOS** is required to run the wallet end-to-end: the mnemonic is stored
-  in the macOS Keychain, and CI builds on macOS.
+- **macOS 14+ with Secure Enclave** is required to run the wallet end-to-end.
+  Install `age` and `age-plugin-se` with Homebrew for the default standalone build.
+  The packaged build uses the existing protected Keychain.
 - A lightwalletd endpoint is only needed for commands that touch the network
   (`create`, `sync`, `send`). Sensible defaults are built in; override with
   `--lwd`.
@@ -15,13 +16,13 @@ need to know to get a patch merged.
 ## Building and testing
 
 ```bash
-cargo build --release          # the binary lands in target/release/zorg
+cargo build --locked --release # the binary lands in target/release/zorg
 cargo test --locked            # unit tests
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs exactly these four checks (plus a dependency advisory audit) and they must all pass. Running them locally
+CI runs these checks for both storage modes (plus a CLI help smoke test and dependency advisory audit) and they must all pass. To check the packaged mode, add `--no-default-features --features packaged` to the build, test, and Clippy commands. Running them locally
 before pushing saves everyone a round trip.
 
 ## Ground rules
@@ -38,7 +39,7 @@ before pushing saves everyone a round trip.
    testnet (`--network test`); never mainnet.
 5. **Never commit secrets.** No mnemonics, no wallet databases, no
    keychain dumps. Wallet state lives outside the repo
-   (`~/Library/Application Support/zorg/` by default).
+   (`~/.zorg/` for standalone; `~/Library/Application Support/zorg/` for packaged).
 
 ## Reporting bugs
 

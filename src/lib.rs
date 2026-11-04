@@ -1,5 +1,11 @@
+#[cfg(any(
+    all(feature = "standalone", feature = "packaged"),
+    not(any(feature = "standalone", feature = "packaged"))
+))]
+compile_error!("Enable exactly one of standalone (default) or packaged; use --no-default-features --features packaged for the packaged build.");
+
 #[cfg(not(target_os = "macos"))]
-compile_error!("zorg runs only on macOS: it keeps recovery phrases in the macOS Keychain.");
+compile_error!("zorg runs only on macOS: recovery phrases require macOS authentication.");
 
 pub mod account;
 pub(crate) mod db;

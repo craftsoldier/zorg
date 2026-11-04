@@ -1,83 +1,80 @@
+use crate::{keys, network::WalletNetwork};
 use secrecy::SecretVec;
+use std::path::Path;
 use zeroize::Zeroizing;
 
-use crate::{keys, network::WalletNetwork};
+#[cfg(feature = "packaged")]
+#[path = "secret_store/packaged.rs"]
+mod backend;
+#[cfg(not(feature = "packaged"))]
+#[path = "secret_store/standalone.rs"]
+mod backend;
 
-const ACCOUNT_MNEMONIC_KEY_PREFIX: &str = "zorg_wallet_";
-
-const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-
-const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
-
-pub fn seed_from_macos_stored_mnemonic(
+pub fn seed_from_stored_mnemonic(
+    db: &str,
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<SecretVec<u8>, String> {
-    let mnemonic = mnemonic_from_macos_keychain(network, account_uuid)?;
-    keys::mnemonic_to_seed(&mnemonic)
+    keys::mnemonic_to_seed(&mnemonic(db, network, account_uuid)?)
 }
 
-/// The account's recovery phrase from the protected Keychain. Reading it asks
-/// for Touch ID or the login password.
-pub fn mnemonic_from_macos_keychain(
+/// The account's recovery phrase, read with macOS authentication.
+pub fn mnemonic(
+    db: &str,
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<Zeroizing<String>, String> {
-    mnemonic_from_macos_keychain_if_present(network, account_uuid)?
+    mnemonic_if_present(db, network, account_uuid)?
         .ok_or_else(|| "Mnemonic not found for account".to_string())
 }
 
-/// The account's recovery phrase from the protected Keychain, or `None` when
-/// it has no entry. Reading an existing entry asks for Touch ID or the login
-/// password.
-pub fn mnemonic_from_macos_keychain_if_present(
+/// The account's recovery phrase, or `None` when the selected store has no entry.
+pub fn mnemonic_if_present(
+    db: &str,
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<Option<Zeroizing<String>>, String> {
-    let account_key = account_mnemonic_key(account_uuid);
-
-    // The payload is now the raw utf-8 mnemonic string stored in the keychain
-    let service = mnemonic_store_service_for_network(network);
-    let Some(mnemonic_bytes) = macos_read_secure_store_value(&service, &account_key)? else {
+    let Some(bytes) = backend::read(
+        root(db)?,
+        &mnemonic_store_service_for_network(network),
+        &account_mnemonic_key(account_uuid)?,
+    )?
+    else {
         return Ok(None);
     };
-
-    let mnemonic_str = std::str::from_utf8(mnemonic_bytes.as_slice())
-        .map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
-    Ok(Some(Zeroizing::new(mnemonic_str.to_string())))
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
+    Ok(Some(Zeroizing::new(text.to_string())))
 }
 
-pub fn store_mnemonic_in_macos_keychain(
+pub fn store_mnemonic(
+    db: &str,
     network: WalletNetwork,
     account_uuid: &str,
     mnemonic: &str,
 ) -> Result<(), String> {
-    let account_key = account_mnemonic_key(account_uuid);
-    macos_write_secure_store_value(
+    backend::write(
+        root(db)?,
         &mnemonic_store_service_for_network(network),
-        &account_key,
+        &account_mnemonic_key(account_uuid)?,
         mnemonic.as_bytes(),
     )
 }
 
-/// Removes the account's mnemonic from the protected Keychain. A missing entry
-/// is not an error.
-pub fn delete_mnemonic_from_macos_keychain(
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<(), String> {
-    use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
-
-    let mut options = PasswordOptions::new_generic_password(
+/// Removes the account's stored phrase. A missing entry is not an error.
+pub fn delete_mnemonic(db: &str, network: WalletNetwork, account_uuid: &str) -> Result<(), String> {
+    backend::delete(
+        root(db)?,
         &mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid),
-    );
-    options.use_protected_keychain();
-    match delete_generic_password_options(options) {
-        Ok(()) => Ok(()),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-        Err(error) => Err(keychain_error("Failed to delete Keychain entry", error)),
-    }
+        &account_mnemonic_key(account_uuid)?,
+    )
+}
+
+fn root(db: &str) -> Result<&Path, String> {
+    Path::new(db)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "Wallet database must have a parent directory".to_string())
 }
 
 fn secure_store_service_for_network(network: WalletNetwork) -> String {
@@ -92,87 +89,45 @@ fn mnemonic_store_service_for_network(network: WalletNetwork) -> String {
     format!("{}.mnemonic", secure_store_service_for_network(network))
 }
 
-fn account_mnemonic_key(account_uuid: &str) -> String {
-    format!("{ACCOUNT_MNEMONIC_KEY_PREFIX}{account_uuid}")
-}
-
-fn macos_read_secure_store_value(
-    service: &str,
-    key: &str,
-) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    use security_framework::passwords::{generic_password, PasswordOptions};
-
-    let mut options = PasswordOptions::new_generic_password(service, key);
-    options.use_protected_keychain();
-    match generic_password(options) {
-        Ok(value) => Ok(Some(Zeroizing::new(value))),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-        Err(error) => Err(keychain_error("Keychain read failed", error)),
-    }
-}
-
-fn macos_write_secure_store_value(service: &str, key: &str, value: &[u8]) -> Result<(), String> {
-    use security_framework::{
-        access_control::{ProtectionMode, SecAccessControl},
-        passwords::{
-            delete_generic_password_options, set_generic_password_options, AccessControlOptions,
-            PasswordOptions,
-        },
-    };
-
-    let access = SecAccessControl::create_with_protection(
-        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-        AccessControlOptions::USER_PRESENCE.bits(),
-    )
-    .map_err(|error| format!("Create Keychain access control: {error}"))?;
-    let mut existing = PasswordOptions::new_generic_password(service, key);
-    existing.use_protected_keychain();
-    match delete_generic_password_options(existing) {
-        Ok(()) => {}
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
-        Err(error) => return Err(keychain_error("Failed to replace Keychain entry", error)),
-    }
-    let mut options = PasswordOptions::new_generic_password(service, key);
-    options.use_protected_keychain();
-    options.set_access_control(access);
-    set_generic_password_options(value, options)
-        .map_err(|error| keychain_error("Failed to write protected mnemonic to Keychain", error))
-}
-
-/// The message for a failed Keychain call: what to do when the binary lacks
-/// zorg's Keychain entitlement, otherwise `context` and the error.
-fn keychain_error(context: &str, error: security_framework::base::Error) -> String {
-    if error.code() == ERR_SEC_MISSING_ENTITLEMENT {
-        return "This zorg binary isn't the signed zorg app, so macOS won't let it use the \
-                Keychain for recovery phrases. Install and run the signed zorg app."
-            .to_string();
-    }
-    format!("{context}: {error}")
+fn account_mnemonic_key(account_uuid: &str) -> Result<String, String> {
+    uuid::Uuid::parse_str(account_uuid).map_err(|_| "Invalid account UUID".to_string())?;
+    Ok(format!("zorg_wallet_{account_uuid}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
-    #[ignore = "requires a signed test bundle and interactive Keychain authentication"]
-    fn keychain_round_trips_through_production_read_path() {
-        use secrecy::ExposeSecret;
-        use security_framework::passwords::{delete_generic_password_options, PasswordOptions};
+    fn invalid_account_identifier_never_accesses_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("regtest.db");
+        for uuid in ["", "../other-account", "not-a-uuid"] {
+            assert!(
+                store_mnemonic(db.to_str().unwrap(), WalletNetwork::Regtest, uuid, "unused")
+                    .is_err()
+            );
+            assert!(
+                mnemonic_if_present(db.to_str().unwrap(), WalletNetwork::Regtest, uuid).is_err()
+            );
+            assert!(delete_mnemonic(db.to_str().unwrap(), WalletNetwork::Regtest, uuid).is_err());
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
-        let account_uuid = uuid::Uuid::new_v4().to_string();
-        let mnemonic = keys::generate_mnemonic();
-        let expected = keys::mnemonic_to_seed(&mnemonic).unwrap();
-        let service = mnemonic_store_service_for_network(WalletNetwork::Regtest);
-        let key = account_mnemonic_key(&account_uuid);
-
-        store_mnemonic_in_macos_keychain(WalletNetwork::Regtest, &account_uuid, &mnemonic).unwrap();
-        let actual =
-            seed_from_macos_stored_mnemonic(WalletNetwork::Regtest, &account_uuid).unwrap();
-
-        let mut options = PasswordOptions::new_generic_password(&service, &key);
-        options.use_protected_keychain();
-        delete_generic_password_options(options).unwrap();
-        assert_eq!(actual.expose_secret(), expected.expose_secret());
+    #[test]
+    #[ignore = "requires macOS authentication and the selected store's runtime setup"]
+    fn stored_phrase_round_trips_through_production_read_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("regtest.db");
+        let db = db.to_str().unwrap();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let phrase = keys::generate_mnemonic();
+        let expected = keys::mnemonic_to_seed(&phrase).unwrap();
+        store_mnemonic(db, WalletNetwork::Regtest, &uuid, &phrase).unwrap();
+        let result = seed_from_stored_mnemonic(db, WalletNetwork::Regtest, &uuid);
+        delete_mnemonic(db, WalletNetwork::Regtest, &uuid).unwrap();
+        assert_eq!(result.unwrap().expose_secret(), expected.expose_secret());
     }
 }

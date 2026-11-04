@@ -217,10 +217,16 @@ pub fn parse_account_uuid(s: &str) -> Result<AccountUuid, String> {
     Ok(AccountUuid::from_uuid(uuid))
 }
 
-/// zorg's data directory: `~/Library/Application Support/zorg`.
+/// The selected build's wallet directory: `~/.zorg` for standalone builds,
+/// or `~/Library/Application Support/zorg` for packaged builds.
 pub fn wallet_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home).join("Library/Application Support/zorg"))
+    let directory = if cfg!(feature = "packaged") {
+        "Library/Application Support/zorg"
+    } else {
+        ".zorg"
+    };
+    Ok(PathBuf::from(home).join(directory))
 }
 
 /// Opens `zorg_index.db` and holds its write lock until `COMMIT`.
