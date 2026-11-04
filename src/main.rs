@@ -1163,34 +1163,6 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
         println!("No transactions yet.\n");
         return terminal::wait_for("Esc back");
     }
-    let now = unix_now();
-    let items: Vec<String> = txs
-        .iter()
-        .map(|tx| {
-            let (arrow, sign, kind) = match tx.tx_kind.as_str() {
-                "received" | "receiving" => {
-                    (console::style("↓").green().to_string(), "+", "Received")
-                }
-                "sent" => ("↑".to_string(), "−", "Sent"),
-                "shielded" => ("↔".to_string(), " ", "Shielding"),
-                "migration" => ("↔".to_string(), " ", "Migration"),
-                _ => ("↔".to_string(), " ", "Unknown"),
-            };
-            let amount = if hide {
-                "••••".to_string()
-            } else {
-                terminal::zec(tx.display_amount, 2)
-            };
-            let amount = format!("{sign}{amount} {}", net.unit());
-            let when = match tx.mined_height {
-                0 if tx.expired_unmined => "expired".to_string(),
-                0 => "pending".to_string(),
-                height if tx.block_time == 0 => format!("block {height}"),
-                _ => ago(now.saturating_sub(tx.block_time)),
-            };
-            format!("{arrow} {kind:<10} {amount:>18}   {when}")
-        })
-        .collect();
     let mut current = 0;
     loop {
         terminal::clear()?;
@@ -1198,28 +1170,52 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
             .saturating_sub(6)
             .clamp(1, 10);
         let start = current / page_size * page_size;
-        let end = (start + page_size).min(items.len());
+        let end = (start + page_size).min(txs.len());
+        let now = unix_now();
+        let items: Vec<String> = txs[start..end]
+            .iter()
+            .map(|tx| {
+                let (arrow, sign, kind) = match tx.tx_kind.as_str() {
+                    "received" | "receiving" => {
+                        (console::style("↓").green().to_string(), "+", "Received")
+                    }
+                    "sent" => ("↑".to_string(), "−", "Sent"),
+                    "shielded" => ("↔".to_string(), " ", "Shielding"),
+                    "migration" => ("↔".to_string(), " ", "Migration"),
+                    _ => ("↔".to_string(), " ", "Unknown"),
+                };
+                let amount = if hide {
+                    "••••".to_string()
+                } else {
+                    terminal::zec(tx.display_amount, 2)
+                };
+                let amount = format!("{sign}{amount} {}", net.unit());
+                let when = match tx.mined_height {
+                    0 if tx.expired_unmined => "expired".to_string(),
+                    0 => "pending".to_string(),
+                    height if tx.block_time == 0 => format!("block {height}"),
+                    _ => ago(now.saturating_sub(tx.block_time)),
+                };
+                format!("{arrow} {kind:<10} {amount:>18}   {when}")
+            })
+            .collect();
+
         println!("{}", console::style("Transactions").bold());
-        println!("{}–{} of {}\n", start + 1, end, items.len());
+        println!("{}–{} of {}\n", start + 1, end, txs.len());
         let mut keys = Vec::new();
-        if end < items.len() {
+        if end < txs.len() {
             keys.push(('n', "Older"));
         }
         if start > 0 {
             keys.push(('p', "Newer"));
         }
-        let Some(choice) = terminal::menu_with_keys(
-            "Esc back",
-            &items[start..end],
-            current - start,
-            &keys,
-            &mut || {},
-        )?
+        let Some(choice) =
+            terminal::menu_with_keys("Esc back", &items, current - start, &keys, &mut || {})?
         else {
             return Ok(());
         };
-        if choice >= end - start {
-            current = match keys[choice - (end - start)].0 {
+        if choice >= items.len() {
+            current = match keys[choice - items.len()].0 {
                 'n' => end,
                 _ => start.saturating_sub(page_size),
             };
