@@ -431,7 +431,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 if args.options.contains_key("--new") {
                     return Err("--new and --transparent cannot be used together".into());
                 }
-                sync::get_transparent_address(db, uuid)?
+                zorg::account::transparent_address(selected)?
             } else if args.options.contains_key("--new") {
                 sync::get_next_available_address(db, net, uuid, sync::AddressRequestKind::Shielded)?
             } else {
@@ -923,7 +923,7 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
             Some(i) if i == actions.len() => {
                 transparent = match transparent {
                     Some(_) => None,
-                    None => match sync::get_transparent_address(&account.db_path, &account.uuid) {
+                    None => match zorg::account::transparent_address(account) {
                         Ok(t) => Some(t),
                         Err(e) => {
                             status = Err(e);

@@ -228,33 +228,6 @@ pub fn get_next_available_address(
     Ok(ua.encode(&network))
 }
 
-/// Returns the account's first external transparent address that has not
-/// received funds, without marking it exposed.
-pub fn get_transparent_address(db_path: &str, account_uuid: &str) -> Result<String, String> {
-    let uuid = uuid::Uuid::parse_str(account_uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
-    let conn = open_readonly_conn(db_path)?;
-    conn.query_row(
-        "SELECT a.cached_transparent_receiver_address
-         FROM addresses a
-         JOIN accounts ON accounts.id = a.account_id
-         WHERE accounts.uuid = ?1
-           AND a.key_scope = 0
-           AND a.transparent_child_index IS NOT NULL
-           AND a.cached_transparent_receiver_address IS NOT NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM transparent_received_outputs tro
-             WHERE tro.address_id = a.id
-           )
-         ORDER BY a.transparent_child_index
-         LIMIT 1",
-        [uuid.as_bytes().as_slice()],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(|e| format!("SQL error: {e}"))?
-    .ok_or_else(|| "No transparent address available; sync this account first".to_string())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddressRequestKind {
     Shielded,
