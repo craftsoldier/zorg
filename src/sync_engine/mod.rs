@@ -47,10 +47,7 @@ use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
 use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
-pub(crate) use lwd::{
-    get_latest_block, next_stream_message, open_isolated_lwd_channel, open_lwd_channel,
-    send_transaction,
-};
+pub(crate) use lwd::{get_latest_block, next_stream_message, open_lwd_channel, send_transaction};
 
 /// Progress event sent to caller.
 #[derive(Clone, Debug)]
