@@ -20,6 +20,30 @@ const TYPE_AHEAD_WINDOW: Duration = Duration::from_millis(250);
 /// Addresses longer than this are shortened on a card.
 const SHORT_ADDRESS_LEN: usize = 43;
 
+/// Restores the terminal settings when hidden phrase entry ends.
+pub struct SecretInput(rustix::termios::Termios);
+
+impl Drop for SecretInput {
+    fn drop(&mut self) {
+        let _ = rustix::termios::tcsetattr(
+            std::io::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &self.0,
+        );
+    }
+}
+
+/// Keeps input raw and echo disabled until the returned guard is dropped.
+pub fn secret_input() -> Result<SecretInput, String> {
+    use rustix::termios::{tcgetattr, tcsetattr, OptionalActions};
+    let original = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
+    let mut hidden = original.clone();
+    hidden.make_raw();
+    hidden.output_modes = original.output_modes;
+    tcsetattr(std::io::stdin(), OptionalActions::Now, &hidden).map_err(|e| e.to_string())?;
+    Ok(SecretInput(original))
+}
+
 /// True when a person is at a terminal: both stdin and stdout are terminals.
 pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && Term::stdout().is_term()
