@@ -195,3 +195,18 @@ pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<f64
         .fold((0, 0), |(n, d), r| (n + r.numerator(), d + r.denominator()));
     Ok((total > 0).then(|| scanned as f64 / total as f64))
 }
+
+/// Blocking sync entrypoint.
+pub fn run_full_sync_blocking(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    progress: impl Fn(crate::sync_engine::SyncProgressEvent) + Send + Sync,
+) -> Result<(), String> {
+    crate::account::ensure_db_migrated_once(db_path, network)?;
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        crate::sync_engine::run_sync_inner(db_path, lightwalletd_url, network, progress).await
+    })
+}

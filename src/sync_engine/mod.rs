@@ -8,7 +8,7 @@ use zcash_client_backend::data_api::{
     chain::{self, error::Error as ChainError, scan_cached_blocks},
     scanning::{ScanPriority, ScanRange},
     wallet::ConfirmationsPolicy,
-    WalletCommitmentTrees, WalletRead, WalletWrite,
+    AccountBirthday, WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_primitives::block::BlockHash;
@@ -42,14 +42,12 @@ mod enhance;
 mod error;
 pub use error::is_endpoint_failover_candidate_message;
 mod lwd;
-mod session;
-pub use session::{connect_permitted, LwdSession};
 
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
 use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
-pub(crate) use lwd::{get_latest_block, next_stream_message, send_transaction};
+pub(crate) use lwd::{get_latest_block, next_stream_message, open_lwd_channel, send_transaction};
 
 /// Progress event sent to caller.
 #[derive(Clone, Debug)]
@@ -894,9 +892,9 @@ async fn refresh_utxos(
 
 /// Run the full sync loop with automatic retry on failure.
 /// Retries up to 3 times with exponential backoff (2s, 4s, 8s).
-pub(crate) async fn run_sync_inner(
+pub async fn run_sync_inner(
     db_data_path: &str,
-    client: &mut CompactTxStreamerClient<Channel>,
+    lightwalletd_url: &str,
     network: WalletNetwork,
     progress_fn: impl Fn(SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
@@ -918,7 +916,7 @@ pub(crate) async fn run_sync_inner(
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         }
 
-        match run_sync_impl(db_data_path, client, network, &progress_fn).await {
+        match run_sync_impl(db_data_path, lightwalletd_url, network, &progress_fn).await {
             Ok(()) => return Ok(()),
             Err(sync_err) => {
                 // Inspect the typed error's recovery strategy before
@@ -966,7 +964,7 @@ pub(crate) async fn run_sync_inner(
 /// Inner sync implementation. Called by run_sync_inner (with retry wrapper).
 async fn run_sync_impl(
     db_data_path: &str,
-    client: &mut CompactTxStreamerClient<Channel>,
+    lightwalletd_url: &str,
     network: WalletNetwork,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
@@ -986,6 +984,9 @@ async fn run_sync_impl(
     })
     .map_err(SyncError::db)?;
 
+    // 1. Connect gRPC (plain TLS via tonic + webpki roots).
+    let mut client = open_lwd_channel(lightwalletd_url).await?;
+
     // Open DB once — reused for the entire sync
     let mut db =
         with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
@@ -996,7 +997,7 @@ async fn run_sync_impl(
     // start. The initial `tip` response is also kept around for its
     // other fields but `current_tip_height` is the authoritative
     // value for emitted events.
-    let tip = get_latest_block(client).await?;
+    let tip = get_latest_block(&mut client).await?;
     let mut current_tip_height: u64 = tip.height;
     let tip_height = BlockHeight::from_u32(tip.height as u32);
     log::info!("[{}] sync: chain tip = {}", elapsed(), tip.height);
@@ -1016,7 +1017,7 @@ async fn run_sync_impl(
     // Retained send-lock expiry requires a usable target height.
     crate::sync::recover_previous_process(db_data_path, network).map_err(SyncError::db)?;
 
-    refresh_utxos(client, &mut db, network).await?;
+    refresh_utxos(&mut client, &mut db, network).await?;
 
     // 2.5. Resubmit eligible unmined wallet txs now that we know the
     // current tip. Matches the first of the three
@@ -1031,14 +1032,14 @@ async fn run_sync_impl(
     let startup_resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
     let _ = crate::sync::resubmit_pending_transactions(
         db_data_path,
-        client,
+        &mut client,
         tip.height as u32,
         &startup_resubmit_exclusions,
     )
     .await;
 
     // 3. Download subtree roots (incremental)
-    download_subtree_roots(client, &mut db, db_data_path, network).await?;
+    download_subtree_roots(&mut client, &mut db, db_data_path, network).await?;
 
     // 4. Calculate initial scan target (before any scanning)
     let initial_ranges = db
@@ -1125,7 +1126,7 @@ async fn run_sync_impl(
                 )?
                 .is_some()
                     || repair_anchor_root_mismatch_if_needed(
-                        client,
+                        &mut client,
                         &mut db,
                         current_tip_height,
                         &mut anchor_root_repair_passes_this_run,
@@ -1231,17 +1232,17 @@ async fn run_sync_impl(
                     _ => {
                         // Prefetch failed — download synchronously.
                         log::warn!("[{}] sync: prefetch failed, downloading fresh", elapsed(),);
-                        (download_blocks(client, start, end - 1).await?, None)
+                        (download_blocks(&mut client, start, end - 1).await?, None)
                     }
                 }
             } else {
                 // Range changed (reorg, priority switch, etc.) —
                 // Drop the Prefetch, which aborts the background task.
                 drop(pf);
-                (download_blocks(client, start, end - 1).await?, None)
+                (download_blocks(&mut client, start, end - 1).await?, None)
             }
         } else {
-            (download_blocks(client, start, end - 1).await?, None)
+            (download_blocks(&mut client, start, end - 1).await?, None)
         };
 
         if !block_source.contains_exact_range(u32::from(start), u32::from(end)) {
@@ -1300,7 +1301,7 @@ async fn run_sync_impl(
         } else if should_use_empty_chain_state(&network, start)? {
             chain::ChainState::empty(start - 1, BlockHash([0u8; 32]))
         } else {
-            let ts = get_tree_state(client, u32::from(start - 1) as u64).await?;
+            let ts = get_tree_state(&mut client, u32::from(start - 1) as u64).await?;
             ts.to_chain_state()
                 .map_err(|e| SyncError::parse(format!("parse tree state: {e}")))?
         };
@@ -1556,7 +1557,7 @@ async fn run_sync_impl(
         let resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &post_scan_ranges)?;
 
         // Enhancement
-        run_enhancement(client, &mut db, db_data_path, network).await?;
+        run_enhancement(&mut client, &mut db, db_data_path, network).await?;
 
         // Post-batch auto-resubmit. Matches zcash-android-wallet-sdk's
         // lines 593/701 call sites (end of verify batch / end of
@@ -1623,7 +1624,7 @@ async fn run_sync_impl(
                 }
                 let _ = crate::sync::resubmit_pending_transactions(
                     db_data_path,
-                    client,
+                    &mut client,
                     fresh_tip_height,
                     &resubmit_exclusions,
                 )
@@ -1776,6 +1777,94 @@ fn should_use_empty_chain_state(
         .activation_height(NetworkUpgrade::Sapling)
         .ok_or_else(|| SyncError::parse("Sapling activation height is unavailable"))?;
     Ok(start <= sapling_activation_height)
+}
+
+// ======================== Public Lightwalletd Helpers ========================
+
+/// Get the latest block height from a lightwalletd endpoint.
+pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let tip = crate::sync_engine::lwd::get_latest_block(&mut client)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(tip.height)
+    })
+}
+
+/// Get the chain tip from a lightwalletd endpoint, bounded by a timeout so
+/// a dead endpoint cannot hang a one-shot command. Used by `status`.
+pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::sync_engine::lwd::get_latest_block(&mut client),
+        )
+        .await
+        .map_err(|_| "get_latest_block: timed out".to_string())?
+        .map(|tip| tip.height)
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// The birthday of an account whose first block is `height`: empty note
+/// commitment trees at or below Sapling activation, otherwise the tree state
+/// a lightwalletd endpoint reports for block `height - 1`.
+pub fn fetch_birthday(
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    height: u64,
+) -> Result<AccountBirthday, String> {
+    let start = BlockHeight::try_from(height)
+        .map_err(|_| format!("Birthday {height} is not a valid block height"))?;
+    if should_use_empty_chain_state(&network, start).map_err(|e| e.to_string())? {
+        let prior = chain::ChainState::empty(start - 1, BlockHash([0u8; 32]));
+        return Ok(AccountBirthday::from_parts(prior, None));
+    }
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    let tree_state = rt.block_on(async {
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        get_tree_state(&mut client, height - 1)
+            .await
+            .map_err(|e| e.to_string())
+    })?;
+    if tree_state.height != height - 1 {
+        return Err(format!(
+            "lightwalletd returned the tree state for height {}, not {}",
+            tree_state.height,
+            height - 1
+        ));
+    }
+    AccountBirthday::from_treestate(tree_state, None)
+        .map_err(|e| format!("Could not read the tree state before birthday {height}: {e}"))
+}
+
+/// The Sapling activation height a lightwalletd endpoint reports for its chain.
+pub fn get_lightwalletd_sapling_activation_height(lightwalletd_url: &str) -> Result<u64, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+    rt.block_on(async {
+        use zcash_client_backend::proto::service::Empty;
+        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let info = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get_lightd_info(Empty {}),
+        )
+        .await
+        .map_err(|_| "get_lightd_info: timed out".to_string())?
+        .map_err(|e| format!("get_lightd_info: {e}"))?;
+        Ok(info.into_inner().sapling_activation_height)
+    })
 }
 
 // ==================== Tests ====================

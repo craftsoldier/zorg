@@ -145,24 +145,9 @@ pub(crate) async fn get_latest_block(
     .map_err(|e| status_to_network_error("get_latest_block", e))
 }
 
-/// The Sapling activation height the connected server reports.
-pub(crate) async fn sapling_activation_height(
-    client: &mut CompactTxStreamerClient<Channel>,
-) -> Result<u64, SyncError> {
-    use zcash_client_backend::proto::service::Empty;
-    await_tonic_response(
-        "get_lightd_info",
-        LIGHTWALLETD_CONNECT_TIMEOUT,
-        client.get_lightd_info(timed_request(Empty {}, LIGHTWALLETD_CONNECT_TIMEOUT)),
-    )
-    .await
-    .map(|info| info.sapling_activation_height)
-    .map_err(|e| status_to_network_error("get_lightd_info", e))
-}
-
 /// Return the note commitment tree state for a block with a bounded
 /// response wait.
-pub(crate) async fn get_tree_state(
+pub(super) async fn get_tree_state(
     client: &mut CompactTxStreamerClient<Channel>,
     height: u64,
 ) -> Result<TreeState, SyncError> {
