@@ -1866,19 +1866,6 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Human-readable age: "just now", "4m ago", "3h ago", "12d ago".
-fn humanize_age(seconds_ago: u64) -> String {
-    if seconds_ago < 90 {
-        "just now".into()
-    } else if seconds_ago < 3600 {
-        format!("{}m ago", seconds_ago / 60)
-    } else if seconds_ago < 86_400 {
-        format!("{}h ago", seconds_ago / 3600)
-    } else {
-        format!("{}d ago", seconds_ago / 86_400)
-    }
-}
-
 /// One honest status line: local scan position vs the live chain tip.
 /// `live_tip` is None when the network was unreachable — say so rather
 /// than let a locally-remembered tip claim completeness.
@@ -1889,7 +1876,7 @@ fn render_sync_status(
     now: u64,
 ) -> String {
     let verified = verified_at
-        .map(|t| humanize_age(now.saturating_sub(t)))
+        .map(|t| ago(now.saturating_sub(t)))
         .unwrap_or_else(|| "never".into());
     match live_tip {
         // Verified live right now; the timestamp only matters when behind.
@@ -2256,7 +2243,7 @@ mod tests {
         let s = render_sync_status(4_339_008, Some(4_462_634), Some(1_000), 2_000);
         assert!(s.starts_with("behind 123626 blocks"), "{s}");
         assert!(s.contains("scanned 4339008 / chain 4462634"), "{s}");
-        assert!(s.contains("last verified 16m ago"), "{s}");
+        assert!(s.contains("last verified 16 min ago"), "{s}");
         assert!(s.contains("run: zorg sync"), "{s}");
     }
 
@@ -2266,7 +2253,7 @@ mod tests {
         assert!(s.starts_with("offline"), "{s}");
         assert!(s.contains("last known height 4339008"), "{s}");
         assert!(s.contains("not verified against the chain"), "{s}");
-        assert!(s.contains("3h ago"), "{s}");
+        assert!(s.contains("3 h ago"), "{s}");
     }
 
     #[test]
