@@ -169,8 +169,7 @@ pub fn validate_address(address: &str) -> Result<String, String> {
 
 // ======================== Helpers ========================
 
-// Re-export aliases for API layer
-pub(crate) use proposal_locks::recover_previous_process as recover_orphaned_send_locks;
+pub(crate) use proposal_locks::recover_previous_process;
 
 // ======================== Re-exports from send.rs ========================
 pub(crate) use send::resubmit_pending_transactions;
