@@ -105,10 +105,12 @@ pub(super) fn read(
     key: &str,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let dir = directory(root, service, key);
-    match fs::symlink_metadata(&dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("Could not read secret store: {e}")),
-        Ok(_) => {}
+    for file in ["identity.txt", "mnemonic.age"] {
+        match fs::symlink_metadata(dir.join(file)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("Could not read secret store: {e}")),
+            Ok(_) => {}
+        }
     }
     capture(
         Command::new("age")

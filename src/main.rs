@@ -891,7 +891,7 @@ fn cmd_create(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created =
         zorg::account::init_db_and_create_account(db, net, &seed, Some(account_birthday), name)?;
-    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic, &seed)?;
+    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -901,23 +901,20 @@ fn cmd_create(
     })
 }
 
-/// Stores the mnemonic, then authenticates a read-back and checks it yields
-/// `seed`. On a failed read-back the stored entry is removed.
+/// Stores the mnemonic and checks an authenticated read-back against the input.
+/// On a failed read-back the stored entry is removed.
 fn store_and_verify_mnemonic(
     db: &str,
     net: WalletNetwork,
     account_uuid: &str,
     mnemonic: &str,
-    seed: &secrecy::SecretVec<u8>,
 ) -> Result<(), String> {
-    use secrecy::ExposeSecret;
-
     zorg::secret_store::store_mnemonic(db, net, account_uuid, mnemonic)
         .map_err(|e| format!("Failed to store mnemonic: {e}"))?;
-    let verified = zorg::secret_store::seed_from_stored_mnemonic(db, net, account_uuid)
+    let verified = zorg::secret_store::mnemonic(db, net, account_uuid)
         .map_err(|e| format!("Failed to read the mnemonic back: {e}"))
         .and_then(|stored| {
-            if stored.expose_secret() == seed.expose_secret() {
+            if stored.as_str() == mnemonic {
                 Ok(())
             } else {
                 Err("The store returned a different mnemonic than the one just stored".into())
@@ -977,7 +974,7 @@ fn cmd_import(
     seed: secrecy::SecretVec<u8>,
 ) -> Result<NewAccount, String> {
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic, &seed)?;
+    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
     Ok(NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -1383,9 +1380,10 @@ fn cmd_delete(
         }
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
     }
-    zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?;
-    zorg::account::delete_account(root, account)?;
-    zorg::secret_store::delete_mnemonic(&account.db_path, account.network, &account.uuid)?;
+    zorg::secret_store::authenticate(&account.db_path, account.network, &account.uuid)?;
+    zorg::account::delete_account(root, account, || {
+        zorg::secret_store::delete_mnemonic(&account.db_path, account.network, &account.uuid)
+    })?;
     if interactive {
         terminal::success(&format!("Deleted account {}", account.name));
     } else {
@@ -2034,7 +2032,7 @@ mod tests {
         command(&["balance", "--account", "Travel"]).unwrap();
         command(&["history", "--account", "Daily"]).unwrap();
 
-        zorg::account::delete_account(root.path(), &accounts[0]).unwrap();
+        zorg::account::delete_account(root.path(), &accounts[0], || Ok(())).unwrap();
         assert!(!std::path::Path::new(&accounts[0].db_path).exists());
         assert_eq!(names(), ["Savings", "Travel"]);
 
@@ -2051,13 +2049,15 @@ mod tests {
 
         let mut travel = accounts[2].clone();
         travel.uuid = accounts[1].uuid.clone();
-        assert!(zorg::account::delete_account(root.path(), &travel)
-            .unwrap_err()
-            .contains("not deleting"));
+        assert!(
+            zorg::account::delete_account(root.path(), &travel, || Ok(()))
+                .unwrap_err()
+                .contains("not deleting")
+        );
         assert!(std::path::Path::new(&accounts[2].db_path).exists());
 
         std::fs::rename(&accounts[2].db_path, &offline).unwrap();
-        zorg::account::delete_account(root.path(), &accounts[2]).unwrap();
+        zorg::account::delete_account(root.path(), &accounts[2], || Ok(())).unwrap();
         assert!(offline.exists());
         assert_eq!(names(), ["Savings"]);
     }
