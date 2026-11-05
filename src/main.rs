@@ -336,15 +336,21 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             let result = match choice {
                 0 => zorg::account::birthday_height(account).and_then(|birthday| {
                     let missing = missing_phrase_error(account, birthday);
-                    endpoint(server(account.network).as_deref(), &account.network)
-                        .and_then(|url| cmd_send(account, &url, &[], None, &missing))
+                    let session = zorg::sync_engine::connect_permitted(
+                        account.network,
+                        server(account.network).as_deref(),
+                    )?;
+                    cmd_send(account, &session, &[], None, &missing)
                 }),
                 1 => receive(account),
                 2 => history(account, hidden),
                 4 => zorg::account::birthday_height(account).and_then(|birthday| {
                     let missing = missing_phrase_error(account, birthday);
-                    endpoint(server(account.network).as_deref(), &account.network)
-                        .and_then(|url| cmd_shield(account, &url, &missing))
+                    let session = zorg::sync_engine::connect_permitted(
+                        account.network,
+                        server(account.network).as_deref(),
+                    )?;
+                    cmd_shield(account, &session, &missing)
                 }),
                 _ => settings(&root, account, &accounts, &saved, &args.options, hidden),
             };
@@ -415,15 +421,16 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let mut failed = 0;
         for account in &targets {
             println!("{}:", account.name);
-            let result = zorg::account::ensure_database_exists(account)
-                .and_then(|()| endpoint(server(account.network).as_deref(), &account.network))
-                .and_then(|url| {
-                    if cmd == "sync" {
-                        sync_database(&account.db_path, account.network, &url)
-                    } else {
-                        print_database_status(&account.db_path, account.network, &url)
-                    }
-                });
+            let result = zorg::account::ensure_database_exists(account).and_then(|()| {
+                let explicit = server(account.network);
+                if cmd == "sync" {
+                    let session =
+                        zorg::sync_engine::connect_permitted(account.network, explicit.as_deref())?;
+                    sync_database(&account.db_path, account.network, &session)
+                } else {
+                    print_database_status(&account.db_path, account.network, explicit.as_deref())
+                }
+            });
             if let Err(e) = result {
                 eprintln!("Error: {e}");
                 failed += 1;
@@ -461,16 +468,21 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             }
             let birthday = zorg::account::birthday_height(selected)?;
             let missing = missing_phrase_error(selected, birthday);
-            endpoint(server(net).as_deref(), &net)
-                .and_then(|url| cmd_shield(selected, &url, &missing))
+            let session = zorg::sync_engine::connect_permitted(net, server(net).as_deref())?;
+            cmd_shield(selected, &session, &missing)
         }
         "send" => {
             let memo = option("--memo");
             let birthday = zorg::account::birthday_height(selected)?;
             let missing = missing_phrase_error(selected, birthday);
-            endpoint(server(net).as_deref(), &net).and_then(|url| {
-                cmd_send(selected, &url, &args.positional, memo.as_deref(), &missing)
-            })
+            let session = zorg::sync_engine::connect_permitted(net, server(net).as_deref())?;
+            cmd_send(
+                selected,
+                &session,
+                &args.positional,
+                memo.as_deref(),
+                &missing,
+            )
         }
         "history" => {
             let limit = option("--limit")
@@ -531,35 +543,24 @@ fn sync_text(account: &zorg::account::Account) -> String {
 }
 
 /// Keeps `account` synced while the app is open: checks the chain tip every
-/// 10 seconds and syncs when the wallet is behind. A chosen server `lwd` is
-/// checked once; the built-in list is resolved each time, for failover. It
-/// never draws: after each step it sends `Ok`, or `Err` with the sync row's
+/// 10 seconds and syncs when the wallet is behind. `explicit` is one chosen
+/// server; otherwise each attempt uses the network's built-in list. A
+/// connection failure drops the session so the next attempt connects again.
+/// It never draws: after each step it sends `Ok`, or `Err` with the sync row's
 /// text when a sync fails. Runs until the process exits.
 fn auto_sync(
     account: zorg::account::Account,
-    lwd: Option<String>,
+    explicit: Option<String>,
     updates: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
-    let mut checked: Option<String> = None;
+    let mut session = None;
     loop {
-        let url = match &checked {
-            Some(url) => Ok(url.clone()),
-            None => endpoint(lwd.as_deref(), &account.network),
-        };
-        let result = url.and_then(|url| {
-            if lwd.is_some() {
-                checked = Some(url.clone());
+        let result = sync_if_behind(&account, explicit.as_deref(), &mut session, &updates);
+        if let Err(ref error) = result {
+            if zorg::sync_engine::is_endpoint_failover_candidate_message(error) {
+                session = None;
             }
-            let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
-            let progress = sync::get_sync_progress(&account.db_path, account.network)?;
-            if progress.is_complete && tip <= progress.chain_tip_height {
-                return Ok(());
-            }
-            let _ = updates.send(Ok(()));
-            sync::run_full_sync_blocking(&account.db_path, &url, account.network, |_| {
-                let _ = updates.send(Ok(()));
-            })
-        });
+        }
         let _ = updates.send(result.map_err(|e| {
             if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) {
                 "server unreachable · retrying".to_string()
@@ -571,8 +572,36 @@ fn auto_sync(
     }
 }
 
+fn sync_if_behind(
+    account: &zorg::account::Account,
+    explicit: Option<&str>,
+    session: &mut Option<zorg::sync_engine::LwdSession>,
+    updates: &std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    if session.is_none() {
+        *session = Some(zorg::sync_engine::connect_permitted(
+            account.network,
+            explicit,
+        )?);
+    }
+    let session = session.as_ref().unwrap();
+    let tip = session.tip()?;
+    let progress = sync::get_sync_progress(&account.db_path, account.network)?;
+    if progress.is_complete && tip <= progress.chain_tip_height {
+        return Ok(());
+    }
+    let _ = updates.send(Ok(()));
+    session.sync(&account.db_path, account.network, |_| {
+        let _ = updates.send(Ok(()));
+    })
+}
+
 /// Syncs one wallet database with the chain.
-fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
+fn sync_database(
+    db_path: &str,
+    net: WalletNetwork,
+    session: &zorg::sync_engine::LwdSession,
+) -> Result<(), String> {
     let progress = terminal::Progress::hidden_bar();
     let (stop, stopped) = std::sync::mpsc::channel::<()>();
     let result = std::thread::scope(|scope| {
@@ -591,7 +620,7 @@ fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(),
                 }
             });
         }
-        let result = sync::run_full_sync_blocking(db_path, lwd_url, net, |event| {
+        let result = session.sync(db_path, net, |event| {
             if terminal::interactive() && event.chain_tip_height > 0 {
                 progress.show(&format!(
                     "block {} of {}",
@@ -610,9 +639,13 @@ fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(),
 }
 
 /// Prints one wallet database's sync progress against the chain tip.
-fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
+fn print_database_status(
+    db_path: &str,
+    net: WalletNetwork,
+    explicit: Option<&str>,
+) -> Result<(), String> {
     let p = sync::get_sync_progress(db_path, net)?;
-    let tip = zorg::sync_engine::fetch_chain_tip(lwd_url).ok();
+    let tip = status_tip(net, explicit)?;
     let verified = zorg::sync_engine::last_completed_sync_at(db_path)?;
     println!(
         "{}",
@@ -621,24 +654,19 @@ fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Re
     Ok(())
 }
 
-/// The lightwalletd endpoint for `net`: the explicit one, which must not serve
-/// a different network, or a default one.
-fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, String> {
-    let Some(url) = explicit else {
-        return Ok(resolve_default_lwd_url(net));
-    };
-    let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
-    let served = WalletNetwork::from_sapling_activation_height(height);
-    if served != Some(*net) {
-        let served = served.map_or("an unknown network".into(), |n| {
-            format!("the {} network", n.as_str())
-        });
-        return Err(format!(
-            "{url} serves {served}, but this database is on {}",
-            net.as_str()
-        ));
+/// The chain tip for `status`. An explicit server that cannot be checked is an
+/// error. When no server was chosen, an unreachable built-in list leaves the
+/// tip unknown so status can still report the wallet's last local height.
+fn status_tip(net: WalletNetwork, explicit: Option<&str>) -> Result<Option<u64>, String> {
+    match explicit {
+        Some(url) => {
+            let session = zorg::sync_engine::LwdSession::connect(net, url)?;
+            Ok(session.tip().ok())
+        }
+        None => Ok(zorg::sync_engine::connect_permitted(net, None)
+            .ok()
+            .and_then(|session| session.tip().ok())),
     }
-    Ok(url.to_string())
 }
 
 /// The first-run screen: what zorg is.
@@ -710,8 +738,9 @@ fn create_account(
         None
     };
     let tip = if import && interactive {
-        let url = endpoint(server(net.get()).as_deref(), &net.get())?;
-        Some(zorg::sync_engine::fetch_chain_tip(&url)?)
+        let session =
+            zorg::sync_engine::connect_permitted(net.get(), server(net.get()).as_deref())?;
+        Some(session.tip()?)
     } else {
         None
     };
@@ -809,10 +838,10 @@ fn create_account(
     let net = net.get();
     let mut account_birthday = None;
     if let Some(birthday) = birthday {
-        let url = endpoint(server(net).as_deref(), &net)?;
+        let session = zorg::sync_engine::connect_permitted(net, server(net).as_deref())?;
         let tip = match tip {
             Some(tip) => tip,
-            None => zorg::sync_engine::fetch_chain_tip(&url)?,
+            None => session.tip()?,
         };
         if birthday > tip {
             return Err(format!(
@@ -820,7 +849,7 @@ fn create_account(
                 net.display_name()
             ));
         }
-        account_birthday = Some(zorg::sync_engine::fetch_birthday(&url, net, birthday)?);
+        account_birthday = Some(session.birthday(net, birthday)?);
     }
     zorg::account::ensure_private_wallet_dir(root)?;
     let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
@@ -829,7 +858,7 @@ fn create_account(
     let result = if let Some((mnemonic, seed)) = imported {
         cmd_import(db, net, account_birthday, &name, mnemonic, seed)
     } else {
-        endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
+        cmd_create(db, net, server(net).as_deref(), &name)
     };
     let created = match result {
         Ok(created) => created,
@@ -882,11 +911,12 @@ struct NewAccount {
 fn cmd_create(
     db: &str,
     net: WalletNetwork,
-    lwd_url: &str,
+    explicit: Option<&str>,
     name: &str,
 ) -> Result<NewAccount, String> {
-    let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
-    let account_birthday = zorg::sync_engine::fetch_birthday(lwd_url, net, birthday)?;
+    let session = zorg::sync_engine::connect_permitted(net, explicit)?;
+    let birthday = resolve_create_birthday(|| session.tip())?;
+    let account_birthday = session.birthday(net, birthday)?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created =
@@ -1189,7 +1219,7 @@ fn choose_server(root: &std::path::Path, network: WalletNetwork) -> Result<bool,
         return Ok(true);
     }
     let url = terminal::ask("Server URL", false, |_| Ok(()))?;
-    endpoint(Some(&url), &network)?;
+    zorg::sync_engine::LwdSession::connect(network, &url)?;
     zorg::account::set_server(root, network, Some(&url))?;
     Ok(true)
 }
@@ -1460,7 +1490,7 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
 
 fn cmd_send(
     account: &zorg::account::Account,
-    lwd_url: &str,
+    session: &zorg::sync_engine::LwdSession,
     positional: &[String],
     memo: Option<&str>,
     missing_phrase: &str,
@@ -1552,9 +1582,9 @@ fn cmd_send(
     let result = confirmed.and_then(|()| {
         let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
         let proposed_fee = proposal.fee_zatoshi;
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(sync::execute_proposal_with_seed_loader(
-            lwd_url,
+        let mut client = session.client();
+        session.block_on(sync::execute_proposal_with_seed_loader(
+            &mut client,
             proposal,
             |network, account| {
                 // A failed seed load releases the proposal's inputs, so failing here does too.
@@ -1631,7 +1661,7 @@ fn cmd_send(
 /// same authorization as a send.
 fn cmd_shield(
     account: &zorg::account::Account,
-    lwd_url: &str,
+    session: &zorg::sync_engine::LwdSession,
     missing_phrase: &str,
 ) -> Result<(), String> {
     let db = &account.db_path;
@@ -1655,9 +1685,9 @@ fn cmd_shield(
     let progress = terminal::Progress::hidden();
     let broadcasting = std::cell::Cell::new(false);
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(sync::execute_proposal_with_seed_loader(
-        lwd_url,
+    let mut client = session.client();
+    let result = session.block_on(sync::execute_proposal_with_seed_loader(
+        &mut client,
         proposal,
         |network, account| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
@@ -1936,28 +1966,6 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
         return Err("Amount exceeds the maximum supply of 21,000,000 ZEC".into());
     }
     Ok(zatoshis)
-}
-
-/// Pick a lightwalletd endpoint when the user did not specify one.
-fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
-    let candidates = net.default_lightwalletd_urls();
-    let Some((first_alive, attempts)) = candidates.iter().enumerate().find_map(|(i, url)| {
-        match zorg::sync_engine::get_latest_block_height(url) {
-            Ok(_) => Some((url, i + 1)),
-            Err(e) => {
-                log::warn!("{url} unreachable ({e}); trying next endpoint");
-                None
-            }
-        }
-    }) else {
-        // Every candidate refused the connection: the primary default is
-        // returned and the command itself reports failure.
-        return candidates[0].to_string();
-    };
-    if attempts > 1 {
-        log::warn!("failing over to {first_alive}");
-    }
-    first_alive.to_string()
 }
 
 /// The account's stored seed; fails with `missing_phrase` when no phrase exists.
