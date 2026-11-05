@@ -4,11 +4,14 @@ use std::ops::RangeInclusive;
 mod terminal;
 
 use zcash_client_backend::data_api::AccountBirthday;
+use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
 
 const BANNER: &str = include_str!("../.github/assets/zorg.txt");
+
+const ESTIMATED_SYNC_BLOCKS_PER_SECOND: u64 = 200;
 
 const USAGE: &str = "\
 zorg — a modern Zcash CLI wallet
@@ -680,12 +683,63 @@ fn create_account(
         }
         _ => return Err("Choose --new for a new recovery phrase or --import to import one".into()),
     };
-    let mut birthday: Option<u64> = options
+    let mut birthday = options
         .get("--birthday")
-        .map(|h| h.parse().map_err(|_| "--birthday must be a block height"))
+        .map(|h| {
+            h.parse::<u32>()
+                .map(u64::from)
+                .map_err(|_| "--birthday must be a block height from 0 to 4294967295")
+        })
         .transpose()?;
     if birthday.is_some() && !import {
         return Err("--birthday only applies with --import".into());
+    }
+    let network = options
+        .get("--network")
+        .map(|n| n.parse())
+        .transpose()?
+        .unwrap_or(WalletNetwork::Main);
+    let net = std::cell::Cell::new(network);
+    let imported = if import {
+        Some(terminal::read_mnemonic(&net, |mnemonic| {
+            let seed = keys::mnemonic_to_seed(mnemonic)?;
+            zorg::account::ensure_new_seed(accounts, &seed, net.get())?;
+            Ok(seed)
+        })?)
+    } else {
+        None
+    };
+    let tip = if import && interactive {
+        let url = endpoint(server(net.get()).as_deref(), &net.get())?;
+        Some(zorg::sync_engine::fetch_chain_tip(&url)?)
+    } else {
+        None
+    };
+    if import && birthday.is_none() && interactive {
+        terminal::note("Wallet birthday is the block height when this wallet was created.");
+        let height = terminal::ask(
+            "Birthday height (Enter to scan from the start)",
+            true,
+            |h| {
+                let height = h
+                    .parse::<u32>()
+                    .map(u64::from)
+                    .map_err(|_| "Enter a block height from 0 to 4294967295".to_string())?;
+                if let Some(tip) = tip.filter(|tip| height > *tip) {
+                    return Err(format!("Birthday is above the current height {tip}"));
+                }
+                Ok(())
+            },
+        )?;
+        birthday = height.parse::<u64>().ok();
+    }
+    if let (Some(birthday), Some(tip)) = (birthday, tip) {
+        if birthday > tip {
+            return Err(format!(
+                "Birthday {birthday} is above {}'s current height {tip}",
+                net.get().display_name()
+            ));
+        }
     }
     let name = match name {
         Some(name) => name.to_string(),
@@ -694,24 +748,19 @@ fn create_account(
         })?,
     };
     zorg::account::ensure_unique_name(accounts, &name)?;
-    if import && birthday.is_none() && interactive {
-        terminal::note("Scanning from the start takes hours on mainnet.");
-        let height = terminal::ask(
-            "Birthday height (Enter to scan from the start)",
-            true,
-            |h| match h.parse::<u32>() {
-                Ok(height) if height > 0 => Ok(()),
-                _ => Err("Enter a block height from 1 to 4294967295".to_string()),
-            },
-        )?;
-        birthday = height.parse().ok();
-    }
-    let network = options
-        .get("--network")
-        .map(|n| n.parse())
-        .transpose()?
-        .unwrap_or(WalletNetwork::Main);
-    let net = std::cell::Cell::new(network);
+    let estimate = tip.map(|tip| {
+        let start = birthday.unwrap_or_else(|| {
+            u64::from(u32::from(
+                net.get()
+                    .activation_height(NetworkUpgrade::Sapling)
+                    .expect("supported networks activate Sapling"),
+            ))
+        });
+        terminal::estimated_sync(
+            tip.saturating_sub(start)
+                .div_ceil(ESTIMATED_SYNC_BLOCKS_PER_SECOND),
+        )
+    });
     if interactive {
         let (title, action, done) = if import {
             ("Import", "import", "imported")
@@ -721,11 +770,18 @@ fn create_account(
         let card = |_full: bool| {
             let mut lines = vec![
                 format!("{title} account {}", console::style(&name).bold()),
-                terminal::row("network", 8, net.get().display_name()),
+                terminal::row(
+                    "network",
+                    if import { 14 } else { 8 },
+                    net.get().display_name(),
+                ),
             ];
             if import {
-                let from = birthday.map_or("the start".to_string(), |h| h.to_string());
-                lines.push(terminal::row("birthday", 8, from));
+                let from = birthday.map_or("scan from the start".to_string(), |h| h.to_string());
+                lines.push(terminal::row("birthday", 14, from));
+                if let Some(estimate) = &estimate {
+                    lines.push(terminal::row("estimated sync", 14, estimate));
+                }
             }
             lines
         };
@@ -736,7 +792,12 @@ fn create_account(
             net.set(networks[terminal::pick("Network", &names, current)?]);
             Ok(())
         };
-        match terminal::confirm(action, 0, Some(("switch network", &mut switch)), card) {
+        let tab: Option<terminal::TabKey<'_>> = if import {
+            None
+        } else {
+            Some(("switch network", &mut switch))
+        };
+        match terminal::confirm(action, 0, tab, card) {
             Ok(()) => {}
             Err(e) if e == terminal::CANCELLED => {
                 terminal::note(&format!("Cancelled. Nothing was {done}."));
@@ -749,7 +810,10 @@ fn create_account(
     let mut account_birthday = None;
     if let Some(birthday) = birthday {
         let url = endpoint(server(net).as_deref(), &net)?;
-        let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
+        let tip = match tip {
+            Some(tip) => tip,
+            None => zorg::sync_engine::fetch_chain_tip(&url)?,
+        };
         if birthday > tip {
             return Err(format!(
                 "Birthday {birthday} is above {}'s current height {tip}",
@@ -762,8 +826,8 @@ fn create_account(
     let db_path = root.join(format!("{}.db", uuid::Uuid::new_v4()));
     let db = db_path.to_str().ok_or("Database path must be UTF-8")?;
     reserve_wallet_file(&db_path)?;
-    let result = if import {
-        cmd_import(db, net, account_birthday, &name, accounts)
+    let result = if let Some((mnemonic, seed)) = imported {
+        cmd_import(db, net, account_birthday, &name, mnemonic, seed)
     } else {
         endpoint(server(net).as_deref(), &net).and_then(|url| cmd_create(db, net, &url, &name))
     };
@@ -909,11 +973,9 @@ fn cmd_import(
     net: WalletNetwork,
     birthday: Option<AccountBirthday>,
     name: &str,
-    accounts: &[zorg::account::Account],
+    mnemonic: zeroize::Zeroizing<String>,
+    seed: secrecy::SecretVec<u8>,
 ) -> Result<NewAccount, String> {
-    let mnemonic = read_mnemonic()?;
-    let seed = keys::mnemonic_to_seed(&mnemonic)?;
-    zorg::account::ensure_new_seed(accounts, &seed, net)?;
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
     store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic, &seed)?;
     Ok(NewAccount {
@@ -1923,13 +1985,6 @@ fn load_seed(
     let mnemonic = zorg::secret_store::mnemonic_if_present(db, net, account_uuid)?
         .ok_or_else(|| missing_phrase.to_string())?;
     keys::mnemonic_to_seed(&mnemonic)
-}
-
-/// Read a 12- or 24-word mnemonic from the terminal without echoing it.
-fn read_mnemonic() -> Result<zeroize::Zeroizing<String>, String> {
-    rpassword::prompt_password("Enter your 12- or 24-word recovery phrase: ")
-        .map(zeroize::Zeroizing::new)
-        .map_err(|e| format!("Failed to read mnemonic: {e}"))
 }
 
 #[cfg(test)]

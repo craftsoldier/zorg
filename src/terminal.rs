@@ -20,6 +20,30 @@ const TYPE_AHEAD_WINDOW: Duration = Duration::from_millis(250);
 /// Addresses longer than this are shortened on a card.
 const SHORT_ADDRESS_LEN: usize = 43;
 
+/// Restores the terminal settings when hidden phrase entry ends.
+struct SecretInput(rustix::termios::Termios);
+
+impl Drop for SecretInput {
+    fn drop(&mut self) {
+        let _ = rustix::termios::tcsetattr(
+            std::io::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &self.0,
+        );
+    }
+}
+
+/// Keeps input raw and echo disabled until the returned guard is dropped.
+fn secret_input() -> Result<SecretInput, String> {
+    use rustix::termios::{tcgetattr, tcsetattr, OptionalActions};
+    let original = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
+    let mut hidden = original.clone();
+    hidden.make_raw();
+    hidden.output_modes = original.output_modes;
+    tcsetattr(std::io::stdin(), OptionalActions::Now, &hidden).map_err(|e| e.to_string())?;
+    Ok(SecretInput(original))
+}
+
 /// True when a person is at a terminal: both stdin and stdout are terminals.
 pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && Term::stdout().is_term()
@@ -249,6 +273,75 @@ pub fn ask(
         erase(before)?;
         term.write_str(&format!("{prompt}{answer}")).map_err(io)?;
     }
+}
+
+/// Reads a hidden recovery phrase with Tab switching the network. Rejected
+/// input is retried in a terminal; returns the phrase and the check's value.
+pub fn read_mnemonic<T>(
+    net: &std::cell::Cell<zorg::network::WalletNetwork>,
+    check: impl Fn(&str) -> Result<T, String>,
+) -> Result<(zeroize::Zeroizing<String>, T), String> {
+    if !interactive() {
+        let phrase = rpassword::prompt_password("Enter your 12- or 24-word recovery phrase: ")
+            .map(zeroize::Zeroizing::new)
+            .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
+        let value = check(&phrase)?;
+        return Ok((phrase, value));
+    }
+    let _input = secret_input()?;
+    let term = Term::stdout();
+    let draw = || {
+        let prompt = format!("Recovery phrase · {} (hidden): ", net.get().display_name());
+        let width = usize::from(term.size().1).saturating_sub(1);
+        term.clear_line()
+            .and_then(|()| term.write_str(&console::truncate_str(&prompt, width, "…")))
+            .map_err(|e| e.to_string())
+    };
+    loop {
+        note("Tab network · Enter continue · Esc cancel");
+        let mut phrase = zeroize::Zeroizing::new(String::new());
+        draw()?;
+        loop {
+            match term.read_key_raw().map_err(|e| e.to_string())? {
+                Key::Char(c) if !c.is_control() => phrase.push(c),
+                Key::Backspace => {
+                    phrase.pop();
+                }
+                Key::Tab => {
+                    let networks = zorg::network::WalletNetwork::ALL;
+                    let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
+                    net.set(networks[(current + 1) % networks.len()]);
+                    draw()?;
+                }
+                Key::Enter => {
+                    term.write_line("").map_err(|e| e.to_string())?;
+                    match check(&phrase) {
+                        Ok(value) => return Ok((phrase, value)),
+                        Err(error) => {
+                            failure(&error);
+                            break;
+                        }
+                    }
+                }
+                Key::Escape => {
+                    term.write_line("").map_err(|e| e.to_string())?;
+                    return Err(CANCELLED.into());
+                }
+                Key::CtrlC => {
+                    term.write_line("").map_err(|e| e.to_string())?;
+                    return Err(INTERRUPTED.into());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The approximate initial-sync range for a baseline duration in seconds.
+pub fn estimated_sync(seconds: u64) -> String {
+    let lower = seconds.div_ceil(60).max(1);
+    let upper = seconds.saturating_mul(2).div_ceil(60).max(lower + 1);
+    format!("~{lower}–{upper} min")
 }
 
 /// Shows `items` as a list to choose from with the arrow keys, starting at

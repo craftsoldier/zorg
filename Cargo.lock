@@ -3330,6 +3330,7 @@ dependencies = [
  "rand 0.10.3",
  "rpassword",
  "rusqlite",
+ "rustix",
  "sapling-crypto",
  "secrecy",
  "security-framework",
