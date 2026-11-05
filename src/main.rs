@@ -701,23 +701,11 @@ fn create_account(
         .unwrap_or(WalletNetwork::Main);
     let net = std::cell::Cell::new(network);
     let imported = if import {
-        let _input = if interactive {
-            Some(terminal::secret_input()?)
-        } else {
-            None
-        };
-        loop {
-            let mnemonic = read_mnemonic(&net)?;
-            let result = keys::mnemonic_to_seed(&mnemonic).and_then(|seed| {
-                zorg::account::ensure_new_seed(accounts, &seed, net.get())?;
-                Ok(seed)
-            });
-            match result {
-                Ok(seed) => break Some((mnemonic, seed)),
-                Err(e) if interactive => terminal::failure(&e),
-                Err(e) => return Err(e),
-            }
-        }
+        Some(terminal::read_mnemonic(&net, |mnemonic| {
+            let seed = keys::mnemonic_to_seed(mnemonic)?;
+            zorg::account::ensure_new_seed(accounts, &seed, net.get())?;
+            Ok(seed)
+        })?)
     } else {
         None
     };
@@ -768,7 +756,10 @@ fn create_account(
                     .expect("supported networks activate Sapling"),
             ))
         });
-        estimated_sync(tip.saturating_sub(start))
+        terminal::estimated_sync(
+            tip.saturating_sub(start)
+                .div_ceil(ESTIMATED_SYNC_BLOCKS_PER_SECOND),
+        )
     });
     if interactive {
         let (title, action, done) = if import {
@@ -1994,65 +1985,6 @@ fn load_seed(
     let mnemonic = zorg::secret_store::mnemonic_if_present(db, net, account_uuid)?
         .ok_or_else(|| missing_phrase.to_string())?;
     keys::mnemonic_to_seed(&mnemonic)
-}
-
-/// Reads a recovery phrase without echo, with Tab switching the network in a terminal.
-fn read_mnemonic(
-    net: &std::cell::Cell<WalletNetwork>,
-) -> Result<zeroize::Zeroizing<String>, String> {
-    if !terminal::interactive() {
-        return rpassword::prompt_password("Enter your 12- or 24-word recovery phrase: ")
-            .map(zeroize::Zeroizing::new)
-            .map_err(|e| format!("Failed to read mnemonic: {e}"));
-    }
-    let term = console::Term::stdout();
-    terminal::note("Tab network · Enter continue · Esc cancel");
-    let draw = || {
-        let prompt = format!("Recovery phrase · {} (hidden): ", net.get().display_name());
-        let width = usize::from(term.size().1).saturating_sub(1);
-        term.clear_line()
-            .and_then(|()| term.write_str(&console::truncate_str(&prompt, width, "…")))
-            .map_err(|e| e.to_string())
-    };
-    let mut phrase = zeroize::Zeroizing::new(String::new());
-    draw()?;
-    loop {
-        match term.read_key_raw().map_err(|e| e.to_string())? {
-            console::Key::Char(c) if !c.is_control() => phrase.push(c),
-            console::Key::Backspace => {
-                phrase.pop();
-            }
-            console::Key::Tab => {
-                let networks = WalletNetwork::ALL;
-                let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
-                net.set(networks[(current + 1) % networks.len()]);
-                draw()?;
-            }
-            console::Key::Enter => {
-                term.write_line("").map_err(|e| e.to_string())?;
-                return Ok(phrase);
-            }
-            console::Key::Escape => {
-                term.write_line("").map_err(|e| e.to_string())?;
-                return Err(terminal::CANCELLED.into());
-            }
-            console::Key::CtrlC => {
-                term.write_line("").map_err(|e| e.to_string())?;
-                return Err(terminal::INTERRUPTED.into());
-            }
-            _ => {}
-        }
-    }
-}
-
-fn estimated_sync(blocks: u64) -> String {
-    let blocks_per_minute = ESTIMATED_SYNC_BLOCKS_PER_SECOND * 60;
-    let lower = blocks.div_ceil(blocks_per_minute).max(1);
-    let upper = blocks
-        .saturating_mul(2)
-        .div_ceil(blocks_per_minute)
-        .max(lower + 1);
-    format!("~{lower}–{upper} min")
 }
 
 #[cfg(test)]
