@@ -434,8 +434,13 @@ pub fn index_new_account(
 
 /// Deletes `account` from `zorg_index.db` along with its database files, if
 /// any are left. Fails without deleting anything unless the database is in
-/// `root` and, when it exists, holds exactly this account.
-pub fn delete_account(root: &Path, account: &Account) -> Result<(), String> {
+/// `root` and, when it exists, holds exactly this account. Secret cleanup runs
+/// after these checks and before database removal; a cleanup error keeps the index entry.
+pub fn delete_account(
+    root: &Path,
+    account: &Account,
+    delete_secret: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let index = open_index_for_write(root)?;
     let db_path = account.db_path.as_str();
     let in_root = Path::new(db_path)
@@ -462,7 +467,8 @@ pub fn delete_account(root: &Path, account: &Account) -> Result<(), String> {
     index
         .execute("DELETE FROM accounts WHERE uuid = ?1", [&account.uuid])
         .map_err(|e| format!("Could not update database index: {e}"))?;
-    // Dropping `index` without COMMIT keeps the row when a file can't be deleted.
+    // Dropping `index` without COMMIT keeps the row when cleanup fails.
+    delete_secret()?;
     remove_wallet_files(db_path)?;
     index
         .execute_batch("COMMIT")
@@ -662,7 +668,7 @@ mod tests {
         };
 
         chflags("uchg");
-        let error = delete_account(root.path(), &account);
+        let error = delete_account(root.path(), &account, || Ok(()));
         chflags("nouchg");
         assert!(error.unwrap_err().contains("Could not delete"));
         assert!(db.exists());
@@ -671,7 +677,7 @@ mod tests {
             std::slice::from_ref(&account)
         );
 
-        delete_account(root.path(), &account).unwrap();
+        delete_account(root.path(), &account, || Ok(())).unwrap();
         assert!(!db.exists());
         assert!(read_index(root.path()).unwrap().is_empty());
         assert_eq!(read_settings(root.path()).unwrap().default_account, None);
