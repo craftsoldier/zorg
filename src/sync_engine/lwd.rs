@@ -129,12 +129,6 @@ pub(crate) async fn open_lwd_channel(
     Ok(CompactTxStreamerClient::new(channel))
 }
 
-pub(crate) async fn open_isolated_lwd_channel(
-    lightwalletd_url: &str,
-) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
-    open_lwd_channel(lightwalletd_url).await
-}
-
 /// Return the current chain tip with a bounded response wait.
 pub(crate) async fn get_latest_block(
     client: &mut CompactTxStreamerClient<Channel>,

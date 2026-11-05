@@ -468,7 +468,7 @@ async fn execute_stored<N: std::fmt::Display>(
                 |r| r.get(0),
             )
             .map_err(|e| format!("Get raw tx: {e}"))?;
-        let mut client = crate::sync_engine::open_isolated_lwd_channel(lightwalletd_url)
+        let mut client = crate::sync_engine::open_lwd_channel(lightwalletd_url)
             .await
             .map_err(|e| format!("Connect: {e}"))?;
         let resp = crate::sync_engine::send_transaction(&mut client, &raw_tx)
