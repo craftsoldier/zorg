@@ -22,6 +22,7 @@ COMMANDS:
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
     address [--new | --transparent] [--account <name>]      Show the receive address, make a new one, or show the transparent one
+    address --validate <address>                           Validate a Zcash address
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
@@ -29,7 +30,6 @@ COMMANDS:
     history [--limit <n>] [--account <name>]                Show transaction history
     tx <txid> [--account <name>]                            Show one transaction in full
     recovery [--account <name>]                             Show the recovery phrase
-    validate <address>                                      Validate a Zcash address
     delete --account <name>                                 Delete an account
 
 OPTIONS:
@@ -72,13 +72,14 @@ fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// Options that take a value. `--lwd` applies to every command.
-const VALUE_OPTIONS: [&str; 6] = [
+const VALUE_OPTIONS: [&str; 7] = [
     "--network",
     "--lwd",
     "--account",
     "--memo",
     "--limit",
     "--birthday",
+    "--validate",
 ];
 
 /// Options that take no value.
@@ -112,8 +113,8 @@ fn command_spec(
         ),
         "balance" | "sync" | "status" | "recovery" => ("[--account <name>]", &["--account"], 0..=0),
         "address" => (
-            "[--new | --transparent] [--account <name>]",
-            &["--new", "--transparent", "--account"],
+            "[--new | --transparent] [--account <name>] | --validate <address>",
+            &["--new", "--transparent", "--account", "--validate"],
             0..=0,
         ),
         "delete" => ("--account <name>", &["--account"], 0..=0),
@@ -132,7 +133,6 @@ fn command_spec(
             0..=0,
         ),
         "tx" => ("<txid> [--account <name>]", &["--account"], 1..=1),
-        "validate" => ("<address>", &[], 0..=1),
         _ => return None,
     })
 }
@@ -208,12 +208,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
     let lwd = option("--lwd");
     let cmd = args.command.as_deref().unwrap_or("accounts");
-    if cmd == "validate" {
-        let address = match args.positional.first() {
-            Some(address) => address.clone(),
-            None if terminal::interactive() => terminal::ask("Address", false, |_| Ok(()))?,
-            None => return Err("Usage: zorg validate <address>".into()),
-        };
+    if let Some(address) = option("--validate") {
+        if ["--new", "--transparent", "--account"]
+            .iter()
+            .any(|name| args.options.contains_key(name))
+        {
+            return Err(
+                "--validate cannot be combined with --new, --transparent, or --account".into(),
+            );
+        }
         println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
