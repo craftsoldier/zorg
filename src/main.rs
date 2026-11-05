@@ -22,6 +22,7 @@ COMMANDS:
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
     address [--new | --transparent] [--account <name>]      Show the receive address, make a new one, or show the transparent one
+    address --validate <address>                           Validate a Zcash address
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
@@ -29,7 +30,6 @@ COMMANDS:
     history [--limit <n>] [--account <name>]                Show transaction history
     tx <txid> [--account <name>]                            Show one transaction in full
     recovery [--account <name>]                             Show the recovery phrase
-    validate <address>                                      Validate a Zcash address
     delete --account <name>                                 Delete an account
 
 OPTIONS:
@@ -72,13 +72,14 @@ fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// Options that take a value. `--lwd` applies to every command.
-const VALUE_OPTIONS: [&str; 6] = [
+const VALUE_OPTIONS: [&str; 7] = [
     "--network",
     "--lwd",
     "--account",
     "--memo",
     "--limit",
     "--birthday",
+    "--validate",
 ];
 
 /// Options that take no value.
@@ -112,8 +113,8 @@ fn command_spec(
         ),
         "balance" | "sync" | "status" | "recovery" => ("[--account <name>]", &["--account"], 0..=0),
         "address" => (
-            "[--new | --transparent] [--account <name>]",
-            &["--new", "--transparent", "--account"],
+            "[--new | --transparent] [--account <name>] | --validate <address>",
+            &["--new", "--transparent", "--account", "--validate"],
             0..=0,
         ),
         "delete" => ("--account <name>", &["--account"], 0..=0),
@@ -132,7 +133,6 @@ fn command_spec(
             0..=0,
         ),
         "tx" => ("<txid> [--account <name>]", &["--account"], 1..=1),
-        "validate" => ("<address>", &[], 0..=1),
         _ => return None,
     })
 }
@@ -208,12 +208,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
     let lwd = option("--lwd");
     let cmd = args.command.as_deref().unwrap_or("accounts");
-    if cmd == "validate" {
-        let address = match args.positional.first() {
-            Some(address) => address.clone(),
-            None if terminal::interactive() => terminal::ask("Address", false, |_| Ok(()))?,
-            None => return Err("Usage: zorg validate <address>".into()),
-        };
+    if let Some(address) = option("--validate") {
+        if ["--new", "--transparent", "--account"]
+            .iter()
+            .any(|name| args.options.contains_key(name))
+        {
+            return Err(
+                "--validate cannot be combined with --new, --transparent, or --account".into(),
+            );
+        }
         println!("Valid: {}", sync::validate_address(&address)?);
         return Ok(());
     }
@@ -2058,6 +2061,58 @@ mod tests {
         assert_eq!(args.options["--account"], "Savings");
         assert!(parse(&["address", "--new", "--new"]).is_err());
         assert!(parse(&["balance", "--new"]).is_err());
+    }
+
+    #[test]
+    fn address_validation_requires_a_value_and_rejects_conflicting_options() {
+        let parse =
+            |args: &[&str]| parse_args(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        assert!(parse(&["validate", "address"]).is_err());
+        assert!(parse(&["address", "--validate"]).is_err());
+        assert!(parse(&["address", "--validate", "a", "--validate", "b"]).is_err());
+        assert!(parse(&["balance", "--validate", "address"]).is_err());
+        assert!(parse(&["address", "--validate", "address", "extra"]).is_err());
+        let root = tempfile::tempdir().unwrap();
+        for options in [
+            &["--new"][..],
+            &["--transparent"][..],
+            &["--account", "Missing"][..],
+        ] {
+            let mut args = vec!["address", "--validate", "address"];
+            args.extend(options);
+            assert!(run_in(root.path().to_path_buf(), parse(&args).unwrap())
+                .unwrap_err()
+                .contains("cannot be combined"));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn address_validation_does_not_open_or_create_a_wallet() {
+        use zcash_address::{ToAddress, ZcashAddress};
+        let address = ZcashAddress::from_transparent_p2pkh(
+            zcash_protocol::consensus::NetworkType::Test,
+            [0; 20],
+        )
+        .to_string();
+        let args = |address: &str| {
+            parse_args(&["address".into(), "--validate".into(), address.into()]).unwrap()
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("wallet");
+        run_in(root.clone(), args(&address)).unwrap();
+        assert!(!root.exists());
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("zorg_index.db"), b"not a wallet database").unwrap();
+        run_in(root.clone(), args(&address)).unwrap();
+        assert!(run_in(root.clone(), args("invalid"))
+            .unwrap_err()
+            .starts_with("Invalid:"));
+        assert_eq!(
+            std::fs::read(root.join("zorg_index.db")).unwrap(),
+            b"not a wallet database"
+        );
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
     }
 
     #[test]

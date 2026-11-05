@@ -48,6 +48,7 @@ zorg balance --account Savings
 | `zorg create [name] --import [--birthday <height>] [--network <net>]` | Import an existing recovery phrase. |
 | `zorg balance [--account <name>]` | Show spendable, pending, locked, and total balances. |
 | `zorg address [--new \| --transparent] [--account <name>]` | Show a receiving address, generate a new shielded address, or show the transparent address. |
+| `zorg address --validate <address>` | Check an address. |
 | `zorg sync [--account <name>]` | Sync all accounts, or one named account. |
 | `zorg status [--account <name>]` | Show account sync status. |
 | `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send a payment. |
@@ -55,7 +56,6 @@ zorg balance --account Savings
 | `zorg history [--limit <n>] [--account <name>]` | Print transaction history. |
 | `zorg tx <txid> [--account <name>]` | Show a transaction in full. |
 | `zorg recovery [--account <name>]` | Show the numbered recovery phrase and wallet birthday. |
-| `zorg validate <address>` | Check an address. |
 | `zorg delete --account <name>` | Delete an account. |
 
 Account names are case-sensitive. Use `--account <name>` to select one; each account has its own database.
