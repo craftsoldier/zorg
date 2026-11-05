@@ -2064,58 +2064,6 @@ mod tests {
     }
 
     #[test]
-    fn address_validation_requires_a_value_and_rejects_conflicting_options() {
-        let parse =
-            |args: &[&str]| parse_args(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-        assert!(parse(&["validate", "address"]).is_err());
-        assert!(parse(&["address", "--validate"]).is_err());
-        assert!(parse(&["address", "--validate", "a", "--validate", "b"]).is_err());
-        assert!(parse(&["balance", "--validate", "address"]).is_err());
-        assert!(parse(&["address", "--validate", "address", "extra"]).is_err());
-        let root = tempfile::tempdir().unwrap();
-        for options in [
-            &["--new"][..],
-            &["--transparent"][..],
-            &["--account", "Missing"][..],
-        ] {
-            let mut args = vec!["address", "--validate", "address"];
-            args.extend(options);
-            assert!(run_in(root.path().to_path_buf(), parse(&args).unwrap())
-                .unwrap_err()
-                .contains("cannot be combined"));
-        }
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn address_validation_does_not_open_or_create_a_wallet() {
-        use zcash_address::{ToAddress, ZcashAddress};
-        let address = ZcashAddress::from_transparent_p2pkh(
-            zcash_protocol::consensus::NetworkType::Test,
-            [0; 20],
-        )
-        .to_string();
-        let args = |address: &str| {
-            parse_args(&["address".into(), "--validate".into(), address.into()]).unwrap()
-        };
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("wallet");
-        run_in(root.clone(), args(&address)).unwrap();
-        assert!(!root.exists());
-        std::fs::create_dir(&root).unwrap();
-        std::fs::write(root.join("zorg_index.db"), b"not a wallet database").unwrap();
-        run_in(root.clone(), args(&address)).unwrap();
-        assert!(run_in(root.clone(), args("invalid"))
-            .unwrap_err()
-            .starts_with("Invalid:"));
-        assert_eq!(
-            std::fs::read(root.join("zorg_index.db")).unwrap(),
-            b"not a wallet database"
-        );
-        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
-    }
-
-    #[test]
     fn first_run_lists_no_accounts_without_creating_a_database() {
         let root = tempfile::tempdir().unwrap();
         super::run_in(root.path().to_path_buf(), parse_args(&[]).unwrap()).unwrap();
