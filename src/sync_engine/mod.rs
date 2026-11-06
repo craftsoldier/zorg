@@ -46,8 +46,8 @@ mod lwd;
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
+pub(crate) use lwd::{connect, get_latest_block, next_stream_message, send_transaction};
 use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
-pub(crate) use lwd::{get_latest_block, next_stream_message, open_lwd_channel, send_transaction};
 
 /// Progress event sent to caller.
 #[derive(Clone, Debug)]
@@ -985,7 +985,7 @@ async fn run_sync_impl(
     .map_err(SyncError::db)?;
 
     // 1. Connect gRPC (plain TLS via tonic + webpki roots).
-    let mut client = open_lwd_channel(lightwalletd_url).await?;
+    let mut client = connect(network, lightwalletd_url).await?;
 
     // Open DB once — reused for the entire sync
     let mut db =
@@ -1783,10 +1783,10 @@ fn should_use_empty_chain_state(
 
 /// Get the chain tip from a lightwalletd endpoint, bounded by a timeout so
 /// a dead endpoint cannot hang a one-shot command. Used by `status`.
-pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {
+pub fn fetch_chain_tip(lightwalletd_url: &str, network: WalletNetwork) -> Result<u64, String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+        let mut client = connect(network, lightwalletd_url)
             .await
             .map_err(|e| e.to_string())?;
         tokio::time::timeout(
@@ -1816,7 +1816,7 @@ pub fn fetch_birthday(
     }
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     let tree_state = rt.block_on(async {
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
+        let mut client = connect(network, lightwalletd_url)
             .await
             .map_err(|e| e.to_string())?;
         get_tree_state(&mut client, height - 1)
@@ -1832,25 +1832,6 @@ pub fn fetch_birthday(
     }
     AccountBirthday::from_treestate(tree_state, None)
         .map_err(|e| format!("Could not read the tree state before birthday {height}: {e}"))
-}
-
-/// The Sapling activation height a lightwalletd endpoint reports for its chain.
-pub fn get_lightwalletd_sapling_activation_height(lightwalletd_url: &str) -> Result<u64, String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    rt.block_on(async {
-        use zcash_client_backend::proto::service::Empty;
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        let info = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get_lightd_info(Empty {}),
-        )
-        .await
-        .map_err(|_| "get_lightd_info: timed out".to_string())?
-        .map_err(|e| format!("get_lightd_info: {e}"))?;
-        Ok(info.into_inner().sapling_activation_height)
-    })
 }
 
 // ==================== Tests ====================

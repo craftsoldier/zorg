@@ -129,6 +129,34 @@ pub(crate) async fn open_lwd_channel(
     Ok(CompactTxStreamerClient::new(channel))
 }
 
+/// Opens a channel to `lightwalletd_url` and rejects a server that does not
+/// serve `network`.
+pub(crate) async fn connect(
+    network: WalletNetwork,
+    lightwalletd_url: &str,
+) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
+    use zcash_client_backend::proto::service::Empty;
+    let mut client = open_lwd_channel(lightwalletd_url).await?;
+    let info = await_tonic_response(
+        "get_lightd_info",
+        LIGHTWALLETD_CONNECT_TIMEOUT,
+        client.get_lightd_info(timed_request(Empty {}, LIGHTWALLETD_CONNECT_TIMEOUT)),
+    )
+    .await
+    .map_err(|e| status_to_network_error("get_lightd_info", e))?;
+    let served = WalletNetwork::from_sapling_activation_height(info.sapling_activation_height);
+    if served != Some(network) {
+        let served = served.map_or("an unknown network".to_string(), |net| {
+            format!("the {} network", net.as_str())
+        });
+        return Err(SyncError::Parse(format!(
+            "{lightwalletd_url} serves {served}, but this database is on {}",
+            network.as_str()
+        )));
+    }
+    Ok(client)
+}
+
 /// Return the current chain tip with a bounded response wait.
 pub(crate) async fn get_latest_block(
     client: &mut CompactTxStreamerClient<Channel>,

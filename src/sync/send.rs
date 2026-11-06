@@ -168,9 +168,10 @@ fn send_proposal_is_expired(min_target: BlockHeight, current: BlockHeight) -> bo
 
 pub(super) async fn live_send_expiry_height(
     lwd_url: &str,
+    network: WalletNetwork,
     min_target: BlockHeight,
 ) -> Result<BlockHeight, String> {
-    let mut client = crate::sync_engine::open_lwd_channel(lwd_url)
+    let mut client = crate::sync_engine::connect(network, lwd_url)
         .await
         .map_err(|e| format!("Connect: {e}"))?;
     let tip = crate::sync_engine::get_latest_block(&mut client)
@@ -362,7 +363,7 @@ async fn execute_stored<N: std::fmt::Display>(
     let network = stored.network;
     let db_path = stored.db_path.as_str();
     let min_target = BlockHeight::from(stored.proposal.min_target_height());
-    let live_expiry = live_send_expiry_height(lightwalletd_url, min_target)
+    let live_expiry = live_send_expiry_height(lightwalletd_url, network, min_target)
         .await
         .inspect_err(|_| {
             let _ = finish_proposal(&stored, true);
@@ -460,6 +461,9 @@ async fn execute_stored<N: std::fmt::Display>(
     let txids: Vec<TxId> = txids.iter().cloned().collect();
     let read_conn = open_readonly_conn(db_path)?;
     let mut broadcast_ok = Vec::new();
+    let mut client = crate::sync_engine::connect(network, lightwalletd_url)
+        .await
+        .map_err(|e| format!("Connect: {e}"))?;
     for txid in &txids {
         let raw_tx: Vec<u8> = read_conn
             .query_row(
@@ -468,9 +472,6 @@ async fn execute_stored<N: std::fmt::Display>(
                 |r| r.get(0),
             )
             .map_err(|e| format!("Get raw tx: {e}"))?;
-        let mut client = crate::sync_engine::open_lwd_channel(lightwalletd_url)
-            .await
-            .map_err(|e| format!("Connect: {e}"))?;
         let resp = crate::sync_engine::send_transaction(&mut client, &raw_tx)
             .await
             .map_err(|e| format!("Broadcast: {e}"))?;
