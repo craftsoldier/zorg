@@ -1224,13 +1224,12 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
     let mut current = 0;
     loop {
         terminal::clear()?;
-        let page_size = usize::from(console::Term::stdout().size().0)
-            .saturating_sub(6)
-            .clamp(1, 10);
-        let start = current / page_size * page_size;
-        let end = (start + page_size).min(txs.len());
+        let term = console::Term::stdout();
+        let (height, width) = term.size();
+        let page_size = usize::from(height).saturating_sub(6).clamp(1, 10);
+        let width = usize::from(width).saturating_sub(2);
         let now = terminal::unix_now();
-        let items: Vec<String> = txs[start..end]
+        let items: Vec<String> = txs
             .iter()
             .map(|tx| {
                 let (arrow, sign, kind) = match tx.tx_kind.as_str() {
@@ -1253,32 +1252,31 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
                     height if tx.block_time == 0 => format!("block {height}"),
                     _ => terminal::ago(now.saturating_sub(tx.block_time)),
                 };
-                format!("{arrow} {kind:<10} {amount:>18}   {when}")
+                let row = format!("{arrow} {kind:<10} {amount:>18}   {when}");
+                console::truncate_str(&row, width, "…").into_owned()
             })
             .collect();
 
         println!("{}", console::style("Transactions").bold());
-        println!("{}–{} of {}\n", start + 1, end, txs.len());
-        let mut keys = Vec::new();
-        if end < txs.len() {
-            keys.push(('n', "Older"));
-        }
-        if start > 0 {
-            keys.push(('p', "Newer"));
-        }
+        println!("{} transactions\n", txs.len());
+        let hint = console::truncate_str(
+            "↑↓ move · ←→ / h/l page · Enter details · Esc back",
+            width.saturating_sub(18),
+            "…",
+        );
         let Some(choice) =
-            terminal::menu_with_keys("Esc back", &items, current - start, &keys, &mut || {})?
+            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(hint)
+                .items(&items)
+                .max_length(page_size)
+                .default(current)
+                .report(false)
+                .interact_on_opt(&term)
+                .map_err(|e| e.to_string())?
         else {
             return Ok(());
         };
-        if choice >= items.len() {
-            current = match keys[choice - items.len()].0 {
-                'n' => end,
-                _ => start.saturating_sub(page_size),
-            };
-            continue;
-        }
-        current = start + choice;
+        current = choice;
         terminal::clear()?;
         if let Err(e) = cmd_tx(account, &txs[current].txid.to_string(), hide) {
             terminal::failure(&e);
