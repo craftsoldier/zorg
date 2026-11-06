@@ -21,30 +21,6 @@ const TYPE_AHEAD_WINDOW: Duration = Duration::from_millis(250);
 /// Addresses longer than this are shortened on a card.
 const SHORT_ADDRESS_LEN: usize = 43;
 
-/// Restores the terminal settings when hidden phrase entry ends.
-struct SecretInput(rustix::termios::Termios);
-
-impl Drop for SecretInput {
-    fn drop(&mut self) {
-        let _ = rustix::termios::tcsetattr(
-            std::io::stdin(),
-            rustix::termios::OptionalActions::Now,
-            &self.0,
-        );
-    }
-}
-
-/// Keeps input raw and echo disabled until the returned guard is dropped.
-fn secret_input() -> Result<SecretInput, String> {
-    use rustix::termios::{tcgetattr, tcsetattr, OptionalActions};
-    let original = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
-    let mut hidden = original.clone();
-    hidden.make_raw();
-    hidden.output_modes = original.output_modes;
-    tcsetattr(std::io::stdin(), OptionalActions::Now, &hidden).map_err(|e| e.to_string())?;
-    Ok(SecretInput(original))
-}
-
 /// True when a person is at a terminal: both stdin and stdout are terminals.
 pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && Term::stdout().is_term()
@@ -111,25 +87,18 @@ pub fn row(label: &str, width: usize, value: impl std::fmt::Display) -> String {
     format!("  {}  {value}", style(format!("{label:<width$}")).dim())
 }
 
-/// A card's Tab key: its label on the card, and what it changes before the card
-/// is redrawn.
-pub type TabKey<'a> = (&'a str, &'a mut dyn FnMut() -> Result<(), String>);
-
 /// Shows the card `render(full)` returns and waits for one key. Enter or `y`
 /// confirms. Esc or `n` fails with [`CANCELLED`], and Ctrl-C with
 /// [`INTERRUPTED`]. When `address_len` is long, `x` redraws the card with
-/// `full` toggled. With `tab` given as `(label, change)`, Tab runs `change` and
-/// redraws the card. Keys pressed within 250 ms of the card being drawn are
+/// `full` toggled. Keys pressed within 250 ms of the card being drawn are
 /// ignored, so keys typed ahead cannot answer it.
 pub fn confirm(
     action: &str,
     address_len: usize,
-    mut tab: Option<TabKey<'_>>,
     render: impl Fn(bool) -> Vec<String>,
 ) -> Result<(), String> {
     let term = Term::stdout();
     let expandable = address_len > SHORT_ADDRESS_LEN;
-    let tab_label = tab.as_ref().map(|(label, _)| label.to_string());
     let mut full = false;
     let draw = |full: bool| -> Result<usize, String> {
         let mut lines = render(full);
@@ -146,9 +115,6 @@ pub fn confirm(
                 "full address"
             };
             keys.push_str(&format!("   {} {toggle}", style("[x]").bold()));
-        }
-        if let Some(label) = &tab_label {
-            keys.push_str(&format!("   {} {label}", style("[Tab]").bold()));
         }
         lines.push(keys);
         let width = usize::from(term.size().1).max(1);
@@ -175,14 +141,6 @@ pub fn confirm(
                 term.clear_last_lines(rows).map_err(|e| e.to_string())?;
                 rows = draw(full)?;
                 drawn = Instant::now();
-            }
-            Key::Tab => {
-                if let Some((_, change)) = tab.as_mut() {
-                    term.clear_last_lines(rows).map_err(|e| e.to_string())?;
-                    change()?;
-                    rows = draw(full)?;
-                    drawn = Instant::now();
-                }
             }
             _ => {}
         }
@@ -276,64 +234,34 @@ pub fn ask(
     }
 }
 
-/// Reads a hidden recovery phrase with Tab switching the network. Rejected
-/// input is retried in a terminal; returns the phrase and the check's value.
+/// Reads a hidden recovery phrase, from the terminal or, when stdin is
+/// piped, from stdin. At a terminal, input that `check` rejects is asked for
+/// again. Returns the phrase and the check's value.
 pub fn read_mnemonic<T>(
-    net: &std::cell::Cell<zorg::network::WalletNetwork>,
+    network: WalletNetwork,
     check: impl Fn(&str) -> Result<T, String>,
 ) -> Result<(zeroize::Zeroizing<String>, T), String> {
-    if !interactive() {
-        let phrase = rpassword::prompt_password("Enter your 12- or 24-word recovery phrase: ")
-            .map(zeroize::Zeroizing::new)
-            .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
-        let value = check(&phrase)?;
-        return Ok((phrase, value));
+    let prompt = format!("Recovery phrase · {} (hidden): ", network.display_name());
+    if interactive() {
+        note("Enter to continue · Ctrl-C to cancel");
     }
-    let _input = secret_input()?;
-    let term = Term::stdout();
-    let draw = || {
-        let prompt = format!("Recovery phrase · {} (hidden): ", net.get().display_name());
-        let width = usize::from(term.size().1).saturating_sub(1);
-        term.clear_line()
-            .and_then(|()| term.write_str(&console::truncate_str(&prompt, width, "…")))
-            .map_err(|e| e.to_string())
-    };
     loop {
-        note("Tab network · Enter continue · Esc cancel");
         let mut phrase = zeroize::Zeroizing::new(String::new());
-        draw()?;
-        loop {
-            match term.read_key_raw().map_err(|e| e.to_string())? {
-                Key::Char(c) if !c.is_control() => phrase.push(c),
-                Key::Backspace => {
-                    phrase.pop();
-                }
-                Key::Tab => {
-                    let networks = zorg::network::WalletNetwork::ALL;
-                    let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
-                    net.set(networks[(current + 1) % networks.len()]);
-                    draw()?;
-                }
-                Key::Enter => {
-                    term.write_line("").map_err(|e| e.to_string())?;
-                    match check(&phrase) {
-                        Ok(value) => return Ok((phrase, value)),
-                        Err(error) => {
-                            failure(&error);
-                            break;
-                        }
-                    }
-                }
-                Key::Escape => {
-                    term.write_line("").map_err(|e| e.to_string())?;
-                    return Err(CANCELLED.into());
-                }
-                Key::CtrlC => {
-                    term.write_line("").map_err(|e| e.to_string())?;
-                    return Err(INTERRUPTED.into());
-                }
-                _ => {}
-            }
+        if std::io::stdin().is_terminal() {
+            let term = Term::stderr();
+            term.write_str(&prompt)
+                .and_then(|()| term.read_secure_line())
+                .map(|line| *phrase = line)
+        } else {
+            std::io::stdin().read_line(&mut phrase).map(drop)
+        }
+        .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
+        let kept = phrase.trim_end_matches(['\r', '\n']).len();
+        phrase.truncate(kept);
+        match check(&phrase) {
+            Ok(value) => return Ok((phrase, value)),
+            Err(error) if interactive() => failure(&error),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -468,18 +396,18 @@ pub fn pick(question: &str, items: &[String], default: usize) -> Result<usize, S
     let Some(index) = choice else {
         return Err(CANCELLED.to_string());
     };
-    term.write_line(&format!(
+    chose(question, &items[index]);
+    Ok(index)
+}
+
+/// Prints "✔ <question> · <answer>", the record of a choice that was made.
+pub fn chose(question: &str, answer: &str) {
+    println!(
         "{} {} {}",
         style("✔").green(),
         style(question).bold(),
-        style(format!(
-            "· {}",
-            console::strip_ansi_codes(&items[index]).trim()
-        ))
-        .dim()
-    ))
-    .map_err(|e| e.to_string())?;
-    Ok(index)
+        style(format!("· {}", console::strip_ansi_codes(answer).trim())).dim()
+    );
 }
 
 /// Shows `items` as a menu to choose from with the arrow keys, starting at

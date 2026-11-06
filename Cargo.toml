@@ -35,8 +35,6 @@ shardtree = "0.8"
 # Security
 secrecy = "0.8"
 zeroize = "1"
-rpassword = "7"
-rustix = { version = "1", features = ["termios"] }
 security-framework = { version = "3.7", features = ["OSX_10_15"], optional = true }
 blake2b_simd = "1"
 
