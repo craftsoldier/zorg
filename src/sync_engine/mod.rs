@@ -1781,20 +1781,6 @@ fn should_use_empty_chain_state(
 
 // ======================== Public Lightwalletd Helpers ========================
 
-/// Get the latest block height from a lightwalletd endpoint.
-pub fn get_latest_block_height(lightwalletd_url: &str) -> Result<u64, String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    rt.block_on(async {
-        let mut client = crate::sync_engine::lwd::open_lwd_channel(lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        let tip = crate::sync_engine::lwd::get_latest_block(&mut client)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(tip.height)
-    })
-}
-
 /// Get the chain tip from a lightwalletd endpoint, bounded by a timeout so
 /// a dead endpoint cannot hang a one-shot command. Used by `status`.
 pub fn fetch_chain_tip(lightwalletd_url: &str) -> Result<u64, String> {

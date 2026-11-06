@@ -885,7 +885,7 @@ fn cmd_create(
     lwd_url: &str,
     name: &str,
 ) -> Result<NewAccount, String> {
-    let birthday = resolve_create_birthday(|| zorg::sync_engine::get_latest_block_height(lwd_url))?;
+    let birthday = resolve_create_birthday(|| zorg::sync_engine::fetch_chain_tip(lwd_url))?;
     let account_birthday = zorg::sync_engine::fetch_birthday(lwd_url, net, birthday)?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
@@ -1941,15 +1941,17 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
 /// Pick a lightwalletd endpoint when the user did not specify one.
 fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
     let candidates = net.default_lightwalletd_urls();
-    let Some((first_alive, attempts)) = candidates.iter().enumerate().find_map(|(i, url)| {
-        match zorg::sync_engine::get_latest_block_height(url) {
-            Ok(_) => Some((url, i + 1)),
-            Err(e) => {
-                log::warn!("{url} unreachable ({e}); trying next endpoint");
-                None
-            }
-        }
-    }) else {
+    let Some((first_alive, attempts)) =
+        candidates.iter().enumerate().find_map(
+            |(i, url)| match zorg::sync_engine::fetch_chain_tip(url) {
+                Ok(_) => Some((url, i + 1)),
+                Err(e) => {
+                    log::warn!("{url} unreachable ({e}); trying next endpoint");
+                    None
+                }
+            },
+        )
+    else {
         // Every candidate refused the connection: the primary default is
         // returned and the command itself reports failure.
         return candidates[0].to_string();
