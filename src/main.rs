@@ -1288,7 +1288,6 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
                     }
                     "sent" => ("↑".to_string(), "−", "Sent"),
                     "shielded" => ("↔".to_string(), " ", "Shielding"),
-                    "migration" => ("↔".to_string(), " ", "Migration"),
                     _ => ("↔".to_string(), " ", "Unknown"),
                 };
                 let amount = if hide {
