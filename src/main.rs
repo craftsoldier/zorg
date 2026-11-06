@@ -1489,7 +1489,7 @@ fn cmd_send(
         account.network,
         account.uuid.as_str(),
     );
-    RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
+    let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
     let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
@@ -1575,7 +1575,7 @@ fn cmd_send(
         let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
         let proposed_fee = proposal.fee_zatoshi;
         RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
-            server,
+            &mut client,
             proposal,
             |_, _| {
                 // A failed seed load releases the proposal's inputs, so failing here does too.
@@ -1650,7 +1650,7 @@ fn cmd_send(
 /// same authorization as a send.
 fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<(), String> {
     let net = account.network;
-    RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
+    let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
     let proposal = sync::propose_shield(&account.db_path, net, &account.uuid)?;
@@ -1671,7 +1671,7 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     let broadcasting = std::cell::Cell::new(false);
 
     let result = RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
-        server,
+        &mut client,
         proposal,
         |_, _| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
