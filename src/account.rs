@@ -639,7 +639,14 @@ mod tests {
             db_path: db_path_str.into(),
         };
 
-        crate::sync::update_chain_tip(db_path_str, WalletNetwork::Main, 2_500_000).unwrap();
+        crate::db::open_wallet_db_with_timeout(
+            db_path_str,
+            WalletNetwork::Main,
+            crate::db::WALLET_DB_BUSY_TIMEOUT,
+        )
+        .unwrap()
+        .update_chain_tip(zcash_protocol::consensus::BlockHeight::from_u32(2_500_000))
+        .unwrap();
         let renewed_address =
             crate::sync::get_next_available_address(db_path_str, WalletNetwork::Main, &uuid)
                 .unwrap();
