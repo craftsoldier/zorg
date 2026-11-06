@@ -46,8 +46,10 @@ mod lwd;
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
-pub(crate) use lwd::{connect, get_latest_block, next_stream_message, send_transaction};
-use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
+use lwd::{
+    connect, download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state,
+};
+pub(crate) use lwd::{get_latest_block, next_stream_message, send_transaction};
 
 /// Progress event sent to caller.
 #[derive(Clone, Debug)]
@@ -894,11 +896,12 @@ async fn refresh_utxos(
 /// Retries up to 3 times with exponential backoff (2s, 4s, 8s).
 pub async fn run_sync_inner(
     db_data_path: &str,
-    lightwalletd_url: &str,
+    client: &LwdClient,
     network: WalletNetwork,
     progress_fn: impl Fn(SyncProgressEvent) + Send + Sync,
 ) -> Result<(), String> {
     const MAX_RETRIES: u32 = 3;
+    crate::account::ensure_db_migrated_once(db_data_path, network)?;
     let mut last_err = String::new();
     *SYNC_START.lock().unwrap() = Some(std::time::Instant::now());
 
@@ -916,7 +919,7 @@ pub async fn run_sync_inner(
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         }
 
-        match run_sync_impl(db_data_path, lightwalletd_url, network, &progress_fn).await {
+        match run_sync_impl(db_data_path, client, network, &progress_fn).await {
             Ok(()) => return Ok(()),
             Err(sync_err) => {
                 // Inspect the typed error's recovery strategy before
@@ -964,7 +967,7 @@ pub async fn run_sync_inner(
 /// Inner sync implementation. Called by run_sync_inner (with retry wrapper).
 async fn run_sync_impl(
     db_data_path: &str,
-    lightwalletd_url: &str,
+    client: &LwdClient,
     network: WalletNetwork,
     progress_fn: &(impl Fn(SyncProgressEvent) + Send + Sync),
 ) -> Result<(), SyncError> {
@@ -984,8 +987,8 @@ async fn run_sync_impl(
     })
     .map_err(SyncError::db)?;
 
-    // 1. Connect gRPC (plain TLS via tonic + webpki roots).
-    let mut client = connect(network, lightwalletd_url).await?;
+    // 1. Share the caller's gRPC connection.
+    let mut client = client.clone();
 
     // Open DB once — reused for the entire sync
     let mut db =
@@ -1781,30 +1784,56 @@ fn should_use_empty_chain_state(
 
 // ======================== Public Lightwalletd Helpers ========================
 
-/// Get the chain tip from a lightwalletd endpoint, bounded by a timeout so
-/// a dead endpoint cannot hang a one-shot command. Used by `status`.
-pub fn fetch_chain_tip(lightwalletd_url: &str, network: WalletNetwork) -> Result<u64, String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    rt.block_on(async {
-        let mut client = connect(network, lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            crate::sync_engine::lwd::get_latest_block(&mut client),
-        )
+/// A connection to a lightwalletd server that passed the network check.
+pub type LwdClient = CompactTxStreamerClient<Channel>;
+
+/// Connects to `explicit`, or to the first of `network`'s built-in servers
+/// that answers and serves `network`.
+pub async fn connect_endpoint(
+    network: WalletNetwork,
+    explicit: Option<&str>,
+) -> Result<LwdClient, String> {
+    let defaults;
+    let urls = match explicit.as_ref() {
+        Some(url) => std::slice::from_ref(url),
+        None => {
+            defaults = network.default_lightwalletd_urls();
+            defaults
+        }
+    };
+    let mut last_error = String::new();
+    for (i, url) in urls.iter().enumerate() {
+        match connect(network, url).await {
+            Ok(client) => {
+                if i > 0 {
+                    log::warn!("failing over to {url}");
+                }
+                return Ok(client);
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                if i + 1 < urls.len() {
+                    log::warn!("{url} unreachable ({last_error}); trying next endpoint");
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// The server's current chain tip height.
+pub async fn chain_tip(client: &mut LwdClient) -> Result<u64, String> {
+    get_latest_block(client)
         .await
-        .map_err(|_| "get_latest_block: timed out".to_string())?
         .map(|tip| tip.height)
         .map_err(|e| e.to_string())
-    })
 }
 
 /// The birthday of an account whose first block is `height`: empty note
 /// commitment trees at or below Sapling activation, otherwise the tree state
-/// a lightwalletd endpoint reports for block `height - 1`.
-pub fn fetch_birthday(
-    lightwalletd_url: &str,
+/// the server reports for block `height - 1`.
+pub async fn fetch_birthday(
+    client: &mut LwdClient,
     network: WalletNetwork,
     height: u64,
 ) -> Result<AccountBirthday, String> {
@@ -1814,15 +1843,9 @@ pub fn fetch_birthday(
         let prior = chain::ChainState::empty(start - 1, BlockHash([0u8; 32]));
         return Ok(AccountBirthday::from_parts(prior, None));
     }
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-    let tree_state = rt.block_on(async {
-        let mut client = connect(network, lightwalletd_url)
-            .await
-            .map_err(|e| e.to_string())?;
-        get_tree_state(&mut client, height - 1)
-            .await
-            .map_err(|e| e.to_string())
-    })?;
+    let tree_state = get_tree_state(client, height - 1)
+        .await
+        .map_err(|e| e.to_string())?;
     if tree_state.height != height - 1 {
         return Err(format!(
             "lightwalletd returned the tree state for height {}, not {}",

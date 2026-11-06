@@ -149,7 +149,7 @@ pub(crate) async fn connect(
         let served = served.map_or("an unknown network".to_string(), |net| {
             format!("the {} network", net.as_str())
         });
-        return Err(SyncError::Parse(format!(
+        return Err(SyncError::WrongNetwork(format!(
             "{lightwalletd_url} serves {served}, but this database is on {}",
             network.as_str()
         )));
