@@ -24,7 +24,7 @@ On first run, zorg helps you create an account or import a recovery phrase. With
 |---|---|
 | **Send** | Enter a recipient, amount, and optional memo; review the fee before confirming. |
 | **Receive** | Show or copy your receiving address, generate a new shielded address, or show your transparent address. |
-| **Transactions** | Browse up to 10 entries per page, move between Older and Newer pages, and open transaction details. |
+| **Transactions** | Browse up to 10 entries per page, move between pages with Left/Right or h/l, and open transaction details. |
 | **Settings** | Switch accounts, choose a server, export a viewing key, or show and copy your recovery phrase. |
 
 Press `b` on the home screen to hide or show balances, `s` for Settings, and `q` to quit. **Shield** appears when the account has enough transparent funds to offer shielding.
