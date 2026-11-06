@@ -146,25 +146,6 @@ pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncPr
     }
 }
 
-// ======================== Address Validation ========================
-
-pub fn validate_address(address: &str) -> Result<String, String> {
-    use zcash_address::ZcashAddress;
-    use zcash_keys::address::Address;
-
-    let addr: Address = ZcashAddress::try_from_encoded(address)
-        .map_err(|e| format!("Invalid: {e}"))?
-        .convert()
-        .map_err(|e| format!("Invalid: {e}"))?;
-
-    match addr {
-        Address::Unified(_) => Ok("unified".into()),
-        Address::Sapling(_) => Ok("sapling".into()),
-        Address::Transparent(_) => Ok("transparent".into()),
-        Address::Tex(_) => Ok("tex".into()),
-    }
-}
-
 // ======================== Send ========================
 
 // ======================== Helpers ========================
