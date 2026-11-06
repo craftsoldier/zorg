@@ -11,8 +11,8 @@
 //!     `decrypt_and_store_transaction`, `set_transaction_status`).
 //!
 //! None of these belong to the orchestration loop — the loop lives
-//! in `sync_engine/mod.rs`. They're one-shot lookups, so extracting them into their own submodule keeps
-//! `sync/mod.rs` focused on per-wallet infrastructure (DB open,
+//! in `sync_engine.rs`. They're one-shot lookups, so extracting them into their own submodule keeps
+//! `sync.rs` focused on per-wallet infrastructure (DB open,
 //! chain-tip update, scan range management).
 
 use std::{
