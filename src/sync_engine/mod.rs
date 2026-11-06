@@ -181,9 +181,7 @@ fn pending_scan_blocks(ranges: &[ScanRange]) -> u64 {
     ranges
         .iter()
         .filter(|r| is_pending_scan_range(r))
-        .map(|r| {
-            u32::from(r.block_range().end).saturating_sub(u32::from(r.block_range().start)) as u64
-        })
+        .map(|r| block_range_len(r.block_range()))
         .sum()
 }
 
@@ -271,81 +269,73 @@ fn decide_witness_check(
     }
 }
 
-fn sync_meta_table_exists(conn: &rusqlite::Connection) -> Result<bool, String> {
-    conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
-        )",
-        params![SYNC_META_TABLE],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|exists| exists != 0)
-    .map_err(|e| format!("read sync metadata table existence: {e}"))
-}
-
-fn read_sync_meta_value(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, String> {
-    conn.query_row(
-        "SELECT value FROM ext_zorg_sync_meta WHERE key = ?1",
-        params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .map_err(|e| format!("read sync metadata value {key}: {e}"))
-}
-
-fn parse_sync_meta_u32(key: &str, value: Option<String>) -> Option<u32> {
-    let value = value?;
-    match value.parse::<u32>() {
-        Ok(parsed) => Some(parsed),
-        Err(e) => {
-            log::warn!("sync: ignoring invalid sync metadata value {key}={value:?}: {e}");
-            None
-        }
+fn read_sync_meta<T>(conn: &rusqlite::Connection, key: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let table_exists = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+            )",
+            params![SYNC_META_TABLE],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("read sync metadata table existence: {e}"))?
+        != 0;
+    if !table_exists {
+        return Ok(None);
     }
-}
-
-fn parse_sync_meta_u64(key: &str, value: Option<String>) -> Option<u64> {
-    let value = value?;
-    match value.parse::<u64>() {
-        Ok(parsed) => Some(parsed),
-        Err(e) => {
-            log::warn!("sync: ignoring invalid sync metadata value {key}={value:?}: {e}");
-            None
-        }
-    }
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM ext_zorg_sync_meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read sync metadata value {key}: {e}"))?;
+    Ok(value.and_then(|value| {
+        value
+            .parse()
+            .map_err(|e| {
+                log::warn!("sync: ignoring invalid sync metadata value {key}={value:?}: {e}")
+            })
+            .ok()
+    }))
 }
 
 fn read_witness_check_meta(db_data_path: &str) -> Result<WitnessCheckMeta, String> {
     let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
-    if !sync_meta_table_exists(&conn)? {
-        return Ok(WitnessCheckMeta::default());
-    }
-
     Ok(WitnessCheckMeta {
-        last_clean_height: parse_sync_meta_u64(
-            WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
-            read_sync_meta_value(&conn, WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY)?,
-        ),
+        last_clean_height: read_sync_meta(&conn, WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY)?,
     })
 }
 
 fn read_sync_completion_meta(db_data_path: &str) -> Result<SyncCompletionMeta, String> {
     let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
-    if !sync_meta_table_exists(&conn)? {
-        return Ok((None, None));
-    }
-
     Ok((
-        parse_sync_meta_u64(
-            LAST_COMPLETED_SYNC_HEIGHT_KEY,
-            read_sync_meta_value(&conn, LAST_COMPLETED_SYNC_HEIGHT_KEY)?,
-        ),
-        parse_sync_meta_u32(
-            SYNC_IN_PROGRESS_KEY,
-            read_sync_meta_value(&conn, SYNC_IN_PROGRESS_KEY)?,
-        )
-        .map(|value| value != 0),
+        read_sync_meta(&conn, LAST_COMPLETED_SYNC_HEIGHT_KEY)?,
+        read_sync_meta::<u32>(&conn, SYNC_IN_PROGRESS_KEY)?.map(|value| value != 0),
     ))
+}
+
+fn write_sync_meta(db_data_path: &str, entries: &[(&str, String)]) -> Result<(), String> {
+    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)?;
+    ensure_sync_meta_table(&conn)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin sync metadata transaction: {e}"))?;
+    for (key, value) in entries {
+        tx.execute(
+            "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(|e| format!("write sync metadata {key}: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit sync metadata transaction: {e}"))
 }
 
 fn witness_check_decision(
@@ -378,23 +368,13 @@ fn ensure_sync_meta_table(conn: &rusqlite::Connection) -> Result<(), String> {
 }
 
 fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Result<(), String> {
-    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)?;
-    ensure_sync_meta_table(&conn)?;
-
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin sync metadata transaction: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![
+    write_sync_meta(
+        db_data_path,
+        &[(
             WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
-            current_tip_height.to_string()
-        ],
+            current_tip_height.to_string(),
+        )],
     )
-    .map_err(|e| format!("write witness check clean height: {e}"))?;
-    tx.commit()
-        .map_err(|e| format!("commit sync metadata transaction: {e}"))
 }
 
 pub(crate) fn completed_sync_height_for_status(
@@ -413,66 +393,31 @@ pub(crate) fn completed_sync_height_for_status(
 }
 
 fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
-    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)?;
-    ensure_sync_meta_table(&conn)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin sync-start metadata transaction: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '1')
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SYNC_IN_PROGRESS_KEY],
-    )
-    .map_err(|e| format!("write sync in-progress marker: {e}"))?;
-    tx.commit()
-        .map_err(|e| format!("commit sync-start metadata: {e}"))
+    write_sync_meta(db_data_path, &[(SYNC_IN_PROGRESS_KEY, "1".into())])
 }
 
 fn mark_sync_completed(db_data_path: &str, completed_tip_height: u64) -> Result<(), String> {
-    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)?;
-    ensure_sync_meta_table(&conn)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin completed sync transaction: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![
-            LAST_COMPLETED_SYNC_HEIGHT_KEY,
-            completed_tip_height.to_string()
-        ],
-    )
-    .map_err(|e| format!("write completed sync height: {e}"))?;
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, '0')
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SYNC_IN_PROGRESS_KEY],
-    )
-    .map_err(|e| format!("clear sync in-progress marker: {e}"))?;
     let completed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    tx.execute(
-        "INSERT INTO ext_zorg_sync_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![LAST_COMPLETED_SYNC_AT_KEY, completed_at.to_string()],
+    write_sync_meta(
+        db_data_path,
+        &[
+            (
+                LAST_COMPLETED_SYNC_HEIGHT_KEY,
+                completed_tip_height.to_string(),
+            ),
+            (SYNC_IN_PROGRESS_KEY, "0".into()),
+            (LAST_COMPLETED_SYNC_AT_KEY, completed_at.to_string()),
+        ],
     )
-    .map_err(|e| format!("write last-completed-sync timestamp: {e}"))?;
-    tx.commit()
-        .map_err(|e| format!("commit completed sync transaction: {e}"))
 }
 
 /// Unix time of the last completed sync, if the wallet has ever synced.
 pub fn last_completed_sync_at(db_path: &str) -> Result<Option<u64>, String> {
     let conn = open_readonly_conn_with_timeout(db_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
-    if !sync_meta_table_exists(&conn)? {
-        return Ok(None);
-    }
-    Ok(parse_sync_meta_u64(
-        LAST_COMPLETED_SYNC_AT_KEY,
-        read_sync_meta_value(&conn, LAST_COMPLETED_SYNC_AT_KEY)?,
-    ))
+    read_sync_meta(&conn, LAST_COMPLETED_SYNC_AT_KEY)
 }
 
 fn ensure_complete_scan_state(
@@ -816,7 +761,6 @@ async fn refresh_utxos(
     db: &mut WalletDatabase,
     network: WalletNetwork,
 ) -> Result<(), SyncError> {
-    let query_network = network;
     for account_id in db
         .get_account_ids()
         .map_err(|e| SyncError::db(format!("get_account_ids: {e}")))?
@@ -829,7 +773,7 @@ async fn refresh_utxos(
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| SyncError::db(format!("get_transparent_receivers: {e}")))?
             .into_keys()
-            .map(|addr| addr.encode(&query_network))
+            .map(|addr| addr.encode(&network))
             .collect();
 
         if addresses.is_empty() {
@@ -845,11 +789,8 @@ async fn refresh_utxos(
 
         let mut stream = get_address_utxos_stream(client, addresses, start_height).await?;
 
-        loop {
-            let reply = next_stream_message(&mut stream, "get_address_utxos_stream").await?;
-            let Some(reply) = reply else {
-                break;
-            };
+        while let Some(reply) = next_stream_message(&mut stream, "get_address_utxos_stream").await?
+        {
             let txid: [u8; 32] = reply
                 .txid
                 .try_into()
@@ -1092,22 +1033,13 @@ async fn run_sync_impl(
         ),
         SyncError,
     >;
-    /// Prefetched block download state. Implements `Drop` to
-    /// abort the spawned tokio task when the loop exits for any
-    /// reason (error, break, reorg `continue`) so detached
-    /// downloads can't outlive the sync session and leak network
-    /// traffic after shutdown.
+    /// Prefetched block download state. The `JoinSet` aborts the spawned
+    /// task when dropped, so detached downloads can't outlive the sync
+    /// session and leak network traffic after shutdown.
     struct Prefetch {
-        handle: Option<tokio::task::JoinHandle<PrefetchResult>>,
+        task: tokio::task::JoinSet<PrefetchResult>,
         start: BlockHeight,
         end: BlockHeight,
-    }
-    impl Drop for Prefetch {
-        fn drop(&mut self) {
-            if let Some(h) = self.handle.take() {
-                h.abort();
-            }
-        }
     }
     let mut prefetch: Option<Prefetch> = None;
 
@@ -1219,11 +1151,8 @@ async fn run_sync_impl(
         // from the previous iteration if it matches this batch.
         let (block_source, prefetched_tree_state) = if let Some(mut pf) = prefetch.take() {
             if pf.start == start && pf.end == end {
-                // Prefetch matches. Take the handle out of the
-                // Option so Drop doesn't abort a completed task.
-                let handle = pf.handle.take().expect("prefetch handle present");
-                match handle.await {
-                    Ok(Ok((bs, ts))) => {
+                match pf.task.join_next().await {
+                    Some(Ok(Ok((bs, ts)))) => {
                         log::debug!(
                             "[{}] sync: using prefetched blocks for {}-{}",
                             elapsed(),
@@ -1275,15 +1204,17 @@ async fn run_sync_impl(
                 scannable_batch_end(base_batch_size, pf_start, range_end, current_tip_height)
             {
                 let mut pf_client = client.clone();
+                let mut task = tokio::task::JoinSet::new();
+                task.spawn(async move {
+                    let blocks = download_blocks(&mut pf_client, pf_start, pf_end - 1).await?;
+                    let tree_state =
+                        get_tree_state(&mut pf_client, u32::from(pf_start - 1) as u64).await?;
+                    Ok((blocks, tree_state))
+                });
                 prefetch = Some(Prefetch {
                     start: pf_start,
                     end: pf_end,
-                    handle: Some(tokio::spawn(async move {
-                        let blocks = download_blocks(&mut pf_client, pf_start, pf_end - 1).await?;
-                        let tree_state =
-                            get_tree_state(&mut pf_client, u32::from(pf_start - 1) as u64).await?;
-                        Ok((blocks, tree_state))
-                    })),
+                    task,
                 });
             } else {
                 log::debug!(
@@ -1641,14 +1572,7 @@ async fn run_sync_impl(
             }
         }
         // Report progress
-        let remaining: u64 = post_scan_ranges
-            .iter()
-            .filter(|r| is_pending_scan_range(r))
-            .map(|r| {
-                u32::from(r.block_range().end).saturating_sub(u32::from(r.block_range().start))
-                    as u64
-            })
-            .sum();
+        let remaining = pending_scan_blocks(&post_scan_ranges);
         let progress = SyncProgressEvent {
             scanned_height: u32::from(end) as u64,
             chain_tip_height: current_tip_height,

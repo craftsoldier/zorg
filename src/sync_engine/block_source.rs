@@ -20,8 +20,6 @@
 //! [`MemoryBlockSource::new`] and hand it straight to
 //! `scan_cached_blocks`.
 
-use std::fmt;
-
 use zcash_client_backend::{
     data_api::chain::{self, error::Error as ChainError},
     proto::compact_formats::CompactBlock,
@@ -52,26 +50,8 @@ impl MemoryBlockSource {
     }
 }
 
-/// Error type for the in-memory block source.
-///
-/// The `BlockSource` trait requires an associated `Error` type, but
-/// iterating a `Vec<CompactBlock>` cannot actually fail — this is a
-/// placeholder so the trait signature type-checks. All `with_blocks`
-/// failures come from the caller closure via `ChainError`, not from
-/// the source itself.
-#[derive(Debug)]
-pub(super) struct MemoryBlockSourceError(pub(super) String);
-
-impl fmt::Display for MemoryBlockSourceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for MemoryBlockSourceError {}
-
 impl chain::BlockSource for MemoryBlockSource {
-    type Error = MemoryBlockSourceError;
+    type Error = std::convert::Infallible;
 
     fn with_blocks<F, WalletErrT>(
         &self,
