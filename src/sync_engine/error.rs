@@ -39,6 +39,10 @@ pub(crate) enum SyncError {
     /// because re-fetching the same bytes is unlikely to parse differently.
     Parse(String),
 
+    /// The server serves a different network than the wallet. Another
+    /// attempt reaches the same server, so it is not retried.
+    WrongNetwork(String),
+
     /// Unclassified error. Treated as transient by default (retry-with-backoff)
     /// so we fail safe toward "try again" rather than "bail out".
     Other(String),
@@ -131,7 +135,9 @@ impl SyncError {
                 to_height: at_height.saturating_sub(REWIND_DISTANCE),
             },
             SyncError::Network(_) | SyncError::Other(_) => RecoveryStrategy::RetryWithBackoff,
-            SyncError::Db(_) | SyncError::Parse(_) => RecoveryStrategy::Fatal,
+            SyncError::Db(_) | SyncError::Parse(_) | SyncError::WrongNetwork(_) => {
+                RecoveryStrategy::Fatal
+            }
         }
     }
 
@@ -172,7 +178,10 @@ impl SyncError {
     pub(crate) fn is_endpoint_failover_candidate(&self) -> bool {
         match self {
             SyncError::Network(message) => is_endpoint_failover_candidate_message(message),
-            SyncError::Continuity { .. } | SyncError::Db(_) | SyncError::Parse(_) => false,
+            SyncError::Continuity { .. }
+            | SyncError::Db(_)
+            | SyncError::Parse(_)
+            | SyncError::WrongNetwork(_) => false,
             SyncError::Other(message) => is_endpoint_failover_candidate_message(message),
         }
     }
@@ -221,6 +230,7 @@ impl fmt::Display for SyncError {
             SyncError::Network(msg) => write!(f, "network: {msg}"),
             SyncError::Db(msg) => write!(f, "db: {msg}"),
             SyncError::Parse(msg) => write!(f, "parse: {msg}"),
+            SyncError::WrongNetwork(msg) => write!(f, "{msg}"),
             SyncError::Other(msg) => write!(f, "other: {msg}"),
         }
     }
@@ -242,6 +252,14 @@ mod tests {
             SyncError::Parse("bad tree state".into()).recovery_strategy(),
             RecoveryStrategy::Fatal,
         );
+    }
+
+    #[test]
+    fn wrong_network_is_fatal_and_untagged() {
+        let e = SyncError::WrongNetwork("http://x serves the main network".into());
+        assert_eq!(e.recovery_strategy(), RecoveryStrategy::Fatal);
+        assert!(!e.is_endpoint_failover_candidate());
+        assert_eq!(format!("{e}"), "http://x serves the main network");
     }
 
     #[test]
