@@ -336,7 +336,7 @@ fn finish_proposal<N>(stored: &ProposalResult<N>, release_inputs: bool) -> Resul
 }
 
 pub async fn execute_proposal_with_seed_loader<F, N: std::fmt::Display>(
-    server: Option<&str>,
+    client: &mut crate::sync_engine::LwdClient,
     stored: ProposalResult<N>,
     load_seed: F,
     on_broadcast: &dyn Fn(),
@@ -347,11 +347,11 @@ where
     let seed = load_seed(stored.network, stored.account_id).inspect_err(|_| {
         let _ = finish_proposal(&stored, true);
     })?;
-    execute_stored(server, stored, seed, on_broadcast).await
+    execute_stored(client, stored, seed, on_broadcast).await
 }
 
 async fn execute_stored<N: std::fmt::Display>(
-    server: Option<&str>,
+    client: &mut crate::sync_engine::LwdClient,
     stored: ProposalResult<N>,
     seed: SecretVec<u8>,
     on_broadcast: &dyn Fn(),
@@ -359,13 +359,7 @@ async fn execute_stored<N: std::fmt::Display>(
     let network = stored.network;
     let db_path = stored.db_path.as_str();
     let min_target = BlockHeight::from(stored.proposal.min_target_height());
-    let mut client = crate::sync_engine::connect_endpoint(network, server)
-        .await
-        .map_err(|e| format!("Connect: {e}"))
-        .inspect_err(|_| {
-            let _ = finish_proposal(&stored, true);
-        })?;
-    let live_expiry = live_send_expiry_height(&mut client, min_target)
+    let live_expiry = live_send_expiry_height(client, min_target)
         .await
         .inspect_err(|_| {
             let _ = finish_proposal(&stored, true);
@@ -471,7 +465,7 @@ async fn execute_stored<N: std::fmt::Display>(
                 |r| r.get(0),
             )
             .map_err(|e| format!("Get raw tx: {e}"))?;
-        let resp = crate::sync_engine::send_transaction(&mut client, &raw_tx)
+        let resp = crate::sync_engine::send_transaction(client, &raw_tx)
             .await
             .map_err(|e| format!("Broadcast: {e}"))?;
         if let Some(err) = crate::sync::broadcast::send_response_rejection_error(&resp) {
