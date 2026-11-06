@@ -566,7 +566,7 @@ async fn auto_sync(
             client = None;
         }
         let _ = updates.send(result.map_err(|e| {
-            if zorg::sync_engine::is_endpoint_failover_candidate_message(&e) {
+            if e.starts_with("network:") {
                 "server unreachable · retrying".to_string()
             } else {
                 "failed · retrying".to_string()

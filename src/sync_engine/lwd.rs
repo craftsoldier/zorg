@@ -33,7 +33,7 @@ use zcash_protocol::consensus::BlockHeight;
 use crate::{db::with_wallet_db_write_lock, network::WalletNetwork};
 
 use super::block_source::MemoryBlockSource;
-use super::{elapsed, SyncError, WalletDatabase};
+use super::{SyncError, WalletDatabase};
 
 const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTWALLETD_UNARY_RPC_TIMEOUT: Duration = Duration::from_secs(20);
@@ -297,11 +297,7 @@ async fn fetch_subtree_roots<N>(
             node,
         ));
     }
-    log::info!(
-        "[{}] sync: downloaded {} {name} subtree roots",
-        elapsed(),
-        roots.len()
-    );
+    log::info!("sync: downloaded {} {name} subtree roots", roots.len());
     Ok(roots)
 }
 
@@ -335,8 +331,7 @@ pub(super) async fn download_subtree_roots(
         }
     };
     log::info!(
-        "[{}] sync: subtree roots start: sapling={}, orchard={}, ironwood={}",
-        elapsed(),
+        "sync: subtree roots start: sapling={}, orchard={}, ironwood={}",
         sap_start,
         orch_start,
         ironwood_start
@@ -389,7 +384,7 @@ pub(super) async fn download_subtree_roots(
         })?;
     }
 
-    log::info!("[{}] sync: subtree roots done", elapsed());
+    log::info!("sync: subtree roots done");
     Ok(())
 }
 
@@ -484,9 +479,8 @@ pub(super) async fn download_blocks(
                     return Err(SyncError::net(format!("get_block_range: {status}")));
                 }
                 log::warn!(
-                    "[{}] get_block_range: block {} is newer than the server's latest; \
+                    "get_block_range: block {} is newer than the server's latest; \
                      re-fetching tip and retrying (attempt {attempt}/{BLOCK_RANGE_CLAMP_RETRIES})",
-                    elapsed(),
                     u32::from(end),
                 );
                 match get_latest_block(client).await {
@@ -501,7 +495,7 @@ pub(super) async fn download_blocks(
                         }
                     }
                     Err(e) => {
-                        log::warn!("[{}] tip refresh during clamp retry failed: {e}", elapsed(),);
+                        log::warn!("tip refresh during clamp retry failed: {e}");
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(250 * (1 << (attempt - 1)))).await;

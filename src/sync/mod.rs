@@ -109,15 +109,11 @@ pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncPr
     let mut db = open_wallet_db_for_read(db_path, network)?;
     match wallet_scan_heights(&mut db)? {
         Some((scanned_height, chain_tip_height)) => {
-            let last_completed_height = super::sync_engine::completed_sync_height_for_status(
-                db_path,
-                scanned_height,
-                chain_tip_height,
-            )
-            .unwrap_or_else(|e| {
-                log::warn!("sync: completed-height metadata unavailable: {e}");
-                None
-            });
+            let last_completed_height =
+                super::sync_engine::completed_sync_height_for_status(db_path).unwrap_or_else(|e| {
+                    log::warn!("sync: completed-height metadata unavailable: {e}");
+                    None
+                });
             Ok(SyncProgress {
                 scanned_height,
                 chain_tip_height,

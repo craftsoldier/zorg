@@ -40,7 +40,6 @@ use {
 mod block_source;
 mod enhance;
 mod error;
-pub use error::is_endpoint_failover_candidate_message;
 mod lwd;
 
 use enhance::run_enhancement;
@@ -86,17 +85,6 @@ type SyncCompletionMeta = (Option<u64>, Option<bool>);
 // height is below the retained checkpoint window. Start at the pruning depth
 // and escalate so corrupted anchor checkpoints do not survive the repair.
 const ANCHOR_ROOT_REPAIR_REWIND_DISTANCES: [u32; 3] = [100, 1000, 10_000];
-
-/// Sync-scoped elapsed time reference. Set at sync start.
-static SYNC_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-pub(crate) fn elapsed() -> String {
-    SYNC_START
-        .lock()
-        .ok()
-        .and_then(|g| g.map(|t| format!("{:.1}s", t.elapsed().as_secs_f64())))
-        .unwrap_or_default()
-}
 
 fn batch_size_for_range(base_batch_size: u32, start: BlockHeight) -> u32 {
     let start = u32::from(start);
@@ -346,10 +334,7 @@ fn witness_check_decision(
     match read_witness_check_meta(db_data_path) {
         Ok(meta) => decide_witness_check(meta, current_tip_height, force_check),
         Err(e) => {
-            log::warn!(
-                "[{}] sync: witness repair metadata unavailable, running check: {e}",
-                elapsed(),
-            );
+            log::warn!("sync: witness repair metadata unavailable, running check: {e}");
             WitnessCheckDecision::Run(WitnessCheckRunReason::MetadataUnavailable)
         }
     }
@@ -377,19 +362,9 @@ fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Resu
     )
 }
 
-pub(crate) fn completed_sync_height_for_status(
-    db_data_path: &str,
-    scanned_height: u64,
-    chain_tip_height: u64,
-) -> Result<Option<u64>, String> {
+pub(crate) fn completed_sync_height_for_status(db_data_path: &str) -> Result<Option<u64>, String> {
     let (completed_height, in_progress) = read_sync_completion_meta(db_data_path)?;
-    Ok(if in_progress == Some(true) {
-        None
-    } else {
-        completed_height.or_else(|| {
-            (chain_tip_height > 0 && scanned_height >= chain_tip_height).then_some(chain_tip_height)
-        })
-    })
+    Ok(completed_height.filter(|_| in_progress != Some(true)))
 }
 
 fn mark_sync_started(db_data_path: &str) -> Result<(), String> {
@@ -483,8 +458,7 @@ fn queue_witness_repairs_if_needed(
     match witness_check_decision(db_data_path, current_tip_height, force_check) {
         WitnessCheckDecision::Run(reason) => {
             log::info!(
-                "[{}] sync: witness repair check running ({})",
-                elapsed(),
+                "sync: witness repair check running ({})",
                 reason.description(),
             );
         }
@@ -493,10 +467,9 @@ fn queue_witness_repairs_if_needed(
             age_blocks,
         } => {
             log::info!(
-                "[{}] sync: witness repair check skipped \
+                "sync: witness repair check skipped \
                  (last_clean_height={last_clean_height}, current_tip={current_tip_height}, \
                  age_blocks={age_blocks}, max_age_blocks={WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS})",
-                elapsed(),
             );
             return Ok(None);
         }
@@ -512,8 +485,7 @@ fn queue_witness_repairs_if_needed(
                 }
 
                 log::warn!(
-                    "[{}] sync: cleared {} stale commitment-tree position(s) from unmined notes after reorg; retrying witness check",
-                    elapsed(),
+                    "sync: cleared {} stale commitment-tree position(s) from unmined notes after reorg; retrying witness check",
                     cleared,
                 );
                 db.check_witnesses().map_err(|retry_error| {
@@ -530,14 +502,10 @@ fn queue_witness_repairs_if_needed(
         if let Err(e) = with_wallet_db_write_lock("sync_engine.mark_witness_check_clean", || {
             mark_witness_check_clean(db_data_path, current_tip_height)
         }) {
-            log::warn!(
-                "[{}] sync: witness repair clean marker update failed: {e}",
-                elapsed(),
-            );
+            log::warn!("sync: witness repair clean marker update failed: {e}");
         } else {
             log::info!(
-                "[{}] sync: witness repair check found no work; marked clean at height {}",
-                elapsed(),
+                "sync: witness repair check found no work; marked clean at height {}",
                 current_tip_height,
             );
         }
@@ -560,9 +528,8 @@ fn queue_witness_repairs_if_needed(
     let first = describe_block_range(&nonempty_ranges.head);
 
     log::warn!(
-        "[{}] sync: witness repair pass {}/{} queued {} range(s), {} block(s) \
+        "sync: witness repair pass {}/{} queued {} range(s), {} block(s) \
          (first={first})",
-        elapsed(),
         pass,
         MAX_WITNESS_REPAIR_PASSES_PER_RUN,
         range_count,
@@ -659,12 +626,11 @@ async fn repair_anchor_root_mismatch_if_needed(
         }
 
         log::warn!(
-            "[{}] sync: anchor root mismatch at {anchor_height} \
+            "sync: anchor root mismatch at {anchor_height} \
              (target={}, repair_height={repair_height}, pass {}/{}); \
              local_sapling={:?}, canonical_sapling={:?}, local_orchard={:?}, \
              canonical_orchard={:?}, local_ironwood={:?}, canonical_ironwood={:?}; \
              rewinding to canonical chain state",
-            elapsed(),
             u32::from(target_height),
             *repair_passes_this_run,
             ANCHOR_ROOT_REPAIR_REWIND_DISTANCES.len(),
@@ -713,9 +679,8 @@ async fn repair_anchor_root_mismatch_if_needed(
             Ok(ranges) => ranges,
             Err(conflict) => {
                 log::warn!(
-                    "[{}] sync: anchor root repair at {repair_height} conflicted \
+                    "sync: anchor root repair at {repair_height} conflicted \
                      with an existing tree root; trying a deeper repair if available ({conflict})",
-                    elapsed(),
                 );
                 last_root_conflict = Some(conflict);
                 continue;
@@ -726,9 +691,8 @@ async fn repair_anchor_root_mismatch_if_needed(
         let first_pending =
             first_pending_scan_range(&post_rewind_ranges).unwrap_or_else(|| "none".into());
         log::info!(
-            "[{}] sync: anchor root repair queued {pending_blocks} block(s) \
+            "sync: anchor root repair queued {pending_blocks} block(s) \
              (first_pending={first_pending})",
-            elapsed(),
         );
 
         let anchor_height_u64 = u32::from(anchor_height) as u64;
@@ -781,8 +745,7 @@ async fn refresh_utxos(
         }
 
         log::info!(
-            "[{}] sync: refreshing transparent UTXOs from height {} ({} addresses)",
-            elapsed(),
+            "sync: refreshing transparent UTXOs from height {} ({} addresses)",
             u32::from(start_height),
             addresses.len(),
         );
@@ -844,14 +807,12 @@ pub async fn run_sync_inner(
     const MAX_RETRIES: u32 = 3;
     crate::account::ensure_db_migrated_once(db_data_path, network)?;
     let mut last_err = String::new();
-    *SYNC_START.lock().unwrap() = Some(std::time::Instant::now());
 
     for attempt in 0..=MAX_RETRIES {
         if attempt > 0 {
             let delay_secs = 1u64 << attempt; // 2, 4, 8
             log::warn!(
-                "[{}] sync: retry {}/{} in {}s (error: {})",
-                elapsed(),
+                "sync: retry {}/{} in {}s (error: {})",
                 attempt,
                 MAX_RETRIES,
                 delay_secs,
@@ -873,7 +834,7 @@ pub async fn run_sync_inner(
                 //
                 // A `Rewind` strategy reaching this layer means the inline
                 // reorg-recovery inside `run_sync_impl` exhausted its
-                // phase budget (commit 1.4). Treat it as a retry-worthy
+                // phase budget. Treat it as a retry-worthy
                 // transient: the next attempt gets a fresh rewind budget,
                 // which is often enough to get past a multi-level reorg
                 // that couldn't be cleared in one run.
@@ -881,20 +842,13 @@ pub async fn run_sync_inner(
                 let err_string = sync_err.to_string();
                 match strategy {
                     RecoveryStrategy::Fatal => {
-                        log::error!(
-                            "[{}] sync: fatal error, not retrying: {err_string}",
-                            elapsed(),
-                        );
+                        log::error!("sync: fatal error, not retrying: {err_string}");
                         return Err(err_string);
                     }
                     RecoveryStrategy::RetryWithBackoff | RecoveryStrategy::Rewind { .. } => {
                         last_err = err_string;
                         if attempt == MAX_RETRIES {
-                            log::error!(
-                                "[{}] sync: all {} retries exhausted",
-                                elapsed(),
-                                MAX_RETRIES,
-                            );
+                            log::error!("sync: all {} retries exhausted", MAX_RETRIES);
                         }
                     }
                 }
@@ -914,11 +868,7 @@ async fn run_sync_impl(
 ) -> Result<(), SyncError> {
     let default_batch_size = BATCH_SIZE;
     let base_batch_size = effective_base_batch_size(default_batch_size);
-    log::info!(
-        "[{}] sync: starting (base_batch={})",
-        elapsed(),
-        base_batch_size,
-    );
+    log::info!("sync: starting (base_batch={})", base_batch_size);
 
     // Persist the active session before any new sync work begins. A crash, or
     // the process being killed or replaced mid-sync, cannot leave the previous
@@ -944,7 +894,7 @@ async fn run_sync_impl(
     let tip = get_latest_block(&mut client).await?;
     let mut current_tip_height: u64 = tip.height;
     let tip_height = BlockHeight::from_u32(tip.height as u32);
-    log::info!("[{}] sync: chain tip = {}", elapsed(), tip.height);
+    log::info!("sync: chain tip = {}", tip.height);
 
     with_wallet_db_write_lock("sync_engine.update_chain_tip.initial", || {
         db.update_chain_tip(tip_height).map_err(|e| {
@@ -964,10 +914,8 @@ async fn run_sync_impl(
     refresh_utxos(&mut client, &mut db, network).await?;
 
     // 2.5. Resubmit eligible unmined wallet txs now that we know the
-    // current tip. Matches the first of the three
-    // resubmit call sites in zcash-android-wallet-sdk's
-    // `processNewBlocks` (line 551). Best-effort: failures are
-    // logged inside the helper and must not abort the sync.
+    // current tip. Best-effort: failures are logged inside the helper
+    // and must not abort the sync.
     //
     // We reuse the same `client` instead of opening a fresh channel.
     let startup_ranges = db
@@ -990,16 +938,14 @@ async fn run_sync_impl(
         .suggest_scan_ranges()
         .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
     log::info!(
-        "[{}] sync: {} blocks to scan",
-        elapsed(),
+        "sync: {} blocks to scan",
         pending_scan_blocks(&initial_ranges)
     );
 
     // Bounded counters for reorg-triggered rewinds inside this one sync run,
     // split between the verify phase and the main scan phase. Separate
-    // budgets match zcash-android-wallet-sdk's pattern of running a
-    // dedicated verify-first loop before the main scan, so a flapping
-    // verify range can't eat the main scan's rewind budget.
+    // budgets keep a flapping verify range from eating the main scan's
+    // rewind budget.
     let mut verify_rewinds_this_run: u32 = 0;
     let mut main_rewinds_this_run: u32 = 0;
     let mut witness_repair_passes_this_run: u32 = 0;
@@ -1019,9 +965,7 @@ async fn run_sync_impl(
     // we kick off a background download of the next batch while running
     // scan / enhancement / resubmit / progress reporting for the current
     // batch. This overlaps network I/O (download) with CPU-bound
-    // work (scan) and unrelated gRPC calls (resubmit), matching
-    // the SDK's `.buffer(1)` pipelining pattern in
-    // `CompactBlockProcessor.kt:1666`.
+    // work (scan) and unrelated gRPC calls (resubmit).
     //
     // `None` on the first iteration and whenever the previous batch
     // was the last in its range (so there's nothing to prefetch until
@@ -1088,19 +1032,13 @@ async fn run_sync_impl(
         // the rewind counters below are what actually matter.
         let is_verify_phase = range.priority() == ScanPriority::Verify;
         if is_verify_phase && !verify_phase_announced {
-            log::info!("[{}] sync: entering verify phase", elapsed());
+            log::info!("sync: entering verify phase");
             verify_phase_announced = true;
         } else if !is_verify_phase && !main_phase_announced {
             if verify_phase_announced {
-                log::info!(
-                    "[{}] sync: verify phase complete, entering main scan",
-                    elapsed()
-                );
+                log::info!("sync: verify phase complete, entering main scan");
             } else {
-                log::info!(
-                    "[{}] sync: entering main scan phase (no verify work)",
-                    elapsed()
-                );
+                log::info!("sync: entering main scan phase (no verify work)");
             }
             main_phase_announced = true;
         }
@@ -1115,14 +1053,12 @@ async fn run_sync_impl(
         // sandblasting attack window. These blocks contain an
         // order of magnitude more outputs than normal blocks,
         // making scan_cached_blocks much slower per block and
-        // using more memory. Matches the SDK's
-        // `SANDBLASTING_RANGE` check.
+        // using more memory.
         let Some((batch_size, end)) =
             scannable_batch_end(base_batch_size, start, range_end, current_tip_height)
         else {
             log::info!(
-                "[{}] sync: pending range {} starts after current tip {}, waiting for tip advance",
-                elapsed(),
+                "sync: pending range {} starts after current tip {}, waiting for tip advance",
                 describe_block_range(range.block_range()),
                 current_tip_height,
             );
@@ -1134,8 +1070,7 @@ async fn run_sync_impl(
             chain_tip_height: current_tip_height,
         });
         log::info!(
-            "[{}] sync: scanning {}-{} (priority {:?}{}, batch={})",
-            elapsed(),
+            "sync: scanning {}-{} (priority {:?}{}, batch={})",
             u32::from(start),
             u32::from(end) - 1,
             range.priority(),
@@ -1154,8 +1089,7 @@ async fn run_sync_impl(
                 match pf.task.join_next().await {
                     Some(Ok(Ok((bs, ts)))) => {
                         log::debug!(
-                            "[{}] sync: using prefetched blocks for {}-{}",
-                            elapsed(),
+                            "sync: using prefetched blocks for {}-{}",
                             u32::from(start),
                             u32::from(end) - 1,
                         );
@@ -1163,7 +1097,7 @@ async fn run_sync_impl(
                     }
                     _ => {
                         // Prefetch failed — download synchronously.
-                        log::warn!("[{}] sync: prefetch failed, downloading fresh", elapsed(),);
+                        log::warn!("sync: prefetch failed, downloading fresh");
                         (download_blocks(&mut client, start, end - 1).await?, None)
                     }
                 }
@@ -1218,8 +1152,7 @@ async fn run_sync_impl(
                 });
             } else {
                 log::debug!(
-                    "[{}] sync: skipping prefetch from {} past current tip {}",
-                    elapsed(),
+                    "sync: skipping prefetch from {} past current tip {}",
                     u32::from(pf_start),
                     current_tip_height,
                 );
@@ -1348,9 +1281,8 @@ async fn run_sync_impl(
                     };
                     if *current_rewinds >= MAX_REWINDS_PER_RUN {
                         log::error!(
-                            "[{}] sync: {phase_name} rewind budget exhausted \
+                            "sync: {phase_name} rewind budget exhausted \
                              ({}/{}); propagating error",
-                            elapsed(),
                             *current_rewinds,
                             MAX_REWINDS_PER_RUN,
                         );
@@ -1386,9 +1318,8 @@ async fn run_sync_impl(
                                     requested_height,
                                 }) => {
                                     log::warn!(
-                                        "[{}] sync: {phase_name} rewind target {requested_height} \
+                                        "sync: {phase_name} rewind target {requested_height} \
                                          below earliest checkpoint; retrying at safe_rewind_height={safe}",
-                                        elapsed(),
                                     );
                                     db.truncate_to_height(safe).map_err(|e| {
                                         if is_sqlite_lock_contention(&e) {
@@ -1407,10 +1338,9 @@ async fn run_sync_impl(
                                     requested_height,
                                 }) => {
                                     log::error!(
-                                        "[{}] sync: {phase_name} rewind to {requested_height} \
+                                        "sync: {phase_name} rewind to {requested_height} \
                                          rejected and no safe_rewind_height is available; \
                                          cannot recover from this reorg in-place",
-                                        elapsed(),
                                     );
                                     Err(SyncError::db(format!(
                                         "truncate_to_height({requested_height}): no safe rewind height"
@@ -1452,12 +1382,11 @@ async fn run_sync_impl(
                     let summary = sync::wallet_scan_heights(&mut db).map_err(SyncError::db)?;
                     let actual_rewind_height_u64 = u32::from(actual_rewind_height) as u64;
                     log::info!(
-                        "[{}] sync: {phase_name} rewound to {actual_rewind_height} \
+                        "sync: {phase_name} rewound to {actual_rewind_height} \
                          after reorg (requested={requested_rewind_height}, \
                          distance={rewind_distance}, attempt {}/{}); \
                          post_rewind_pending={post_rewind_pending}, first_pending={first_pending}, \
                          summary={summary:?}; restarting scan loop",
-                        elapsed(),
                         *current_rewinds,
                         MAX_REWINDS_PER_RUN,
                     );
@@ -1493,9 +1422,7 @@ async fn run_sync_impl(
         // Enhancement
         run_enhancement(&mut client, &mut db, db_data_path, network).await?;
 
-        // Post-batch auto-resubmit. Matches zcash-android-wallet-sdk's
-        // lines 593/701 call sites (end of verify batch / end of
-        // regular batch).
+        // Post-batch auto-resubmit.
         //
         // We deliberately re-fetch the chain tip via
         // `get_latest_block` before each pass instead of reusing
@@ -1507,8 +1434,8 @@ async fn run_sync_impl(
         // whose expiry had already passed against the real chain
         // tip. Refreshing here is one extra unary gRPC per batch,
         // which is cheap compared to the batch download itself and
-        // closes the "resubmit expired tx forever" regression
-        // caught by Codex 2nd-round review finding 2. The request
+        // closes the "resubmit expired tx forever" regression.
+        // The request
         // starts before the scan, so the tip is at most one scan
         // and enhancement old.
         //
@@ -1537,7 +1464,7 @@ async fn run_sync_impl(
                 // and the loop may break with isComplete=true —
                 // bumping current_tip_height prematurely would make
                 // the completion event claim a height the wallet
-                // never actually scanned. (Codex 3rd-round finding.)
+                // never actually scanned.
                 if (fresh_tip_height as u64) > current_tip_height {
                     let fresh_bh = BlockHeight::from_u32(fresh_tip_height);
                     match with_wallet_db_write_lock(
@@ -1549,9 +1476,8 @@ async fn run_sync_impl(
                         }
                         Err(e) => {
                             log::warn!(
-                                "[{}] sync: post-batch update_chain_tip({fresh_tip_height}) \
+                                "sync: post-batch update_chain_tip({fresh_tip_height}) \
                                  failed, keeping tip at {current_tip_height}: {e}",
-                                elapsed(),
                             );
                         }
                     }
@@ -1565,10 +1491,7 @@ async fn run_sync_impl(
                 .await;
             }
             Err(e) => {
-                log::warn!(
-                    "[{}] sync: resubmit tip refresh failed, skipping pass: {e}",
-                    elapsed(),
-                );
+                log::warn!("sync: resubmit tip refresh failed, skipping pass: {e}");
             }
         }
         // Report progress
@@ -1577,7 +1500,7 @@ async fn run_sync_impl(
             scanned_height: u32::from(end) as u64,
             chain_tip_height: current_tip_height,
         };
-        log::info!("[{}] sync: {} blocks remaining", elapsed(), remaining);
+        log::info!("sync: {} blocks remaining", remaining);
         progress_fn(progress);
         #[cfg(debug_assertions)]
         maybe_sleep_for_e2e_sync_batch_delay().await;
@@ -1586,8 +1509,7 @@ async fn run_sync_impl(
     let (final_scanned_height, final_tip_height) =
         ensure_complete_scan_state(&mut db, current_tip_height)?;
     log::info!(
-        "[{}] sync: completed (fully_scanned={}, chain_tip={})",
-        elapsed(),
+        "sync: completed (fully_scanned={}, chain_tip={})",
         final_scanned_height,
         final_tip_height,
     );
@@ -1974,10 +1896,7 @@ mod tests {
         );
         drop(conn);
         mark_sync_started(db_path).unwrap();
-        assert_eq!(
-            completed_sync_height_for_status(db_path, 3_364_776, 3_364_776).unwrap(),
-            None,
-        );
+        assert_eq!(completed_sync_height_for_status(db_path).unwrap(), None,);
         mark_sync_completed(db_path, 3_364_777).unwrap();
         assert_eq!(
             read_sync_completion_meta(db_path).unwrap(),
@@ -1986,13 +1905,10 @@ mod tests {
     }
 
     #[test]
-    fn completion_status_uses_tip_for_legacy_wallets_without_markers() {
+    fn completion_status_is_none_without_markers_or_during_a_sync() {
         let legacy_file = tempfile::NamedTempFile::new().unwrap();
         let legacy_path = legacy_file.path().to_str().unwrap();
-        assert_eq!(
-            completed_sync_height_for_status(legacy_path, 100, 100).unwrap(),
-            Some(100),
-        );
+        assert_eq!(completed_sync_height_for_status(legacy_path).unwrap(), None,);
         assert_eq!(
             read_sync_completion_meta(legacy_path).unwrap(),
             (None, None),
@@ -2003,7 +1919,7 @@ mod tests {
         mark_sync_completed(active_sync_path, 100).unwrap();
         mark_sync_started(active_sync_path).unwrap();
         assert_eq!(
-            completed_sync_height_for_status(active_sync_path, 100, 100).unwrap(),
+            completed_sync_height_for_status(active_sync_path).unwrap(),
             None,
         );
         assert_eq!(
