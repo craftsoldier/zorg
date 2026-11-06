@@ -1264,7 +1264,7 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
         account.network,
         account.uuid.as_str(),
     );
-    let txs = sync::get_transaction_history(db, net, None, uuid)?;
+    let txs = sync::get_transaction_history(db, None, uuid)?;
     if txs.is_empty() {
         println!("No transactions yet.\n");
         return terminal::wait_for("Esc back");
@@ -1798,7 +1798,7 @@ fn send_summary(
 }
 
 fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> Result<(), String> {
-    let txs = sync::get_transaction_history(db, net, limit, uuid)?;
+    let txs = sync::get_transaction_history(db, limit, uuid)?;
     if txs.is_empty() {
         println!("No transactions yet.");
     }
@@ -1829,7 +1829,7 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
         account.uuid.as_str(),
     );
     let txid = parse_txid(txid)?;
-    let rows: Vec<_> = sync::get_transaction_history(db, net, None, uuid)?
+    let rows: Vec<_> = sync::get_transaction_history(db, None, uuid)?
         .into_iter()
         .filter(|tx| tx.txid == txid)
         .collect();

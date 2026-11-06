@@ -585,11 +585,7 @@ pub(crate) async fn resubmit_pending_transactions(
     current_height: u32,
     excluded: &HashSet<Vec<u8>>,
 ) -> Result<(), String> {
-    let txs = crate::sync::transactions::get_resubmittable_txs_excluding(
-        db_path,
-        current_height,
-        excluded,
-    )?;
+    let txs = crate::sync::transactions::get_resubmittable_txs(db_path, current_height, excluded)?;
     for tx in txs {
         let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {
