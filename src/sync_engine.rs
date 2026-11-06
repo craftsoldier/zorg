@@ -1420,7 +1420,7 @@ async fn run_sync_impl(
         let resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &post_scan_ranges)?;
 
         // Enhancement
-        run_enhancement(&mut client, &mut db, db_data_path, network).await?;
+        run_enhancement(&mut client, &mut db, network).await?;
 
         // Post-batch auto-resubmit.
         //
