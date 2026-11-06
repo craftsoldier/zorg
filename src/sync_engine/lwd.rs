@@ -54,14 +54,6 @@ fn status_to_network_error(label: &str, status: Status) -> SyncError {
     SyncError::net(format!("{label}: {status}"))
 }
 
-fn compact_block_pool_types() -> Vec<i32> {
-    vec![
-        service::PoolType::Sapling as i32,
-        service::PoolType::Orchard as i32,
-        service::PoolType::Ironwood as i32,
-    ]
-}
-
 async fn await_tonic_response<T, F>(label: &str, timeout: Duration, future: F) -> Result<T, Status>
 where
     F: Future<Output = Result<Response<T>, Status>>,
@@ -73,45 +65,18 @@ where
     }
 }
 
-async fn await_tonic_stream<T, F>(
-    label: &str,
-    timeout: Duration,
-    future: F,
-) -> Result<tonic::Streaming<T>, Status>
-where
-    F: Future<Output = Result<Response<tonic::Streaming<T>>, Status>>,
-{
-    match tokio::time::timeout(timeout, future).await {
-        Ok(Ok(response)) => Ok(response.into_inner()),
-        Ok(Err(status)) => Err(status),
-        Err(_) => Err(timeout_status(label, timeout)),
-    }
-}
-
-type AddressUtxoStream = tonic::Streaming<GetAddressUtxosReply>;
-
-async fn await_address_utxo_stream<F>(
-    timeout: Duration,
-    future: F,
-) -> Result<AddressUtxoStream, SyncError>
-where
-    F: Future<Output = Result<Response<AddressUtxoStream>, Status>>,
-{
-    await_tonic_stream("get_address_utxos_stream", timeout, future)
-        .await
-        .map_err(|e| status_to_network_error("get_address_utxos_stream", e))
-}
-
 // Server-streaming calls intentionally use plain `Request::new` at
 // their call sites. A `grpc-timeout` header would bound the whole
 // stream lifetime; here we only bound stream start and per-message idle
 // waits locally.
 
-/// Opens a tonic gRPC channel to the given lightwalletd URL and
-/// returns a `CompactTxStreamerClient`.
-pub(crate) async fn open_lwd_channel(
+/// Opens a channel to `lightwalletd_url` and rejects a server that does not
+/// serve `network`.
+pub(crate) async fn connect(
+    network: WalletNetwork,
     lightwalletd_url: &str,
 ) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
+    use zcash_client_backend::proto::service::Empty;
     let endpoint = Endpoint::from_shared(lightwalletd_url.to_string())
         .map_err(|e| SyncError::net(format!("invalid URL: {e}")))?
         .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT);
@@ -126,17 +91,7 @@ pub(crate) async fn open_lwd_channel(
         .connect()
         .await
         .map_err(|e| SyncError::net(format!("gRPC connect failed: {e}")))?;
-    Ok(CompactTxStreamerClient::new(channel))
-}
-
-/// Opens a channel to `lightwalletd_url` and rejects a server that does not
-/// serve `network`.
-pub(crate) async fn connect(
-    network: WalletNetwork,
-    lightwalletd_url: &str,
-) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
-    use zcash_client_backend::proto::service::Empty;
-    let mut client = open_lwd_channel(lightwalletd_url).await?;
+    let mut client = CompactTxStreamerClient::new(channel);
     let info = await_tonic_response(
         "get_lightd_info",
         LIGHTWALLETD_CONNECT_TIMEOUT,
@@ -216,11 +171,12 @@ pub(crate) async fn get_transaction(
     .await
 }
 
-/// Submit a raw transaction with a bounded response wait.
-pub(crate) async fn send_transaction_with_status(
+/// Submit a raw transaction with a bounded response wait and map tonic
+/// errors into the sync error taxonomy.
+pub(crate) async fn send_transaction(
     client: &mut CompactTxStreamerClient<Channel>,
     data: &[u8],
-) -> Result<SendResponse, Status> {
+) -> Result<SendResponse, SyncError> {
     await_tonic_response(
         "send_transaction",
         LIGHTWALLETD_UNARY_RPC_TIMEOUT,
@@ -233,17 +189,7 @@ pub(crate) async fn send_transaction_with_status(
         )),
     )
     .await
-}
-
-/// Submit a raw transaction with a bounded response wait and map tonic
-/// errors into the sync error taxonomy.
-pub(crate) async fn send_transaction(
-    client: &mut CompactTxStreamerClient<Channel>,
-    data: &[u8],
-) -> Result<SendResponse, SyncError> {
-    send_transaction_with_status(client, data)
-        .await
-        .map_err(|e| status_to_network_error("send_transaction", e))
+    .map_err(|e| status_to_network_error("send_transaction", e))
 }
 
 /// Open the deprecated transparent-address transaction stream with a
@@ -255,7 +201,7 @@ pub(crate) async fn get_taddress_txids(
     start_height: u64,
     end_height: u64,
 ) -> Result<tonic::Streaming<RawTransaction>, SyncError> {
-    await_tonic_stream(
+    await_tonic_response(
         "get_taddress_txids",
         LIGHTWALLETD_STREAM_START_TIMEOUT,
         client.get_taddress_txids(Request::new(TransparentAddressBlockFilter {
@@ -284,8 +230,9 @@ pub(super) async fn get_address_utxos_stream(
     client: &mut CompactTxStreamerClient<Channel>,
     addresses: Vec<String>,
     start_height: BlockHeight,
-) -> Result<AddressUtxoStream, SyncError> {
-    await_address_utxo_stream(
+) -> Result<tonic::Streaming<GetAddressUtxosReply>, SyncError> {
+    await_tonic_response(
+        "get_address_utxos_stream",
         LIGHTWALLETD_STREAM_START_TIMEOUT,
         client.get_address_utxos_stream(Request::new(GetAddressUtxosArg {
             addresses,
@@ -294,17 +241,17 @@ pub(super) async fn get_address_utxos_stream(
         })),
     )
     .await
+    .map_err(|e| status_to_network_error("get_address_utxos_stream", e))
 }
 
-async fn await_stream_message<T, F>(
+/// Read the next server-streaming message with a bounded idle wait.
+/// `Ok(None)` remains the server's normal EOF signal.
+pub(crate) async fn next_stream_message<T>(
+    stream: &mut tonic::Streaming<T>,
     label: &str,
-    timeout: Duration,
-    future: F,
-) -> Result<Option<T>, SyncError>
-where
-    F: Future<Output = Result<Option<T>, Status>>,
-{
-    match tokio::time::timeout(timeout, future).await {
+) -> Result<Option<T>, SyncError> {
+    let timeout = LIGHTWALLETD_STREAM_IDLE_TIMEOUT;
+    match tokio::time::timeout(timeout, stream.message()).await {
         Ok(Ok(message)) => Ok(message),
         Ok(Err(status)) => Err(status_to_network_error(label, status)),
         Err(_) => Err(SyncError::net(format!(
@@ -314,13 +261,48 @@ where
     }
 }
 
-/// Read the next server-streaming message with a bounded idle wait.
-/// `Ok(None)` remains the server's normal EOF signal.
-pub(crate) async fn next_stream_message<T>(
-    stream: &mut tonic::Streaming<T>,
-    label: &str,
-) -> Result<Option<T>, SyncError> {
-    await_stream_message(label, LIGHTWALLETD_STREAM_IDLE_TIMEOUT, stream.message()).await
+/// Streams the `protocol` subtree roots from `start`, decoding each 32-byte root with `decode`.
+async fn fetch_subtree_roots<N>(
+    client: &mut CompactTxStreamerClient<Channel>,
+    name: &str,
+    protocol: service::ShieldedProtocol,
+    start: u64,
+    decode: impl Fn([u8; 32]) -> Option<N>,
+) -> Result<Vec<CommitmentTreeRoot<N>>, SyncError> {
+    let label = format!("{name} subtree roots");
+    let mut stream = await_tonic_response(
+        &label,
+        LIGHTWALLETD_STREAM_START_TIMEOUT,
+        client.get_subtree_roots(Request::new(GetSubtreeRootsArg {
+            start_index: start as u32,
+            shielded_protocol: protocol.into(),
+            max_entries: 0,
+        })),
+    )
+    .await
+    .map_err(|e| status_to_network_error(&label, e))?;
+
+    let mut roots = Vec::new();
+    while let Some(root) = next_stream_message(&mut stream, &format!("{label} stream")).await? {
+        let bytes: [u8; 32] = root.root_hash.as_slice().try_into().map_err(|_| {
+            SyncError::parse(format!(
+                "{name} subtree root: expected 32 bytes, got {}",
+                root.root_hash.len()
+            ))
+        })?;
+        let node = decode(bytes)
+            .ok_or_else(|| SyncError::parse(format!("{name} subtree root: bad node bytes")))?;
+        roots.push(CommitmentTreeRoot::from_parts(
+            BlockHeight::from_u32(root.completing_block_height as u32),
+            node,
+        ));
+    }
+    log::info!(
+        "[{}] sync: downloaded {} {name} subtree roots",
+        elapsed(),
+        roots.len()
+    );
+    Ok(roots)
 }
 
 /// Pulls the latest shielded subtree roots from lightwalletd
@@ -360,45 +342,14 @@ pub(super) async fn download_subtree_roots(
         ironwood_start
     );
 
-    // Sapling
-    let mut stream = await_tonic_stream(
-        "sapling subtree roots",
-        LIGHTWALLETD_STREAM_START_TIMEOUT,
-        client.get_subtree_roots(Request::new(GetSubtreeRootsArg {
-            start_index: sap_start as u32,
-            shielded_protocol: service::ShieldedProtocol::Sapling.into(),
-            max_entries: 0,
-        })),
+    let roots = fetch_subtree_roots(
+        client,
+        "sapling",
+        service::ShieldedProtocol::Sapling,
+        sap_start,
+        |bytes| Option::from(sapling_crypto::Node::from_bytes(bytes)),
     )
-    .await
-    .map_err(|e| status_to_network_error("sapling subtree roots", e))?;
-
-    let mut roots = Vec::new();
-    while let Some(root) = next_stream_message(&mut stream, "sapling subtree roots stream").await? {
-        // `SubtreeRoot::root_hash` is `bytes = "vec"` in the proto,
-        // not a fixed-length field. A slice expression like
-        // `root_hash[..32]` would panic before `try_into()` runs if
-        // the server sent fewer than 32 bytes, so convert from the
-        // full buffer via `as_slice` and let `try_into` reject both
-        // short and long payloads.
-        let bytes: [u8; 32] = root.root_hash.as_slice().try_into().map_err(|_| {
-            SyncError::parse(format!(
-                "sapling subtree root: expected 32 bytes, got {}",
-                root.root_hash.len()
-            ))
-        })?;
-        let node = Option::from(sapling_crypto::Node::from_bytes(bytes))
-            .ok_or_else(|| SyncError::parse("sapling subtree root: bad node bytes".to_string()))?;
-        roots.push(CommitmentTreeRoot::from_parts(
-            BlockHeight::from_u32(root.completing_block_height as u32),
-            node,
-        ));
-    }
-    log::info!(
-        "[{}] sync: downloaded {} sapling subtree roots",
-        elapsed(),
-        roots.len()
-    );
+    .await?;
     if !roots.is_empty() {
         with_wallet_db_write_lock("sync_engine.put_sapling_subtree_roots", || {
             db.put_sapling_subtree_roots(sap_start, roots.as_slice())
@@ -406,39 +357,16 @@ pub(super) async fn download_subtree_roots(
         })?;
     }
 
-    // Orchard
-    let mut stream = await_tonic_stream(
-        "orchard subtree roots",
-        LIGHTWALLETD_STREAM_START_TIMEOUT,
-        client.get_subtree_roots(Request::new(GetSubtreeRootsArg {
-            start_index: orch_start as u32,
-            shielded_protocol: service::ShieldedProtocol::Orchard.into(),
-            max_entries: 0,
-        })),
+    let orchard_node =
+        |bytes: [u8; 32]| Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&bytes));
+    let roots = fetch_subtree_roots(
+        client,
+        "orchard",
+        service::ShieldedProtocol::Orchard,
+        orch_start,
+        orchard_node,
     )
-    .await
-    .map_err(|e| status_to_network_error("orchard subtree roots", e))?;
-
-    let mut roots = Vec::new();
-    while let Some(root) = next_stream_message(&mut stream, "orchard subtree roots stream").await? {
-        let bytes: [u8; 32] = root.root_hash.as_slice().try_into().map_err(|_| {
-            SyncError::parse(format!(
-                "orchard subtree root: expected 32 bytes, got {}",
-                root.root_hash.len()
-            ))
-        })?;
-        let node = Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&bytes))
-            .ok_or_else(|| SyncError::parse("orchard subtree root: bad node bytes".to_string()))?;
-        roots.push(CommitmentTreeRoot::from_parts(
-            BlockHeight::from_u32(root.completing_block_height as u32),
-            node,
-        ));
-    }
-    log::info!(
-        "[{}] sync: downloaded {} orchard subtree roots",
-        elapsed(),
-        roots.len()
-    );
+    .await?;
     if !roots.is_empty() {
         with_wallet_db_write_lock("sync_engine.put_orchard_subtree_roots", || {
             db.put_orchard_subtree_roots(orch_start, roots.as_slice())
@@ -446,40 +374,14 @@ pub(super) async fn download_subtree_roots(
         })?;
     }
 
-    // Ironwood
-    let mut stream = await_tonic_stream(
-        "ironwood subtree roots",
-        LIGHTWALLETD_STREAM_START_TIMEOUT,
-        client.get_subtree_roots(Request::new(GetSubtreeRootsArg {
-            start_index: ironwood_start as u32,
-            shielded_protocol: service::ShieldedProtocol::Ironwood.into(),
-            max_entries: 0,
-        })),
+    let roots = fetch_subtree_roots(
+        client,
+        "ironwood",
+        service::ShieldedProtocol::Ironwood,
+        ironwood_start,
+        orchard_node,
     )
-    .await
-    .map_err(|e| status_to_network_error("ironwood subtree roots", e))?;
-
-    let mut roots = Vec::new();
-    while let Some(root) = next_stream_message(&mut stream, "ironwood subtree roots stream").await?
-    {
-        let bytes: [u8; 32] = root.root_hash.as_slice().try_into().map_err(|_| {
-            SyncError::parse(format!(
-                "ironwood subtree root: expected 32 bytes, got {}",
-                root.root_hash.len()
-            ))
-        })?;
-        let node = Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&bytes))
-            .ok_or_else(|| SyncError::parse("ironwood subtree root: bad node bytes".to_string()))?;
-        roots.push(CommitmentTreeRoot::from_parts(
-            BlockHeight::from_u32(root.completing_block_height as u32),
-            node,
-        ));
-    }
-    log::info!(
-        "[{}] sync: downloaded {} ironwood subtree roots",
-        elapsed(),
-        roots.len()
-    );
+    .await?;
     if !roots.is_empty() {
         with_wallet_db_write_lock("sync_engine.put_ironwood_subtree_roots", || {
             db.put_ironwood_subtree_roots(ironwood_start, roots.as_slice())
@@ -515,7 +417,7 @@ async fn download_blocks_once(
     start: BlockHeight,
     end: BlockHeight,
 ) -> Result<MemoryBlockSource, Status> {
-    let mut stream = await_tonic_stream(
+    let mut stream = await_tonic_response(
         "get_block_range",
         LIGHTWALLETD_STREAM_START_TIMEOUT,
         client.get_block_range(Request::new(BlockRange {
@@ -527,7 +429,11 @@ async fn download_blocks_once(
                 height: u32::from(end) as u64,
                 hash: vec![],
             }),
-            pool_types: compact_block_pool_types(),
+            pool_types: vec![
+                service::PoolType::Sapling as i32,
+                service::PoolType::Orchard as i32,
+                service::PoolType::Ironwood as i32,
+            ],
         })),
     )
     .await?;
