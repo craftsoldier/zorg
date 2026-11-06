@@ -425,20 +425,17 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         let mut failed = 0;
         for account in &targets {
             println!("{}:", account.name);
-            let result = zorg::account::ensure_database_exists(account)
-                .and_then(|()| {
-                    RUNTIME.block_on(zorg::sync_engine::connect_endpoint(
-                        account.network,
-                        server(account.network).as_deref(),
-                    ))
-                })
-                .and_then(|mut client| {
-                    if cmd == "sync" {
-                        sync_database(&client, &account.db_path, account.network)
-                    } else {
-                        print_database_status(&mut client, &account.db_path, account.network)
-                    }
-                });
+            let result = zorg::account::ensure_database_exists(account).and_then(|()| {
+                let client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(
+                    account.network,
+                    server(account.network).as_deref(),
+                ));
+                if cmd == "sync" {
+                    sync_database(&client?, &account.db_path, account.network)
+                } else {
+                    print_database_status(client.ok(), &account.db_path, account.network)
+                }
+            });
             if let Err(e) = result {
                 eprintln!("Error: {e}");
                 failed += 1;
@@ -649,12 +646,16 @@ fn sync_database(
 
 /// Prints one wallet database's sync progress against the chain tip.
 fn print_database_status(
-    client: &mut zorg::sync_engine::LwdClient,
+    client: Option<zorg::sync_engine::LwdClient>,
     db_path: &str,
     net: WalletNetwork,
 ) -> Result<(), String> {
     let p = sync::get_sync_progress(db_path, net)?;
-    let tip = RUNTIME.block_on(zorg::sync_engine::chain_tip(client)).ok();
+    let tip = client.and_then(|mut client| {
+        RUNTIME
+            .block_on(zorg::sync_engine::chain_tip(&mut client))
+            .ok()
+    });
     let verified = zorg::sync_engine::last_completed_sync_at(db_path)?;
     println!(
         "{}",
