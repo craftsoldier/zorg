@@ -62,7 +62,7 @@ Account names are case-sensitive. Use `--account <name>` to select one; each acc
 
 `--network main`, `--network test`, or `--network regtest` chooses the network when creating or importing an account. The default is mainnet. Other commands use the account’s saved network. Amounts are in ZEC on mainnet and TAZ on testnet.
 
-Without flags, `zorg create` offers creation or import. Guided import starts with a hidden recovery phrase; press Tab there to change the network. After validating the phrase, zorg asks for the birthday and account name, then confirms the import details and estimated sync time before creating the account. Supplied name, network, and birthday arguments fill in those values.
+Without flags, `zorg create` offers creation or import; press `n` there to change the network. Guided import then asks for a hidden recovery phrase, read from stdin when it is piped. After validating the phrase, zorg asks for the birthday and account name, then confirms the import details and estimated sync time before creating the account. Supplied name, network, and birthday arguments fill in those values.
 
 The estimated sync range uses 200 blocks per second up to twice that duration, rounded up to minutes. It is a rough planning estimate based on the birthday and current chain tip, not a measured rate for your Mac. The confirmation needs a reachable lightwalletd endpoint; an omitted birthday estimates scanning from Sapling activation. Birthday `0` is accepted in both the prompt and flag.
 

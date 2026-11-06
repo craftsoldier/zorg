@@ -689,6 +689,11 @@ fn create_account(
     server: &dyn Fn(WalletNetwork) -> Option<String>,
 ) -> Result<Option<zorg::account::Account>, String> {
     let interactive = terminal::interactive();
+    let mut net = options
+        .get("--network")
+        .map(|n| n.parse())
+        .transpose()?
+        .unwrap_or(WalletNetwork::Main);
     let import = match (
         options.contains_key("--new"),
         options.contains_key("--import"),
@@ -697,13 +702,20 @@ fn create_account(
         (new, import) if new || import => import,
         _ if interactive => {
             let ways = ["Import an existing account", "Start a new account"].map(String::from);
-            match terminal::pick("Create account", &ways, 0) {
-                Ok(choice) => choice == 0,
-                Err(e) if e == terminal::CANCELLED => {
-                    terminal::note("Cancelled. Nothing was created.");
-                    return Ok(None);
+            loop {
+                let key = format!("network: {}", net.display_name());
+                match terminal::menu_with_keys("Esc cancel", &ways, 0, &[('n', &key)], &mut || {})?
+                {
+                    Some(i) if i == ways.len() => net = net.next(),
+                    Some(choice) => {
+                        terminal::chose("Create account", &ways[choice]);
+                        break choice == 0;
+                    }
+                    None => {
+                        terminal::note("Cancelled. Nothing was created.");
+                        return Ok(None);
+                    }
                 }
-                Err(e) => return Err(e),
             }
         }
         _ => return Err("Choose --new for a new recovery phrase or --import to import one".into()),
@@ -719,16 +731,10 @@ fn create_account(
     if birthday.is_some() && !import {
         return Err("--birthday only applies with --import".into());
     }
-    let network = options
-        .get("--network")
-        .map(|n| n.parse())
-        .transpose()?
-        .unwrap_or(WalletNetwork::Main);
-    let net = std::cell::Cell::new(network);
     let imported = if import {
-        Some(terminal::read_mnemonic(&net, |mnemonic| {
+        Some(terminal::read_mnemonic(net, |mnemonic| {
             let seed = keys::mnemonic_to_seed(mnemonic)?;
-            zorg::account::ensure_new_seed(accounts, &seed, net.get())?;
+            zorg::account::ensure_new_seed(accounts, &seed, net)?;
             Ok(seed)
         })?)
     } else {
@@ -736,8 +742,8 @@ fn create_account(
     };
     let tip = if import && interactive {
         let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(
-            net.get(),
-            server(net.get()).as_deref(),
+            net,
+            server(net).as_deref(),
         ))?;
         Some(RUNTIME.block_on(zorg::sync_engine::chain_tip(&mut client))?)
     } else {
@@ -765,7 +771,7 @@ fn create_account(
         if birthday > tip {
             return Err(format!(
                 "Birthday {birthday} is above {}'s current height {tip}",
-                net.get().display_name()
+                net.display_name()
             ));
         }
     }
@@ -779,8 +785,7 @@ fn create_account(
     let estimate = tip.map(|tip| {
         let start = birthday.unwrap_or_else(|| {
             u64::from(u32::from(
-                net.get()
-                    .activation_height(NetworkUpgrade::Sapling)
+                net.activation_height(NetworkUpgrade::Sapling)
                     .expect("supported networks activate Sapling"),
             ))
         });
@@ -798,11 +803,7 @@ fn create_account(
         let card = |_full: bool| {
             let mut lines = vec![
                 format!("{title} account {}", console::style(&name).bold()),
-                terminal::row(
-                    "network",
-                    if import { 14 } else { 8 },
-                    net.get().display_name(),
-                ),
+                terminal::row("network", if import { 14 } else { 8 }, net.display_name()),
             ];
             if import {
                 let from = birthday.map_or("scan from the start".to_string(), |h| h.to_string());
@@ -813,19 +814,7 @@ fn create_account(
             }
             lines
         };
-        let mut switch = || {
-            let networks = WalletNetwork::ALL;
-            let names = networks.map(|n| n.display_name().to_string());
-            let current = networks.iter().position(|n| *n == net.get()).unwrap_or(0);
-            net.set(networks[terminal::pick("Network", &names, current)?]);
-            Ok(())
-        };
-        let tab: Option<terminal::TabKey<'_>> = if import {
-            None
-        } else {
-            Some(("switch network", &mut switch))
-        };
-        match terminal::confirm(action, 0, tab, card) {
+        match terminal::confirm(action, 0, card) {
             Ok(()) => {}
             Err(e) if e == terminal::CANCELLED => {
                 terminal::note(&format!("Cancelled. Nothing was {done}."));
@@ -834,7 +823,6 @@ fn create_account(
             Err(e) => return Err(e),
         }
     }
-    let net = net.get();
     let mut account_birthday = None;
     if let Some(birthday) = birthday {
         let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(
@@ -1354,7 +1342,7 @@ fn cmd_delete(
             lines
         };
         let width = address.as_ref().map_or(0, String::len);
-        match terminal::confirm("delete", width, None, card) {
+        match terminal::confirm("delete", width, card) {
             Ok(()) => {}
             Err(e) if e == terminal::CANCELLED => {
                 terminal::note("Cancelled. Nothing was deleted.");
@@ -1567,7 +1555,7 @@ fn cmd_send(
     let broadcasting = std::cell::Cell::new(false);
 
     let confirmed = if interactive {
-        terminal::confirm("send", to.len(), None, card)
+        terminal::confirm("send", to.len(), card)
     } else {
         Ok(())
     };
@@ -1676,7 +1664,7 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
         |_, _| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
             if interactive {
-                terminal::confirm("shield", 0, None, card)?;
+                terminal::confirm("shield", 0, card)?;
                 progress.show("Waiting for Touch ID…");
             } else {
                 print!(

@@ -11,6 +11,12 @@ impl WalletNetwork {
     /// Every network, mainnet first.
     pub const ALL: [Self; 3] = [Self::Main, Self::Test, Self::Regtest];
 
+    /// The network after this one in [`Self::ALL`], wrapping around.
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|n| *n == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Main => "main",
