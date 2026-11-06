@@ -1,11 +1,9 @@
-use zcash_client_backend::data_api::{WalletRead, WalletWrite};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_client_backend::data_api::WalletRead;
 
 use crate::{
     db::{
         open_readonly_conn_with_timeout, open_wallet_db_for_read_with_timeout,
-        open_wallet_db_with_timeout, with_wallet_db_write_lock, WalletDatabase,
-        READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
+        open_wallet_db_with_timeout, WalletDatabase, READ_DB_BUSY_TIMEOUT, WALLET_DB_BUSY_TIMEOUT,
     },
     network::WalletNetwork,
 };
@@ -37,16 +35,6 @@ pub(crate) fn open_wallet_db_for_read(
 
 pub(crate) fn open_readonly_conn(db_path: &str) -> Result<rusqlite::Connection, String> {
     open_readonly_conn_with_timeout(db_path, Some(READ_DB_BUSY_TIMEOUT))
-}
-
-// ======================== Sync ========================
-
-pub fn update_chain_tip(db_path: &str, network: WalletNetwork, height: u64) -> Result<(), String> {
-    with_wallet_db_write_lock("sync.update_chain_tip", || {
-        let mut db = open_wallet_db(db_path, network)?;
-        db.update_chain_tip(BlockHeight::from_u32(height as u32))
-            .map_err(|e| format!("Failed to update chain tip: {e}"))
-    })
 }
 
 // ======================== Balance & Progress ========================
