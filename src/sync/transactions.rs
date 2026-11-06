@@ -37,8 +37,6 @@ use crate::network::WalletNetwork;
 
 use super::{open_readonly_conn, open_wallet_db};
 
-const ORCHARD_NOTE_VERSION: i64 = 2;
-const IRONWOOD_NOTE_VERSION: i64 = 3;
 const TRANSPARENT_POOL: i64 = 0;
 const SAPLING_POOL: i64 = 2;
 const ORCHARD_POOL: i64 = 3;
@@ -225,7 +223,6 @@ pub struct TransactionDetailOutput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TxBase {
     txid: Vec<u8>,
-    transaction_id: i64,
     mined_height: Option<u32>,
     expired_unmined: bool,
     account_balance_delta: i64,
@@ -234,11 +231,8 @@ struct TxBase {
     total_spent: u64,
     total_received: u64,
     is_shielding: bool,
-    expiry_height: Option<i64>,
     tx_index: i64,
-    created: Option<String>,
     created_time: u64,
-    spent_orchard_note: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,17 +248,11 @@ struct TxOutput {
     to_key_scope: Option<i64>,
     value: u64,
     memo: Option<Vec<u8>>,
-    note_version: Option<i64>,
 }
 
 impl TxOutput {
     fn detail_address(&self, tx_kind: &str) -> Option<String> {
-        if tx_kind == "migration" {
-            // A migration moves value between pools owned by the same account.
-            // Its internal receiver is implementation detail, not a
-            // counterparty address that should be exposed in Activity.
-            None
-        } else if tx_kind == "sent" {
+        if tx_kind == "sent" {
             if self.output_pool == 0 {
                 return self
                     .transparent_receiver_address
@@ -325,18 +313,6 @@ struct ActivitySummary {
     sent: ActivityAmounts,
     received: ActivityAmounts,
     shielded: ActivityAmounts,
-    internal_ironwood_transition: ActivityAmounts,
-    own_transparent_output_amount: u64,
-    has_own_transparent_output: bool,
-    has_external_transparent_send: bool,
-}
-
-type FundingStepMatchKey = (String, i64, u64);
-
-#[derive(Default)]
-struct SuppressedFundingStepFees {
-    suppressed_funding_txids: HashSet<i64>,
-    extra_fee_by_external_txid: HashMap<i64, u64>,
 }
 
 struct ClassifiedTx {
@@ -361,7 +337,7 @@ pub fn get_transaction_history(
     let read_tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("SQL error: {e}"))?;
-    let bases = read_history_bases(&read_tx, &uuid_bytes)?;
+    let bases = read_history_bases(&read_tx, &uuid_bytes, None)?;
     if bases.is_empty() {
         return Ok(Vec::new());
     }
@@ -385,62 +361,23 @@ pub fn get_transaction_history(
     ))
 }
 
-/// Turn raw history rows into the display list.
-///
-/// This is the whole classification pipeline — summarize, suppress
-/// funding steps, classify, filter, sort, truncate — with no database
-/// access, so it can be exercised directly from `TxBase` / `TxOutput`
-/// values instead of through SQL fixtures. `read_history_bases` and
-/// `read_history_outputs` own the SQL side; their agreement with
-/// librustzcash's own schema is pinned by the regtest equivalence
-/// check rather than by synthetic in-memory tables, which cannot
-/// express states the real schema forbids (a spend, for instance,
-/// always implies a funding receive that is itself a history row).
+/// Turn raw history rows into the display list: summarize, classify, filter,
+/// sort, truncate. It does no database access.
 fn assemble_history(
     bases: &[TxBase],
     outputs_by_txid: &HashMap<Vec<u8>, Vec<TxOutput>>,
     uuid_bytes: &[u8],
     limit: Option<u32>,
 ) -> Vec<TransactionInfo> {
-    let summaries: HashMap<Vec<u8>, ActivitySummary> = bases
+    let mut visible: Vec<ClassifiedTx> = bases
         .iter()
-        .map(|base| {
+        .flat_map(|base| {
             let outputs = outputs_by_txid
                 .get(&base.txid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            (
-                base.txid.clone(),
-                summarize_activity_outputs(base, outputs, uuid_bytes),
-            )
+                .map_or(&[][..], Vec::as_slice);
+            classify_history_tx(base, &summarize_activity_outputs(base, outputs, uuid_bytes))
         })
         .collect();
-    let external_send_keys = build_external_send_keys(bases, &summaries);
-    let suppressed_funding_step_fees =
-        build_suppressed_funding_step_fees(bases, &summaries, &external_send_keys);
-
-    let mut visible = Vec::new();
-    for base in bases {
-        let summary = summaries.get(&base.txid).cloned().unwrap_or_default();
-        if suppressed_funding_step_fees
-            .suppressed_funding_txids
-            .contains(&base.transaction_id)
-        {
-            continue;
-        }
-
-        let extra_sent_fee = if summary.has_external_transparent_send {
-            suppressed_funding_step_fees
-                .extra_fee_by_external_txid
-                .get(&base.transaction_id)
-                .copied()
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        visible.extend(classify_history_tx(base, &summary, extra_sent_fee));
-    }
 
     visible.retain(|tx| {
         tx.info.display_amount > 0 || tx.info.tx_kind == "unknown" || tx.info.tx_kind == "shielded"
@@ -477,7 +414,7 @@ pub fn get_transaction_detail(
     let read_tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("SQL error: {e}"))?;
-    let Some(base) = read_history_base_by_txid(&read_tx, &uuid_bytes, txid.as_ref())? else {
+    let Some(base) = read_history_bases(&read_tx, &uuid_bytes, Some(txid.as_ref()))?.pop() else {
         return Err("Transaction not found".to_string());
     };
     let txid_bytes: &[u8] = txid.as_ref();
@@ -591,234 +528,42 @@ fn read_raw_transaction_for_tx(
     .map_err(|e| format!("Query error: {e}"))
 }
 
-fn read_history_base_by_txid(
-    conn: &rusqlite::Connection,
-    account_uuid: &[u8],
-    txid: &[u8],
-) -> Result<Option<TxBase>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-        SELECT
-            vt.txid,
-            COALESCE(tx.id_tx, -1) AS transaction_id,
-            vt.mined_height,
-            vt.expired_unmined,
-            vt.account_balance_delta,
-            COALESCE(vt.fee_paid, 0) AS fee_paid,
-            COALESCE(vt.block_time, 0) AS block_time,
-            COALESCE(vt.total_spent, 0) AS total_spent,
-            COALESCE(vt.total_received, 0) AS total_received,
-            COALESCE(vt.is_shielding, 0) AS is_shielding,
-            vt.expiry_height,
-            COALESCE(vt.tx_index, -1) AS tx_index,
-            tx.created,
-            CAST(COALESCE(strftime('%s', tx.created), 0) AS INTEGER) AS created_time,
-            EXISTS (
-                SELECT 1
-                FROM transactions spent_tx
-                JOIN orchard_received_note_spends spent
-                    ON spent.transaction_id = spent_tx.id_tx
-                JOIN orchard_received_notes spent_note
-                    ON spent_note.id = spent.orchard_received_note_id
-                WHERE spent_tx.txid = vt.txid
-                  AND spent_note.note_version = ?3
-            ) AS spent_orchard_note
-        FROM v_transactions vt
-        LEFT JOIN transactions tx ON tx.txid = vt.txid
-        WHERE vt.account_uuid = ?1
-          AND vt.txid = ?2
-        LIMIT 1
-        "#,
-        )
-        .map_err(|e| format!("SQL error: {e}"))?;
-
-    let row = stmt
-        .query_row(
-            rusqlite::params![account_uuid, txid, ORCHARD_NOTE_VERSION],
-            |row| {
-                Ok(TxBase {
-                    txid: row.get(0)?,
-                    transaction_id: row.get(1)?,
-                    mined_height: row.get(2)?,
-                    expired_unmined: row.get(3)?,
-                    account_balance_delta: row.get(4)?,
-                    fee: row.get::<_, i64>(5)?.unsigned_abs(),
-                    block_time: row.get::<_, i64>(6)?.unsigned_abs(),
-                    total_spent: row.get::<_, i64>(7)?.unsigned_abs(),
-                    total_received: row.get::<_, i64>(8)?.unsigned_abs(),
-                    is_shielding: row.get(9)?,
-                    expiry_height: row.get(10)?,
-                    tx_index: row.get(11)?,
-                    created: row.get(12)?,
-                    created_time: row.get::<_, i64>(13)?.unsigned_abs(),
-                    spent_orchard_note: row.get(14)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|e| format!("Query error: {e}"))?;
-
-    Ok(row)
-}
-
-/// Account-scoped stand-in for `v_transactions`, without `transactions.raw`.
-///
-/// The upstream view aggregates `raw`, so SQLite materializes every blob
-/// and cannot push an outer account filter into the view. This copy drops
-/// `raw`, filters by `?1` early, and keeps the `notes` / `sent_note_counts`
-/// CTEs verbatim so row identity matches.
-///
-/// Source: `zcash_client_sqlite` 0.22.0-rc.4 `VIEW_TRANSACTIONS`
-/// <https://github.com/zcash/librustzcash/blob/65a3add2f1d9b9ea455a71a9c33f9219dbc9e614/zcash_client_sqlite/src/wallet/db.rs#L1320-L1438>
-///
-/// `history_bases_match_v_transactions` is the tripwire if the view changes.
-const HISTORY_BASES_CTE: &str = r#"
-        WITH vt AS (
-            WITH
-            notes AS (
-                SELECT ro.account_id              AS account_id,
-                       ro.transaction_id          AS transaction_id,
-                       ro.pool                    AS pool,
-                       id_within_pool_table,
-                       ro.value                   AS value,
-                       ro.value                   AS received_value,
-                       0                          AS spent_value,
-                       0                          AS spent_note_count,
-                       CASE WHEN ro.is_change THEN 1 ELSE 0 END AS change_note_count,
-                       CASE WHEN ro.is_change THEN 0 ELSE 1 END AS received_count,
-                       CASE
-                         WHEN (ro.memo IS NULL OR ro.memo = X'F6') THEN 0
-                         ELSE 1
-                       END AS memo_present,
-                       CASE WHEN ro.pool = 0 THEN 1 ELSE 0 END AS does_not_match_shielding
-                FROM v_received_outputs ro
-                UNION
-                SELECT ro.account_id              AS account_id,
-                       ros.transaction_id         AS transaction_id,
-                       ro.pool                    AS pool,
-                       id_within_pool_table,
-                       -ro.value                  AS value,
-                       0                          AS received_value,
-                       ro.value                   AS spent_value,
-                       1                          AS spent_note_count,
-                       0                          AS change_note_count,
-                       0                          AS received_count,
-                       0                          AS memo_present,
-                       CASE WHEN ro.pool != 0 THEN 1 ELSE 0 END AS does_not_match_shielding
-                FROM v_received_outputs ro
-                JOIN v_received_output_spends ros
-                     ON ros.pool = ro.pool
-                     AND ros.received_output_id = ro.id_within_pool_table
-            ),
-            sent_note_counts AS (
-                SELECT sent_notes.from_account_id     AS account_id,
-                       sent_notes.transaction_id      AS transaction_id,
-                       COUNT(DISTINCT sent_notes.id)  AS sent_notes
-                FROM sent_notes
-                LEFT JOIN v_received_outputs ro ON sent_notes.id = ro.sent_note_id
-                WHERE COALESCE(ro.is_change, 0) = 0
-                GROUP BY account_id, sent_notes.transaction_id
-            ),
-            blocks_max_height AS (
-                SELECT MAX(blocks.height) AS max_height FROM blocks
-            )
-            SELECT transactions.txid          AS txid,
-                   transactions.mined_height  AS mined_height,
-                   transactions.tx_index      AS tx_index,
-                   transactions.expiry_height AS expiry_height,
-                   transactions.fee           AS fee_paid,
-                   blocks.time                AS block_time,
-                   SUM(notes.value)           AS account_balance_delta,
-                   SUM(notes.spent_value)     AS total_spent,
-                   SUM(notes.received_value)  AS total_received,
-                   (
-                        transactions.mined_height IS NULL
-                        AND transactions.expiry_height BETWEEN 1 AND blocks_max_height.max_height
-                   ) AS expired_unmined,
-                   (
-                        SUM(notes.does_not_match_shielding) = 0
-                        AND SUM(notes.spent_note_count) > 0
-                        AND (SUM(notes.received_count) + SUM(notes.change_note_count)) > 0
-                        AND MAX(COALESCE(sent_note_counts.sent_notes, 0)) = 0
-                   ) AS is_shielding
-            FROM notes
-            JOIN accounts ON accounts.id = notes.account_id
-            JOIN transactions ON transactions.id_tx = notes.transaction_id
-            LEFT JOIN blocks_max_height
-            LEFT JOIN blocks ON blocks.height = transactions.mined_height
-            LEFT JOIN sent_note_counts
-                 ON sent_note_counts.account_id = notes.account_id
-                 AND sent_note_counts.transaction_id = notes.transaction_id
-            WHERE accounts.uuid = ?1
-            GROUP BY notes.account_id, notes.transaction_id
-        )
-"#;
-
+/// The account's `v_transactions` rows, or just `txid`'s.
 fn read_history_bases(
     conn: &rusqlite::Connection,
     account_uuid: &[u8],
+    txid: Option<&[u8]>,
 ) -> Result<Vec<TxBase>, String> {
     let mut stmt = conn
-        .prepare(&format!(
-            r#"{HISTORY_BASES_CTE}
-        SELECT
-            vt.txid,
-            COALESCE(tx.id_tx, -1) AS transaction_id,
-            vt.mined_height,
-            vt.expired_unmined,
-            vt.account_balance_delta,
-            COALESCE(vt.fee_paid, 0) AS fee_paid,
-            COALESCE(vt.block_time, 0) AS block_time,
-            COALESCE(vt.total_spent, 0) AS total_spent,
-            COALESCE(vt.total_received, 0) AS total_received,
-            COALESCE(vt.is_shielding, 0) AS is_shielding,
-            vt.expiry_height,
-            COALESCE(vt.tx_index, -1) AS tx_index,
-            tx.created,
-            CAST(COALESCE(strftime('%s', tx.created), 0) AS INTEGER) AS created_time,
-            EXISTS (
-                SELECT 1
-                FROM transactions spent_tx
-                JOIN orchard_received_note_spends spent
-                    ON spent.transaction_id = spent_tx.id_tx
-                JOIN orchard_received_notes spent_note
-                    ON spent_note.id = spent.orchard_received_note_id
-                WHERE spent_tx.txid = vt.txid
-                  AND spent_note.note_version = ?2
-            ) AS spent_orchard_note
-        FROM vt
-        LEFT JOIN transactions tx ON tx.txid = vt.txid
-        "#
-        ))
-        .map_err(|e| format!("SQL error: {e}"))?;
-
-    let rows = stmt
-        .query_map(
-            rusqlite::params![account_uuid, ORCHARD_NOTE_VERSION],
-            |row| {
-                Ok(TxBase {
-                    txid: row.get(0)?,
-                    transaction_id: row.get(1)?,
-                    mined_height: row.get(2)?,
-                    expired_unmined: row.get(3)?,
-                    account_balance_delta: row.get(4)?,
-                    fee: row.get::<_, i64>(5)?.unsigned_abs(),
-                    block_time: row.get::<_, i64>(6)?.unsigned_abs(),
-                    total_spent: row.get::<_, i64>(7)?.unsigned_abs(),
-                    total_received: row.get::<_, i64>(8)?.unsigned_abs(),
-                    is_shielding: row.get(9)?,
-                    expiry_height: row.get(10)?,
-                    tx_index: row.get(11)?,
-                    created: row.get(12)?,
-                    created_time: row.get::<_, i64>(13)?.unsigned_abs(),
-                    spent_orchard_note: row.get(14)?,
-                })
-            },
+        .prepare(
+            "SELECT vt.txid, vt.mined_height, vt.expired_unmined, vt.account_balance_delta,
+                    COALESCE(vt.fee_paid, 0), COALESCE(vt.block_time, 0),
+                    COALESCE(vt.total_spent, 0), COALESCE(vt.total_received, 0),
+                    COALESCE(vt.is_shielding, 0), COALESCE(vt.tx_index, -1),
+                    CAST(COALESCE(strftime('%s', tx.created), 0) AS INTEGER)
+             FROM v_transactions vt
+             LEFT JOIN transactions tx ON tx.txid = vt.txid
+             WHERE vt.account_uuid = ?1 AND (?2 IS NULL OR vt.txid = ?2)",
         )
+        .map_err(|e| format!("SQL error: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![account_uuid, txid], |row| {
+            Ok(TxBase {
+                txid: row.get(0)?,
+                mined_height: row.get(1)?,
+                expired_unmined: row.get(2)?,
+                account_balance_delta: row.get(3)?,
+                fee: row.get::<_, i64>(4)?.unsigned_abs(),
+                block_time: row.get::<_, i64>(5)?.unsigned_abs(),
+                total_spent: row.get::<_, i64>(6)?.unsigned_abs(),
+                total_received: row.get::<_, i64>(7)?.unsigned_abs(),
+                is_shielding: row.get(8)?,
+                tx_index: row.get(9)?,
+                created_time: row.get::<_, i64>(10)?.unsigned_abs(),
+            })
+        })
         .map_err(|e| format!("Query error: {e}"))?;
-
-    rows.collect::<Result<Vec<_>, _>>()
+    rows.collect::<Result<_, _>>()
         .map_err(|e| format!("Row error: {e}"))
 }
 
@@ -886,15 +631,7 @@ fn read_history_outputs<'a>(
                 LIMIT 1
             ) AS to_key_scope,
             txo.value,
-            txo.memo,
-            (
-                SELECT orn.note_version
-                FROM orchard_received_notes orn
-                WHERE txo.output_pool IN (3, 4)
-                  AND orn.transaction_id = txo.transaction_id
-                  AND orn.action_index = txo.output_index
-                LIMIT 1
-            ) AS note_version
+            txo.memo
         FROM v_tx_outputs txo
         JOIN rarray(?2) AS active_tx ON active_tx.value = txo.txid
         WHERE txo.from_account_uuid = ?1
@@ -917,7 +654,6 @@ fn read_history_outputs<'a>(
                 to_key_scope: row.get(8)?,
                 value: row.get::<_, i64>(9)?.unsigned_abs(),
                 memo: row.get(10)?,
-                note_version: row.get(11)?,
             })
         })
         .map_err(|e| format!("Query error: {e}"))?;
@@ -948,27 +684,12 @@ fn summarize_activity_outputs(
             continue;
         }
 
-        if from_own && to_own && base.spent_orchard_note && is_ironwood_output(output) {
-            summary.internal_ironwood_transition.add_output(output);
-            continue;
-        }
-
-        if output.output_pool == 0 && from_own && to_own {
-            summary.has_own_transparent_output = true;
-            summary.own_transparent_output_amount = summary
-                .own_transparent_output_amount
-                .saturating_add(output.value);
-        }
-
         let visible_self_output = from_own && to_own && is_user_visible_self_output(output);
         let visible_sent = from_own && (!to_own || visible_self_output);
         let visible_received = to_own && (!from_own || visible_self_output);
 
         if visible_sent {
             summary.sent.add_output(output);
-            if output.output_pool == 0 && !to_own {
-                summary.has_external_transparent_send = true;
-            }
         }
         if visible_received {
             summary.received.add_output(output);
@@ -995,23 +716,12 @@ fn detail_includes_output(
         "received" | "receiving" => {
             !base.is_shielding && to_own && (!from_own || is_user_visible_self_output(output))
         }
-        "migration" => {
-            !base.is_shielding
-                && from_own
-                && to_own
-                && base.spent_orchard_note
-                && is_ironwood_output(output)
-        }
         _ => false,
     }
 }
 
 fn is_shielded_pool(output_pool: i64) -> bool {
     matches!(output_pool, SAPLING_POOL | ORCHARD_POOL | IRONWOOD_POOL)
-}
-
-fn is_ironwood_output(output: &TxOutput) -> bool {
-    output.output_pool == IRONWOOD_POOL || output.note_version == Some(IRONWOOD_NOTE_VERSION)
 }
 
 fn is_user_visible_self_output(output: &TxOutput) -> bool {
@@ -1048,135 +758,7 @@ fn decode_text_memo(memo: Option<&[u8]>) -> Option<String> {
     }
 }
 
-fn build_external_send_keys(
-    bases: &[TxBase],
-    summaries: &HashMap<Vec<u8>, ActivitySummary>,
-) -> HashSet<FundingStepMatchKey> {
-    let mut keys = HashSet::new();
-
-    for base in bases {
-        let Some(summary) = summaries.get(&base.txid) else {
-            continue;
-        };
-        let Some(key) = external_send_key(base, summary) else {
-            continue;
-        };
-        keys.insert(key);
-    }
-
-    keys
-}
-
-fn build_suppressed_funding_step_fees(
-    bases: &[TxBase],
-    summaries: &HashMap<Vec<u8>, ActivitySummary>,
-    external_send_keys: &HashSet<FundingStepMatchKey>,
-) -> SuppressedFundingStepFees {
-    let mut funding_by_key: HashMap<FundingStepMatchKey, Vec<(i64, u64)>> = HashMap::new();
-    let mut external_by_key: HashMap<FundingStepMatchKey, Vec<i64>> = HashMap::new();
-
-    for base in bases {
-        let summary = summaries.get(&base.txid).cloned().unwrap_or_default();
-        if let Some(key) = external_send_key(base, &summary) {
-            external_by_key
-                .entry(key)
-                .or_default()
-                .push(base.transaction_id);
-        }
-
-        if should_suppress_funding_step(base, &summary, external_send_keys) {
-            if let Some(key) = funding_step_key(base, &summary) {
-                funding_by_key
-                    .entry(key)
-                    .or_default()
-                    .push((base.transaction_id, base.fee));
-            }
-        }
-    }
-
-    let mut matched = SuppressedFundingStepFees::default();
-    for (key, mut funding_steps) in funding_by_key {
-        let Some(mut external_sends) = external_by_key.remove(&key) else {
-            continue;
-        };
-
-        funding_steps.sort_by_key(|(transaction_id, _)| *transaction_id);
-        external_sends.sort_unstable();
-
-        let mut external_index = 0;
-        for (funding_transaction_id, funding_fee) in funding_steps {
-            while external_index < external_sends.len()
-                && external_sends[external_index] <= funding_transaction_id
-            {
-                external_index += 1;
-            }
-
-            let Some(external_transaction_id) = external_sends.get(external_index).copied() else {
-                continue;
-            };
-            external_index += 1;
-
-            matched
-                .suppressed_funding_txids
-                .insert(funding_transaction_id);
-            let entry = matched
-                .extra_fee_by_external_txid
-                .entry(external_transaction_id)
-                .or_insert(0);
-            *entry = entry.saturating_add(funding_fee);
-        }
-    }
-
-    matched
-}
-
-fn external_send_key(base: &TxBase, summary: &ActivitySummary) -> Option<FundingStepMatchKey> {
-    if !summary.has_external_transparent_send || base.total_spent == 0 || base.transaction_id < 0 {
-        return None;
-    }
-
-    base.created
-        .as_ref()
-        .map(|created| (created.clone(), base.expiry_key(), base.total_spent))
-}
-
-fn funding_step_key(base: &TxBase, summary: &ActivitySummary) -> Option<FundingStepMatchKey> {
-    if summary.own_transparent_output_amount == 0 || base.transaction_id < 0 {
-        return None;
-    }
-
-    base.created.as_ref().map(|created| {
-        (
-            created.clone(),
-            base.expiry_key(),
-            summary.own_transparent_output_amount,
-        )
-    })
-}
-
-fn should_suppress_funding_step(
-    base: &TxBase,
-    summary: &ActivitySummary,
-    external_send_keys: &HashSet<FundingStepMatchKey>,
-) -> bool {
-    !base.is_shielding
-        && base.total_spent > 0
-        && base.total_received > 0
-        && base.account_balance_delta <= 0
-        && base.created.is_some()
-        && summary.sent.amount == 0
-        && summary.received.amount == 0
-        && summary.has_own_transparent_output
-        && funding_step_key(base, summary)
-            .map(|key| external_send_keys.contains(&key))
-            .unwrap_or(false)
-}
-
-fn classify_history_tx(
-    base: &TxBase,
-    summary: &ActivitySummary,
-    extra_sent_fee: u64,
-) -> Vec<ClassifiedTx> {
+fn classify_history_tx(base: &TxBase, summary: &ActivitySummary) -> Vec<ClassifiedTx> {
     if base.is_shielding {
         let amount = if summary.shielded.amount > 0 {
             summary.shielded.amount
@@ -1186,25 +768,14 @@ fn classify_history_tx(
         return vec![build_classified_tx(base, "shielded", amount, "shielded", 0)];
     }
 
-    if is_internal_ironwood_transition(base, summary) {
-        return vec![build_classified_tx(
-            base,
-            "migration",
-            summary.internal_ironwood_transition.amount,
-            "ironwood",
-            1,
-        )];
-    }
-
     let mut rows = Vec::new();
     if summary.sent.amount > 0 {
-        rows.push(build_classified_tx_with_fee(
+        rows.push(build_classified_tx(
             base,
             "sent",
             summary.sent.amount,
             summary.sent.display_pool(),
             1,
-            base.fee.saturating_add(extra_sent_fee),
         ));
     }
     if summary.received.amount > 0 {
@@ -1247,15 +818,6 @@ fn classify_history_tx(
     rows
 }
 
-fn is_internal_ironwood_transition(base: &TxBase, summary: &ActivitySummary) -> bool {
-    !base.is_shielding
-        && base.spent_orchard_note
-        && base.total_spent > 0
-        && summary.internal_ironwood_transition.amount > 0
-        && summary.sent.amount == 0
-        && summary.received.amount == 0
-}
-
 fn receiving_tx_kind(base: &TxBase) -> &'static str {
     if base.mined_height.is_none() && !base.expired_unmined {
         "receiving"
@@ -1271,24 +833,6 @@ fn build_classified_tx(
     display_pool: &str,
     row_order: u8,
 ) -> ClassifiedTx {
-    build_classified_tx_with_fee(
-        base,
-        tx_kind,
-        display_amount,
-        display_pool,
-        row_order,
-        base.fee,
-    )
-}
-
-fn build_classified_tx_with_fee(
-    base: &TxBase,
-    tx_kind: &str,
-    display_amount: u64,
-    display_pool: &str,
-    row_order: u8,
-    fee: u64,
-) -> ClassifiedTx {
     let sort_timestamp = base.display_timestamp();
     ClassifiedTx {
         info: TransactionInfo {
@@ -1300,7 +844,7 @@ fn build_classified_tx_with_fee(
             ),
             mined_height: base.mined_height.unwrap_or(0) as u64,
             expired_unmined: base.expired_unmined,
-            fee,
+            fee: base.fee,
             block_time: base.block_time,
             tx_kind: tx_kind.to_string(),
             display_amount,
@@ -1315,10 +859,6 @@ fn build_classified_tx_with_fee(
 }
 
 impl TxBase {
-    fn expiry_key(&self) -> i64 {
-        self.expiry_height.unwrap_or(-1)
-    }
-
     fn display_timestamp(&self) -> u64 {
         if self.block_time > 0 {
             self.block_time
@@ -1587,57 +1127,6 @@ mod tests {
         );
     }
 
-    fn tx_base_for_history() -> TxBase {
-        TxBase {
-            txid: fake_txid(1).to_vec(),
-            transaction_id: 1,
-            mined_height: Some(121),
-            expired_unmined: false,
-            account_balance_delta: -625_000_000,
-            fee: 20_000,
-            block_time: 1_800_000_000,
-            total_spent: 625_000_000,
-            total_received: 0,
-            is_shielding: false,
-            expiry_height: Some(122),
-            tx_index: 0,
-            created: None,
-            created_time: 0,
-            spent_orchard_note: true,
-        }
-    }
-
-    #[test]
-    fn classify_internal_ironwood_transition_as_migration() {
-        let mut summary = ActivitySummary::default();
-        summary.internal_ironwood_transition.amount = 624_980_000;
-
-        let rows = classify_history_tx(&tx_base_for_history(), &summary, 0);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].info.tx_kind, "migration");
-        assert_eq!(rows[0].info.display_amount, 624_980_000);
-        assert_eq!(rows[0].info.display_pool, "ironwood");
-    }
-
-    #[test]
-    fn classify_expired_internal_ironwood_transition_as_failed_migration() {
-        let mut base = tx_base_for_history();
-        base.mined_height = None;
-        base.expired_unmined = true;
-
-        let mut summary = ActivitySummary::default();
-        summary.internal_ironwood_transition.amount = 624_980_000;
-
-        let rows = classify_history_tx(&base, &summary, 0);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].info.tx_kind, "migration");
-        assert!(rows[0].info.expired_unmined);
-        assert_eq!(rows[0].info.display_amount, 624_980_000);
-        assert_eq!(rows[0].info.display_pool, "ironwood");
-    }
-
     fn fake_raw() -> Vec<u8> {
         vec![0xDE, 0xAD, 0xBE, 0xEF]
     }
@@ -1688,7 +1177,6 @@ mod tests {
             to_key_scope: Some(0),
             value: 1_000_000,
             memo: None,
-            note_version: None,
         };
         assert_eq!(
             transparent_received.detail_address("received"),
@@ -1712,7 +1200,6 @@ mod tests {
             to_key_scope: Some(0),
             value: 1_000_000,
             memo: None,
-            note_version: None,
         };
         assert_eq!(shielded_received.detail_address("received"), Some(ua));
     }
@@ -1762,16 +1249,6 @@ mod tests {
                  to_address TEXT,
                  value INTEGER NOT NULL,
                  memo BLOB
-             );
-             CREATE TABLE orchard_received_notes (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 transaction_id INTEGER NOT NULL,
-                 action_index INTEGER NOT NULL,
-                 note_version INTEGER NOT NULL
-             );
-             CREATE TABLE orchard_received_note_spends (
-                 orchard_received_note_id INTEGER NOT NULL,
-                 transaction_id INTEGER NOT NULL
              );
              CREATE TABLE v_tx_outputs (
                  transaction_id INTEGER NOT NULL,
@@ -1972,61 +1449,6 @@ mod tests {
         output_index
     }
 
-    fn insert_received_note_version(
-        db: &NamedTempFile,
-        txid: &[u8],
-        output_index: i64,
-        note_version: i64,
-    ) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        let transaction_id = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        conn.execute(
-            "INSERT INTO orchard_received_notes (
-                 transaction_id, action_index, note_version
-             ) VALUES (?1, ?2, ?3)",
-            rusqlite::params![transaction_id, output_index, note_version],
-        )
-        .unwrap();
-    }
-
-    fn insert_spent_note_version(db: &NamedTempFile, txid: &[u8], note_version: i64) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        let transaction_id = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        conn.execute(
-            "INSERT INTO transactions (txid) VALUES (randomblob(32))",
-            [],
-        )
-        .unwrap();
-        let source_transaction_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO orchard_received_notes (
-                 transaction_id, action_index, note_version
-             ) VALUES (?1, 0, ?2)",
-            rusqlite::params![source_transaction_id, note_version],
-        )
-        .unwrap();
-        let note_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO orchard_received_note_spends (
-                 orchard_received_note_id, transaction_id
-             ) VALUES (?1, ?2)",
-            rusqlite::params![note_id, transaction_id],
-        )
-        .unwrap();
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn insert_sent_note(
         db: &NamedTempFile,
@@ -2114,442 +1536,6 @@ mod tests {
         .unwrap();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_zip320_history_pair(
-        db: &NamedTempFile,
-        account: uuid::Uuid,
-        funding_step: &[u8],
-        external_send: &[u8],
-        created: &str,
-        funding_tx_index: i64,
-        external_tx_index: i64,
-        expiry_height: i64,
-        funding_amount: i64,
-        funding_fee: i64,
-        external_fee: i64,
-    ) {
-        let send_amount = funding_amount - external_fee;
-
-        insert_history_tx(
-            db,
-            account,
-            funding_step,
-            None,
-            funding_tx_index,
-            Some(expiry_height),
-            -funding_fee,
-            funding_amount + funding_fee,
-            funding_amount,
-            false,
-            Some(created),
-        );
-        set_history_fee(db, funding_step, funding_fee);
-        insert_output_with_address(
-            db,
-            funding_step,
-            0,
-            Some(account),
-            Some(account),
-            funding_amount,
-            false,
-            Some("t-ephemeral"),
-            Some(2),
-        );
-
-        insert_history_tx(
-            db,
-            account,
-            external_send,
-            None,
-            external_tx_index,
-            Some(expiry_height),
-            -funding_amount,
-            funding_amount,
-            0,
-            false,
-            Some(created),
-        );
-        set_history_fee(db, external_send, external_fee);
-        insert_output(
-            db,
-            external_send,
-            0,
-            Some(account),
-            None,
-            send_amount,
-            false,
-        );
-    }
-
-    /// Read `TxBase` from a synthetic `v_transactions` table.
-    ///
-    /// This is needed because the synthetic `v_transactions` table
-    /// doesn't have the note-derived aggregates that the real
-    /// `HISTORY_BASES_CTE` does.
-    ///
-    /// This helper allows us to test `read_history_bases` against the
-    /// synthetic `v_transactions` table.
-    ///
-    /// The equivalency test checks that the two paths return the same rows.
-    fn read_history_bases_via_v_transactions(
-        conn: &rusqlite::Connection,
-        account_uuid: &[u8],
-    ) -> Result<Vec<TxBase>, String> {
-        let mut stmt = conn
-            .prepare(
-                r#"
-            SELECT
-                vt.txid,
-                COALESCE(tx.id_tx, -1) AS transaction_id,
-                vt.mined_height,
-                vt.expired_unmined,
-                vt.account_balance_delta,
-                COALESCE(vt.fee_paid, 0) AS fee_paid,
-                COALESCE(vt.block_time, 0) AS block_time,
-                COALESCE(vt.total_spent, 0) AS total_spent,
-                COALESCE(vt.total_received, 0) AS total_received,
-                COALESCE(vt.is_shielding, 0) AS is_shielding,
-                vt.expiry_height,
-                COALESCE(vt.tx_index, -1) AS tx_index,
-                tx.created,
-                CAST(COALESCE(strftime('%s', tx.created), 0) AS INTEGER) AS created_time,
-                EXISTS (
-                    SELECT 1
-                    FROM transactions spent_tx
-                    JOIN orchard_received_note_spends spent
-                        ON spent.transaction_id = spent_tx.id_tx
-                    JOIN orchard_received_notes spent_note
-                        ON spent_note.id = spent.orchard_received_note_id
-                    WHERE spent_tx.txid = vt.txid
-                      AND spent_note.note_version = ?2
-                ) AS spent_orchard_note
-            FROM v_transactions vt
-            LEFT JOIN transactions tx ON tx.txid = vt.txid
-            WHERE vt.account_uuid = ?1
-            "#,
-            )
-            .map_err(|e| format!("SQL error: {e}"))?;
-
-        let rows = stmt
-            .query_map(
-                rusqlite::params![account_uuid, ORCHARD_NOTE_VERSION],
-                |row| {
-                    Ok(TxBase {
-                        txid: row.get(0)?,
-                        transaction_id: row.get(1)?,
-                        mined_height: row.get(2)?,
-                        expired_unmined: row.get(3)?,
-                        account_balance_delta: row.get(4)?,
-                        fee: row.get::<_, i64>(5)?.unsigned_abs(),
-                        block_time: row.get::<_, i64>(6)?.unsigned_abs(),
-                        total_spent: row.get::<_, i64>(7)?.unsigned_abs(),
-                        total_received: row.get::<_, i64>(8)?.unsigned_abs(),
-                        is_shielding: row.get(9)?,
-                        expiry_height: row.get(10)?,
-                        tx_index: row.get(11)?,
-                        created: row.get(12)?,
-                        created_time: row.get::<_, i64>(13)?.unsigned_abs(),
-                        spent_orchard_note: row.get(14)?,
-                    })
-                },
-            )
-            .map_err(|e| format!("Query error: {e}"))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Row error: {e}"))
-    }
-
-    /// `get_transaction_history` with its bases read from the synthetic
-    /// `v_transactions` fixture instead of `HISTORY_BASES_CTE`.
-    ///
-    /// Everything else is production code: the real
-    /// `read_history_outputs` and the real `assemble_history`.
-    fn history_from_fixture(
-        db_path: &str,
-        limit: Option<u32>,
-        account_uuid: &str,
-    ) -> Result<Vec<TransactionInfo>, String> {
-        let uuid = uuid::Uuid::parse_str(account_uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
-        let uuid_bytes = uuid.as_bytes().to_vec();
-
-        let conn = open_readonly_conn(db_path)?;
-        let read_tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("SQL error: {e}"))?;
-        let bases = read_history_bases_via_v_transactions(&read_tx, &uuid_bytes)?;
-        if bases.is_empty() {
-            return Ok(Vec::new());
-        }
-        let outputs_by_txid = read_history_outputs(
-            &read_tx,
-            &uuid_bytes,
-            bases.iter().map(|base| base.txid.as_slice()),
-        )?;
-        drop(read_tx);
-
-        Ok(assemble_history(
-            &bases,
-            &outputs_by_txid,
-            &uuid_bytes,
-            limit,
-        ))
-    }
-
-    /// Pin `HISTORY_BASES_CTE` to the upstream `v_transactions` view.
-    ///
-    /// This is the tripwire for a `zcash_client_sqlite` upgrade that
-    /// changes the view: the CTE inlines the view's aggregates minus
-    /// `transactions.raw`, so the two must return identical rows.
-    ///
-    /// It needs a database built by librustzcash itself — the synthetic
-    /// fixtures in this module define `v_transactions` as a table and
-    /// have none of the note-level schema the CTE reads. Point it at a
-    /// regtest wallet (`./run-regtest-rust-tests.sh` leaves one behind)
-    /// or any real wallet DB:
-    ///
-    /// ```text
-    /// ZORG_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
-    ///   cargo test --lib history_bases_match_v_transactions -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "requires a librustzcash-built wallet DB via ZORG_HISTORY_EQUIV_DB"]
-    fn history_bases_match_v_transactions() {
-        let db_path = std::env::var("ZORG_HISTORY_EQUIV_DB")
-            .expect("set ZORG_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
-        let conn = open_readonly_conn(&db_path).unwrap();
-
-        let accounts: Vec<Vec<u8>> = conn
-            .prepare("SELECT uuid FROM accounts ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert!(
-            !accounts.is_empty(),
-            "{db_path} has no accounts; point at a synced wallet"
-        );
-
-        let mut compared = 0usize;
-        for account in &accounts {
-            let sort = |mut rows: Vec<TxBase>| {
-                rows.sort_by(|a, b| a.txid.cmp(&b.txid));
-                rows
-            };
-            let via_cte = sort(read_history_bases(&conn, account).unwrap());
-            let via_view = sort(read_history_bases_via_v_transactions(&conn, account).unwrap());
-
-            assert_eq!(
-                via_cte.len(),
-                via_view.len(),
-                "account {}: row count differs between HISTORY_BASES_CTE and v_transactions",
-                hex::encode(account)
-            );
-            for (cte, view) in via_cte.iter().zip(via_view.iter()) {
-                assert_eq!(
-                    cte,
-                    view,
-                    "account {} tx {}: HISTORY_BASES_CTE diverged from v_transactions; \
-                     re-check the mirrored SQL against the upstream view definition",
-                    hex::encode(account),
-                    hex::encode(&cte.txid),
-                );
-            }
-            compared += via_cte.len();
-        }
-        println!(
-            "compared {compared} rows across {} accounts",
-            accounts.len()
-        );
-        assert!(compared > 0, "{db_path} has no history rows to compare");
-    }
-
-    #[test]
-    fn history_suppresses_funding_step_after_limit_filtering() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let external_send = fake_txid(0xA1);
-        let funding_step = fake_txid(0xA2);
-        let created = "2026-04-28T13:03:00Z";
-
-        insert_history_tx(
-            &db,
-            account,
-            &funding_step,
-            None,
-            2,
-            Some(1_000_100),
-            -40_000,
-            18_302_101,
-            18_262_101,
-            false,
-            Some(created),
-        );
-        set_history_fee(&db, &funding_step, 40_000);
-        insert_output_with_address(
-            &db,
-            &funding_step,
-            0,
-            Some(account),
-            Some(account),
-            10_010_000,
-            false,
-            Some("t-ephemeral"),
-            Some(2),
-        );
-
-        insert_history_tx(
-            &db,
-            account,
-            &external_send,
-            None,
-            1,
-            Some(1_000_100),
-            -10_010_000,
-            10_010_000,
-            0,
-            false,
-            Some(created),
-        );
-        set_history_fee(&db, &external_send, 10_000);
-        insert_output(
-            &db,
-            &external_send,
-            0,
-            Some(account),
-            None,
-            10_000_000,
-            false,
-        );
-
-        let got = history_from_fixture(db.path().to_str().unwrap(), Some(1), &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(external_send));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 10_000_000);
-        assert_eq!(got[0].fee, 50_000);
-    }
-
-    #[test]
-    fn history_pairs_suppressed_funding_fees_by_transparent_amount() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let external_send_a = fake_txid(0xA3);
-        let funding_step_a = fake_txid(0xA4);
-        let external_send_b = fake_txid(0xA5);
-        let funding_step_b = fake_txid(0xA6);
-        let created = "2026-04-28T13:03:00Z";
-
-        insert_zip320_history_pair(
-            &db,
-            account,
-            &funding_step_a,
-            &external_send_a,
-            created,
-            4,
-            3,
-            1_000_100,
-            10_010_000,
-            40_000,
-            10_000,
-        );
-        insert_zip320_history_pair(
-            &db,
-            account,
-            &funding_step_b,
-            &external_send_b,
-            created,
-            2,
-            1,
-            1_000_100,
-            20_015_000,
-            50_000,
-            15_000,
-        );
-
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
-
-        assert_eq!(got.len(), 2);
-
-        let row_a = got
-            .iter()
-            .find(|tx| tx.txid == TxId::from_bytes(external_send_a))
-            .unwrap();
-        assert_eq!(row_a.tx_kind, "sent");
-        assert_eq!(row_a.display_amount, 10_000_000);
-        assert_eq!(row_a.fee, 50_000);
-
-        let row_b = got
-            .iter()
-            .find(|tx| tx.txid == TxId::from_bytes(external_send_b))
-            .unwrap();
-        assert_eq!(row_b.tx_kind, "sent");
-        assert_eq!(row_b.display_amount, 20_000_000);
-        assert_eq!(row_b.fee, 65_000);
-    }
-
-    #[test]
-    fn history_pairs_same_amount_funding_fees_by_insert_order() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let external_send_a = fake_txid(0xA7);
-        let funding_step_a = fake_txid(0xA8);
-        let external_send_b = fake_txid(0xA9);
-        let funding_step_b = fake_txid(0xAA);
-        let created = "2026-04-28T13:03:00Z";
-
-        insert_zip320_history_pair(
-            &db,
-            account,
-            &funding_step_a,
-            &external_send_a,
-            created,
-            4,
-            3,
-            1_000_100,
-            10_010_000,
-            40_000,
-            10_000,
-        );
-        insert_zip320_history_pair(
-            &db,
-            account,
-            &funding_step_b,
-            &external_send_b,
-            created,
-            2,
-            1,
-            1_000_100,
-            10_010_000,
-            50_000,
-            10_000,
-        );
-
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
-
-        assert_eq!(got.len(), 2);
-
-        let row_a = got
-            .iter()
-            .find(|tx| tx.txid == TxId::from_bytes(external_send_a))
-            .unwrap();
-        assert_eq!(row_a.tx_kind, "sent");
-        assert_eq!(row_a.display_amount, 10_000_000);
-        assert_eq!(row_a.fee, 50_000);
-
-        let row_b = got
-            .iter()
-            .find(|tx| tx.txid == TxId::from_bytes(external_send_b))
-            .unwrap();
-        assert_eq!(row_b.tx_kind, "sent");
-        assert_eq!(row_b.display_amount, 10_000_000);
-        assert_eq!(row_b.fee, 60_000);
-    }
-
     #[test]
     fn history_splits_same_account_transparent_self_send() {
         let db = fresh_history_db();
@@ -2581,8 +1567,8 @@ mod tests {
             Some(0),
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
@@ -2593,93 +1579,6 @@ mod tests {
         assert_eq!(got[1].tx_kind, "received");
         assert_eq!(got[1].display_amount, 18_262_101);
         assert_eq!(got[1].display_pool, "transparent");
-    }
-
-    #[test]
-    fn history_classifies_orchard_to_ironwood_internal_transition_as_migration() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let migration_tx = fake_txid(0xB5);
-
-        insert_history_tx(
-            &db,
-            account,
-            &migration_tx,
-            None,
-            1,
-            Some(1_000_100),
-            -20_000,
-            625_000_000,
-            624_980_000,
-            false,
-            Some("2026-06-08T22:45:02Z"),
-        );
-        let output_index = insert_output_with_address_and_memo(
-            &db,
-            &migration_tx,
-            3,
-            Some(account),
-            Some(account),
-            624_980_000,
-            true,
-            None,
-            Some(1),
-            None,
-        );
-        insert_received_note_version(&db, &migration_tx, output_index, IRONWOOD_NOTE_VERSION);
-        insert_spent_note_version(&db, &migration_tx, ORCHARD_NOTE_VERSION);
-
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(migration_tx));
-        assert_eq!(got[0].tx_kind, "migration");
-        assert_eq!(got[0].display_amount, 624_980_000);
-        assert_eq!(got[0].display_pool, "ironwood");
-    }
-
-    #[test]
-    fn history_classifies_pool_4_internal_transition_as_migration() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let migration_tx = fake_txid(0xB6);
-
-        insert_history_tx(
-            &db,
-            account,
-            &migration_tx,
-            None,
-            1,
-            Some(1_000_100),
-            -20_000,
-            625_000_000,
-            624_980_000,
-            false,
-            Some("2026-06-08T22:45:02Z"),
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &migration_tx,
-            IRONWOOD_POOL,
-            Some(account),
-            Some(account),
-            624_980_000,
-            true,
-            None,
-            Some(1),
-            None,
-        );
-        insert_spent_note_version(&db, &migration_tx, ORCHARD_NOTE_VERSION);
-
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(migration_tx));
-        assert_eq!(got[0].tx_kind, "migration");
-        assert_eq!(got[0].display_amount, 624_980_000);
-        assert_eq!(got[0].display_pool, "ironwood");
     }
 
     #[test]
@@ -2712,8 +1611,8 @@ mod tests {
             false,
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(txid));
@@ -2751,8 +1650,8 @@ mod tests {
             false,
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(txid));
@@ -2802,8 +1701,8 @@ mod tests {
             Some(1),
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
@@ -2858,8 +1757,8 @@ mod tests {
             None,
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
@@ -2925,8 +1824,8 @@ mod tests {
             Some(1),
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
@@ -2981,8 +1880,8 @@ mod tests {
             Some(1),
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert!(got.is_empty());
     }
@@ -3016,8 +1915,8 @@ mod tests {
             true,
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(shielding_tx));
@@ -3079,8 +1978,8 @@ mod tests {
             None,
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].tx_kind, "sent");
@@ -3815,8 +2714,8 @@ mod tests {
             Some(0),
         );
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].txid, TxId::from_bytes(newer_self_send));
@@ -3827,7 +2726,7 @@ mod tests {
         assert!(got[2].expired_unmined);
 
         let limited =
-            history_from_fixture(db.path().to_str().unwrap(), Some(1), &account.to_string())
+            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
                 .unwrap();
 
         assert_eq!(limited.len(), 1);
@@ -3872,8 +2771,9 @@ mod tests {
         );
         insert_output(&db, &pending, 3, None, Some(account), 2_000_000, false);
 
-        let got = history_from_fixture(db.path().to_str().unwrap(), Some(1), &account.to_string())
-            .unwrap();
+        let got =
+            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
+                .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(pending));
@@ -3919,8 +2819,9 @@ mod tests {
         );
         insert_output(&db, &pending, 3, Some(account), None, 1_000_000, false);
 
-        let got = history_from_fixture(db.path().to_str().unwrap(), Some(1), &account.to_string())
-            .unwrap();
+        let got =
+            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
+                .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(pending));
@@ -3951,8 +2852,8 @@ mod tests {
         clear_tx_index(&db, &txid);
         insert_output(&db, &txid, 0, Some(account), None, 10_000_000, false);
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(txid));
@@ -3981,8 +2882,8 @@ mod tests {
         set_history_fee(&db, &txid, 10_000);
         insert_output(&db, &txid, 3, Some(account), Some(account), 9_000_000, true);
 
-        let got =
-            history_from_fixture(db.path().to_str().unwrap(), None, &account.to_string()).unwrap();
+        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
+            .unwrap();
 
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].txid, TxId::from_bytes(txid));
