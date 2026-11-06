@@ -14,7 +14,6 @@ pub mod network;
 pub mod secret_store;
 pub mod sync;
 pub mod sync_engine;
-pub(crate) mod wallet_summary_cache;
 
 struct StderrLogger;
 
