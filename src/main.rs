@@ -550,7 +550,7 @@ fn auto_sync(
             if lwd.is_some() {
                 checked = Some(url.clone());
             }
-            let tip = zorg::sync_engine::fetch_chain_tip(&url)?;
+            let tip = zorg::sync_engine::fetch_chain_tip(&url, account.network)?;
             let progress = sync::get_sync_progress(&account.db_path, account.network)?;
             if progress.is_complete && tip <= progress.chain_tip_height {
                 return Ok(());
@@ -612,7 +612,7 @@ fn sync_database(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(),
 /// Prints one wallet database's sync progress against the chain tip.
 fn print_database_status(db_path: &str, net: WalletNetwork, lwd_url: &str) -> Result<(), String> {
     let p = sync::get_sync_progress(db_path, net)?;
-    let tip = zorg::sync_engine::fetch_chain_tip(lwd_url).ok();
+    let tip = zorg::sync_engine::fetch_chain_tip(lwd_url, net).ok();
     let verified = zorg::sync_engine::last_completed_sync_at(db_path)?;
     println!(
         "{}",
@@ -627,17 +627,7 @@ fn endpoint(explicit: Option<&str>, net: &WalletNetwork) -> Result<String, Strin
     let Some(url) = explicit else {
         return Ok(resolve_default_lwd_url(net));
     };
-    let height = zorg::sync_engine::get_lightwalletd_sapling_activation_height(url)?;
-    let served = WalletNetwork::from_sapling_activation_height(height);
-    if served != Some(*net) {
-        let served = served.map_or("an unknown network".into(), |n| {
-            format!("the {} network", n.as_str())
-        });
-        return Err(format!(
-            "{url} serves {served}, but this database is on {}",
-            net.as_str()
-        ));
-    }
+    zorg::sync_engine::fetch_chain_tip(url, *net)?;
     Ok(url.to_string())
 }
 
@@ -711,7 +701,7 @@ fn create_account(
     };
     let tip = if import && interactive {
         let url = endpoint(server(net.get()).as_deref(), &net.get())?;
-        Some(zorg::sync_engine::fetch_chain_tip(&url)?)
+        Some(zorg::sync_engine::fetch_chain_tip(&url, net.get())?)
     } else {
         None
     };
@@ -812,7 +802,7 @@ fn create_account(
         let url = endpoint(server(net).as_deref(), &net)?;
         let tip = match tip {
             Some(tip) => tip,
-            None => zorg::sync_engine::fetch_chain_tip(&url)?,
+            None => zorg::sync_engine::fetch_chain_tip(&url, net)?,
         };
         if birthday > tip {
             return Err(format!(
@@ -885,7 +875,7 @@ fn cmd_create(
     lwd_url: &str,
     name: &str,
 ) -> Result<NewAccount, String> {
-    let birthday = resolve_create_birthday(|| zorg::sync_engine::fetch_chain_tip(lwd_url))?;
+    let birthday = resolve_create_birthday(|| zorg::sync_engine::fetch_chain_tip(lwd_url, net))?;
     let account_birthday = zorg::sync_engine::fetch_birthday(lwd_url, net, birthday)?;
     let mnemonic = keys::generate_mnemonic();
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
@@ -1943,7 +1933,7 @@ fn resolve_default_lwd_url(net: &WalletNetwork) -> String {
     let candidates = net.default_lightwalletd_urls();
     let Some((first_alive, attempts)) =
         candidates.iter().enumerate().find_map(
-            |(i, url)| match zorg::sync_engine::fetch_chain_tip(url) {
+            |(i, url)| match zorg::sync_engine::fetch_chain_tip(url, *net) {
                 Ok(_) => Some((url, i + 1)),
                 Err(e) => {
                     log::warn!("{url} unreachable ({e}); trying next endpoint");
