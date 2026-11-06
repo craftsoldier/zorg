@@ -1204,1692 +1204,424 @@ mod tests {
         assert_eq!(shielded_received.detail_address("received"), Some(ua));
     }
 
-    fn fresh_history_db() -> NamedTempFile {
-        let file = NamedTempFile::new().unwrap();
-        let conn = rusqlite::Connection::open(file.path()).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE accounts (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 uuid BLOB NOT NULL UNIQUE,
-                 birthday_height INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE addresses (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 account_id INTEGER NOT NULL,
-                 key_scope INTEGER NOT NULL,
-                 address TEXT NOT NULL,
-                 cached_transparent_receiver_address TEXT
-             );
-             CREATE TABLE v_transactions (
-                 account_uuid BLOB NOT NULL,
-                 txid BLOB NOT NULL,
-                 raw BLOB,
-                 mined_height INTEGER,
-                 expired_unmined INTEGER NOT NULL,
-                 account_balance_delta INTEGER NOT NULL,
-                 fee_paid INTEGER,
-                 block_time INTEGER,
-                 total_spent INTEGER,
-                 total_received INTEGER,
-                 is_shielding INTEGER,
-                 expiry_height INTEGER,
-                 tx_index INTEGER
-             );
-             CREATE TABLE transactions (
-                 id_tx INTEGER PRIMARY KEY AUTOINCREMENT,
-                 txid BLOB NOT NULL UNIQUE,
-                 created TEXT
-             );
-             CREATE TABLE sent_notes (
-                 transaction_id INTEGER NOT NULL,
-                 output_pool INTEGER NOT NULL,
-                 output_index INTEGER NOT NULL,
-                 from_account_id INTEGER NOT NULL,
-                 to_account_id INTEGER,
-                 to_address TEXT,
-                 value INTEGER NOT NULL,
-                 memo BLOB
-             );
-             CREATE TABLE v_tx_outputs (
-                 transaction_id INTEGER NOT NULL,
-                 txid BLOB NOT NULL,
-                 output_pool INTEGER NOT NULL,
-                 output_index INTEGER NOT NULL,
-                 from_account_uuid BLOB,
-                 to_account_uuid BLOB,
-                 to_address TEXT,
-                 value INTEGER NOT NULL,
-                 is_change INTEGER NOT NULL,
-                 memo BLOB
-             );",
-        )
-        .unwrap();
-        file
+    fn me() -> Vec<u8> {
+        test_account_uuid().as_bytes().to_vec()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_history_tx(
-        db: &NamedTempFile,
-        account: uuid::Uuid,
-        txid: &[u8],
-        mined_height: Option<i64>,
-        tx_index: i64,
-        expiry_height: Option<i64>,
-        account_balance_delta: i64,
-        total_spent: i64,
-        total_received: i64,
-        is_shielding: bool,
-        created: Option<&str>,
-    ) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        ensure_account_row(&conn, account);
-        conn.execute(
-            "INSERT INTO transactions (txid, created) VALUES (?1, ?2)",
-            rusqlite::params![txid, created],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO v_transactions (
-                 account_uuid, txid, raw, mined_height, expired_unmined,
-                 account_balance_delta, fee_paid, block_time, total_spent,
-                 total_received, is_shielding, expiry_height, tx_index
-             ) VALUES (?1, ?2, NULL, ?3, 0, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                account.as_bytes().as_slice(),
-                txid,
-                mined_height,
-                account_balance_delta,
-                total_spent,
-                total_received,
-                is_shielding,
-                expiry_height,
-                tx_index,
-            ],
-        )
-        .unwrap();
+    fn other() -> Vec<u8> {
+        second_test_account_uuid().as_bytes().to_vec()
     }
 
-    fn set_history_tx_raw(db: &NamedTempFile, account: uuid::Uuid, txid: &[u8], raw: &[u8]) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        conn.execute(
-            "UPDATE v_transactions SET raw = ?1 WHERE account_uuid = ?2 AND txid = ?3",
-            rusqlite::params![raw, account.as_bytes().as_slice(), txid],
-        )
-        .unwrap();
-    }
-
-    fn ensure_account_row(conn: &rusqlite::Connection, account: uuid::Uuid) -> i64 {
-        conn.execute(
-            "INSERT OR IGNORE INTO accounts (uuid) VALUES (?1)",
-            rusqlite::params![account.as_bytes().as_slice()],
-        )
-        .unwrap();
-        conn.query_row(
-            "SELECT id FROM accounts WHERE uuid = ?1",
-            rusqlite::params![account.as_bytes().as_slice()],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-
-    fn insert_output(
-        db: &NamedTempFile,
-        txid: &[u8],
-        output_pool: i64,
-        from_account: Option<uuid::Uuid>,
-        to_account: Option<uuid::Uuid>,
-        value: i64,
-        is_change: bool,
-    ) -> i64 {
-        insert_output_with_address(
-            db,
-            txid,
-            output_pool,
-            from_account,
-            to_account,
-            value,
-            is_change,
-            None,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn insert_output_with_address(
-        db: &NamedTempFile,
-        txid: &[u8],
-        output_pool: i64,
-        from_account: Option<uuid::Uuid>,
-        to_account: Option<uuid::Uuid>,
-        value: i64,
-        is_change: bool,
-        to_address: Option<&str>,
-        to_key_scope: Option<i64>,
-    ) -> i64 {
-        insert_output_with_address_and_memo(
-            db,
-            txid,
-            output_pool,
-            from_account,
-            to_account,
-            value,
-            is_change,
-            to_address,
-            to_key_scope,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn insert_output_with_address_and_memo(
-        db: &NamedTempFile,
-        txid: &[u8],
-        output_pool: i64,
-        from_account: Option<uuid::Uuid>,
-        to_account: Option<uuid::Uuid>,
-        value: i64,
-        is_change: bool,
-        to_address: Option<&str>,
-        to_key_scope: Option<i64>,
-        memo: Option<&[u8]>,
-    ) -> i64 {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        if let Some(account) = from_account {
-            ensure_account_row(&conn, account);
+    fn base(id: u8) -> TxBase {
+        TxBase {
+            txid: fake_txid(id).to_vec(),
+            mined_height: Some(100),
+            expired_unmined: false,
+            account_balance_delta: 0,
+            fee: 0,
+            block_time: 1_000,
+            total_spent: 0,
+            total_received: 0,
+            is_shielding: false,
+            tx_index: 1,
+            created_time: 0,
         }
-        if let Some(account) = to_account {
-            let account_id = ensure_account_row(&conn, account);
-            if let (Some(address), Some(key_scope)) = (to_address, to_key_scope) {
-                conn.execute(
-                    "INSERT INTO addresses (
-                         account_id, key_scope, address, cached_transparent_receiver_address
-                     ) VALUES (?1, ?2, ?3, ?3)",
-                    rusqlite::params![account_id, key_scope, address],
-                )
-                .unwrap();
-            }
+    }
+
+    fn output(
+        id: u8,
+        pool: i64,
+        from: Option<Vec<u8>>,
+        to: Option<Vec<u8>>,
+        value: u64,
+    ) -> TxOutput {
+        TxOutput {
+            txid: fake_txid(id).to_vec(),
+            output_pool: pool,
+            output_index: 0,
+            from_account_uuid: from,
+            to_account_uuid: to,
+            to_address: None,
+            sent_to_address: None,
+            transparent_receiver_address: None,
+            to_key_scope: None,
+            value,
+            memo: None,
         }
-        let transaction_id = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        let output_index = conn
-            .query_row(
-                "SELECT COALESCE(MAX(output_index) + 1, 0)
-                 FROM v_tx_outputs
-                 WHERE txid = ?1 AND output_pool = ?2",
-                rusqlite::params![txid, output_pool],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        let from_bytes = from_account.map(|uuid| uuid.as_bytes().to_vec());
-        let to_bytes = to_account.map(|uuid| uuid.as_bytes().to_vec());
-        conn.execute(
-            "INSERT INTO v_tx_outputs (
-                 transaction_id, txid, output_pool, output_index, from_account_uuid,
-                 to_account_uuid, to_address, value, is_change, memo
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                transaction_id,
-                txid,
-                output_pool,
-                output_index,
-                from_bytes,
-                to_bytes,
-                to_address,
-                value,
-                is_change,
-                memo,
-            ],
-        )
-        .unwrap();
-        output_index
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_sent_note(
-        db: &NamedTempFile,
-        txid: &[u8],
-        output_pool: i64,
-        output_index: i64,
-        from_account: uuid::Uuid,
-        to_account: Option<uuid::Uuid>,
-        to_address: Option<&str>,
-        value: i64,
-        memo: Option<&[u8]>,
+    /// `output` from the account to itself on `scope` (0 external, 1 internal change).
+    fn own(id: u8, pool: i64, value: u64, scope: i64) -> TxOutput {
+        TxOutput {
+            to_key_scope: Some(scope),
+            ..output(id, pool, Some(me()), Some(me()), value)
+        }
+    }
+
+    fn history(txs: Vec<(TxBase, Vec<TxOutput>)>, limit: Option<u32>) -> Vec<TransactionInfo> {
+        let bases: Vec<_> = txs.iter().map(|(base, _)| base.clone()).collect();
+        let outputs = txs.into_iter().map(|(base, o)| (base.txid, o)).collect();
+        assemble_history(&bases, &outputs, &me(), limit)
+    }
+
+    /// Each history row as (kind, amount, pool).
+    fn rows(history: &[TransactionInfo]) -> Vec<(&str, u64, &str)> {
+        let mut rows = Vec::new();
+        for tx in history {
+            rows.push((
+                tx.tx_kind.as_str(),
+                tx.display_amount,
+                tx.display_pool.as_str(),
+            ));
+        }
+        rows
+    }
+
+    fn spend(id: u8, delta: i64, spent: u64, received: u64) -> TxBase {
+        TxBase {
+            account_balance_delta: delta,
+            total_spent: spent,
+            total_received: received,
+            ..base(id)
+        }
+    }
+
+    #[test]
+    fn a_self_send_splits_into_sent_and_received() {
+        for (pool, name) in [(0, "transparent"), (3, "shielded")] {
+            let tx = spend(1, -15_000, 1_015_000, 1_000_000);
+            let got = history(vec![(tx, vec![own(1, pool, 1_000_000, 0)])], None);
+            assert_eq!(
+                rows(&got),
+                [("sent", 1_000_000, name), ("received", 1_000_000, name)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_self_send_with_an_unresolved_scope_is_recognized_by_its_sent_note() {
+        let hidden = own(1, 3, 1_000_000, 1);
+        let unresolved = TxOutput {
+            to_key_scope: None,
+            sent_to_address: Some("u-self".into()),
+            ..hidden.clone()
+        };
+        for (output, expected) in [(hidden, 0), (unresolved, 2)] {
+            let tx = spend(1, -15_000, 1_015_000, 1_000_000);
+            assert_eq!(history(vec![(tx, vec![output])], None).len(), expected);
+        }
+    }
+
+    #[test]
+    fn a_self_send_across_pools_is_mixed_and_hides_change() {
+        let tx = spend(1, -15_000, 6_115_000, 6_100_000);
+        let outputs = vec![
+            own(1, 0, 100_000, 0),
+            own(1, 3, 1_000_000, 0),
+            own(1, 3, 5_000_000, 1),
+        ];
+        assert_eq!(
+            rows(&history(vec![(tx, outputs)], None)),
+            [
+                ("sent", 1_100_000, "mixed"),
+                ("received", 1_100_000, "mixed")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_change_only_transaction_is_hidden() {
+        let tx = spend(1, -10_000, 17_252_102, 17_242_102);
+        let outputs = vec![own(1, 3, 7_242_102, 1), own(1, 3, 10_000_000, 1)];
+        assert!(history(vec![(tx, outputs)], None).is_empty());
+    }
+
+    #[test]
+    fn a_shielding_transaction_is_one_shielded_row() {
+        let tx = TxBase {
+            is_shielding: true,
+            ..spend(1, -10_000, 10_010_000, 10_000_000)
+        };
+        assert_eq!(
+            rows(&history(vec![(tx, vec![own(1, 3, 10_000_000, 0)])], None)),
+            [("shielded", 10_000_000, "shielded")]
+        );
+    }
+
+    #[test]
+    fn a_send_to_another_local_account_is_sent_and_the_reverse_is_received() {
+        let sent = (
+            spend(1, -5_000_000, 5_000_000, 0),
+            vec![output(1, 0, Some(me()), Some(other()), 5_000_000)],
+        );
+        let received = (
+            spend(1, 5_000_000, 0, 5_000_000),
+            vec![output(1, 0, Some(other()), Some(me()), 5_000_000)],
+        );
+        assert_eq!(
+            rows(&history(vec![sent], None)),
+            [("sent", 5_000_000, "transparent")]
+        );
+        assert_eq!(
+            rows(&history(vec![received], None)),
+            [("received", 5_000_000, "transparent")]
+        );
+    }
+
+    #[test]
+    fn a_transparent_send_excludes_its_ephemeral_and_shielded_change_outputs() {
+        let tx = spend(1, -15_000, 1_265_000, 1_150_000);
+        let outputs = vec![
+            own(1, 0, 150_000, 2),
+            own(1, 3, 1_000_000, 1),
+            output(1, 0, Some(me()), None, 100_000),
+        ];
+        assert_eq!(
+            rows(&history(vec![(tx, outputs)], None)),
+            [("sent", 100_000, "transparent")]
+        );
+    }
+
+    #[test]
+    fn a_pending_send_without_output_metadata_shows_the_spent_amount_less_the_fee() {
+        let tx = TxBase {
+            mined_height: None,
+            fee: 10_000,
+            ..spend(1, -10_010_000, 10_010_000, 9_000_000)
+        };
+        assert_eq!(
+            rows(&history(vec![(tx, vec![own(1, 3, 9_000_000, 1)])], None)),
+            [("sent", 10_000_000, "unknown")]
+        );
+    }
+
+    #[test]
+    fn pending_rows_come_first_and_the_limit_applies_after_sorting() {
+        let confirmed = (
+            spend(1, 1_000_000, 0, 1_000_000),
+            vec![output(1, 3, None, Some(me()), 1_000_000)],
+        );
+        let receiving = TxBase {
+            mined_height: None,
+            ..spend(2, 2_000_000, 0, 2_000_000)
+        };
+        let receiving = (receiving, vec![output(2, 3, None, Some(me()), 2_000_000)]);
+        let sending = TxBase {
+            mined_height: None,
+            ..spend(3, -1_010_000, 1_010_000, 0)
+        };
+        let sending = (sending, vec![output(3, 3, Some(me()), None, 1_000_000)]);
+
+        let all = history(
+            vec![confirmed.clone(), receiving.clone(), sending.clone()],
+            None,
+        );
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].tx_kind, "received");
+        assert_eq!(
+            rows(&history(vec![confirmed, receiving], Some(1))),
+            [("receiving", 2_000_000, "shielded")]
+        );
+        assert_eq!(
+            rows(&history(vec![sending], Some(1))),
+            [("sent", 1_000_000, "shielded")]
+        );
+    }
+
+    #[test]
+    fn rows_sort_by_display_time_and_an_expired_send_stays_visible() {
+        let expired = TxBase {
+            mined_height: None,
+            expired_unmined: true,
+            block_time: 0,
+            created_time: 1_000,
+            ..spend(1, -10_010_000, 10_010_000, 0)
+        };
+        let expired = (expired, vec![output(1, 0, Some(me()), None, 10_000_000)]);
+        let newer = TxBase {
+            block_time: 0,
+            created_time: 2_000,
+            ..spend(2, -40_000, 17_040_000, 17_000_000)
+        };
+        let newer = (newer, vec![own(2, 0, 17_000_000, 0)]);
+
+        let all = history(vec![expired.clone(), newer.clone()], None);
+        assert_eq!(
+            all.iter()
+                .map(|tx| (tx.txid, tx.tx_kind.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (TxId::from_bytes(fake_txid(2)), "sent"),
+                (TxId::from_bytes(fake_txid(2)), "received"),
+                (TxId::from_bytes(fake_txid(1)), "sent"),
+            ]
+        );
+        assert!(all[2].expired_unmined);
+        assert_eq!(rows(&history(vec![expired, newer], Some(1))).len(), 1);
+    }
+
+    fn detail_of(
+        base: &TxBase,
+        outputs: &[TxOutput],
+        kind: &str,
+    ) -> Vec<(Option<String>, u64, Option<String>)> {
+        let included = |o: &&TxOutput| detail_includes_output(base, o, &me(), kind);
+        let row = |o: &TxOutput| {
+            (
+                o.detail_address(kind),
+                o.value,
+                decode_text_memo(o.memo.as_deref()),
+            )
+        };
+        outputs.iter().filter(included).map(row).collect()
+    }
+
+    fn with_memo(output: TxOutput, address: &str, memo: &[u8]) -> TxOutput {
+        TxOutput {
+            to_address: Some(address.into()),
+            memo: Some(memo.to_vec()),
+            ..output
+        }
+    }
+
+    #[test]
+    fn a_sent_detail_shows_the_recipient_and_memo_but_not_change() {
+        let tx = spend(1, -1_010_000, 1_010_000, 0);
+        let outputs = [
+            with_memo(
+                output(1, 3, Some(me()), None, 1_000_000),
+                "u-recipient",
+                b"hello",
+            ),
+            with_memo(own(1, 3, 5_000, 1), "u-change", &[0xF6]),
+        ];
+        assert_eq!(
+            detail_of(&tx, &outputs, "sent"),
+            [(Some("u-recipient".into()), 1_000_000, Some("hello".into()))]
+        );
+    }
+
+    #[test]
+    fn a_transparent_recipient_is_the_receiver_t_address_then_the_sent_note_then_the_stored_address(
     ) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        let transaction_id = conn
-            .query_row(
-                "SELECT id_tx FROM transactions WHERE txid = ?1",
-                rusqlite::params![txid],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        let from_account_id = ensure_account_row(&conn, from_account);
-        let to_account_id = to_account.map(|account| ensure_account_row(&conn, account));
-        conn.execute(
-            "INSERT INTO sent_notes (
-                 transaction_id, output_pool, output_index, from_account_id,
-                 to_account_id, to_address, value, memo
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                transaction_id,
-                output_pool,
-                output_index,
-                from_account_id,
-                to_account_id,
-                to_address,
-                value,
-                memo,
-            ],
-        )
-        .unwrap();
-    }
-
-    fn set_cached_transparent_receiver_address(
-        db: &NamedTempFile,
-        account: uuid::Uuid,
-        address: &str,
-        transparent_address: &str,
-    ) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        let account_id = ensure_account_row(&conn, account);
-        let changed = conn
-            .execute(
-                "UPDATE addresses
-                 SET cached_transparent_receiver_address = ?3
-                 WHERE account_id = ?1 AND address = ?2",
-                rusqlite::params![account_id, address, transparent_address],
-            )
-            .unwrap();
-        assert_eq!(changed, 1);
-    }
-
-    fn mark_expired_unmined(db: &NamedTempFile, txid: &[u8]) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        conn.execute(
-            "UPDATE v_transactions SET expired_unmined = 1 WHERE txid = ?1",
-            rusqlite::params![txid],
-        )
-        .unwrap();
-    }
-
-    fn clear_tx_index(db: &NamedTempFile, txid: &[u8]) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        conn.execute(
-            "UPDATE v_transactions SET tx_index = NULL WHERE txid = ?1",
-            rusqlite::params![txid],
-        )
-        .unwrap();
-    }
-
-    fn set_history_fee(db: &NamedTempFile, txid: &[u8], fee_paid: i64) {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        conn.execute(
-            "UPDATE v_transactions SET fee_paid = ?2 WHERE txid = ?1",
-            rusqlite::params![txid, fee_paid],
-        )
-        .unwrap();
+        let mut out = output(1, 0, Some(me()), None, 1);
+        out.to_address = Some("u-stored".into());
+        assert_eq!(out.detail_address("sent").as_deref(), Some("u-stored"));
+        out.sent_to_address = Some("t-sent-note".into());
+        assert_eq!(out.detail_address("sent").as_deref(), Some("t-sent-note"));
+        out.transparent_receiver_address = Some("t-receiver".into());
+        assert_eq!(out.detail_address("sent").as_deref(), Some("t-receiver"));
     }
 
     #[test]
-    fn history_splits_same_account_transparent_self_send() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let self_tx = fake_txid(0xB1);
-
-        insert_history_tx(
-            &db,
-            account,
-            &self_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -40_000,
-            18_302_101,
-            18_262_101,
-            false,
-            Some("2026-04-28T13:03:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            0,
-            Some(account),
-            Some(account),
-            18_262_101,
-            false,
-            Some("t-self"),
-            Some(0),
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 18_262_101);
-        assert_eq!(got[0].display_pool, "transparent");
-        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[1].display_amount, 18_262_101);
-        assert_eq!(got[1].display_pool, "transparent");
-    }
-
-    #[test]
-    fn history_treats_send_to_other_local_account_as_sent() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let other_account = second_test_account_uuid();
-        let txid = fake_txid(0xB2);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -5_000_000,
-            5_000_000,
-            0,
-            false,
-            Some("2026-04-28T14:03:00Z"),
-        );
-        insert_output(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            Some(other_account),
-            5_000_000,
-            false,
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(txid));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 5_000_000);
-    }
-
-    #[test]
-    fn history_treats_receive_from_other_local_account_as_received() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let other_account = second_test_account_uuid();
-        let txid = fake_txid(0xB3);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            5_000_000,
-            0,
-            5_000_000,
-            false,
-            Some("2026-04-28T14:04:00Z"),
-        );
-        insert_output(
-            &db,
-            &txid,
-            0,
-            Some(other_account),
-            Some(account),
-            5_000_000,
-            false,
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(txid));
-        assert_eq!(got[0].tx_kind, "received");
-        assert_eq!(got[0].display_amount, 5_000_000);
-    }
-
-    #[test]
-    fn history_splits_same_account_shielded_self_send_and_hides_change() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let self_tx = fake_txid(0xC0);
-
-        insert_history_tx(
-            &db,
-            account,
-            &self_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            17_252_101,
-            17_237_101,
-            false,
-            Some("2026-04-28T16:32:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-self"),
-            Some(0),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            3,
-            Some(account),
-            Some(account),
-            16_237_101,
-            true,
-            Some("u-change"),
-            Some(1),
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 1_000_000);
-        assert_eq!(got[0].display_pool, "shielded");
-        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[1].display_amount, 1_000_000);
-        assert_eq!(got[1].display_pool, "shielded");
-    }
-
-    #[test]
-    fn history_uses_sent_note_when_self_send_key_scope_is_unresolved() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let self_tx = fake_txid(0xC7);
-
-        insert_history_tx(
-            &db,
-            account,
-            &self_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            1_015_000,
-            1_000_000,
-            false,
-            Some("2026-04-28T16:36:00Z"),
-        );
-        let output_index = insert_output_with_address(
-            &db,
-            &self_tx,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-self-unresolved"),
-            None,
-        );
-        insert_sent_note(
-            &db,
-            &self_tx,
-            3,
-            output_index,
-            account,
-            Some(account),
-            Some("u-self-unresolved"),
-            1_000_000,
-            None,
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 1_000_000);
-        assert_eq!(got[0].display_pool, "shielded");
-        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[1].display_amount, 1_000_000);
-        assert_eq!(got[1].display_pool, "shielded");
-    }
-
-    #[test]
-    fn history_preserves_mixed_pool_for_visible_self_outputs() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let self_tx = fake_txid(0xC6);
-
-        insert_history_tx(
-            &db,
-            account,
-            &self_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            6_115_000,
-            6_100_000,
-            false,
-            Some("2026-04-28T16:40:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            0,
-            Some(account),
-            Some(account),
-            100_000,
-            true,
-            Some("t-self"),
-            Some(0),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-self"),
-            Some(0),
-        );
-        insert_output_with_address(
-            &db,
-            &self_tx,
-            3,
-            Some(account),
-            Some(account),
-            5_000_000,
-            true,
-            Some("u-change"),
-            Some(1),
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 1_100_000);
-        assert_eq!(got[0].display_pool, "mixed");
-        assert_eq!(got[1].txid, TxId::from_bytes(self_tx));
-        assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[1].display_amount, 1_100_000);
-        assert_eq!(got[1].display_pool, "mixed");
-    }
-
-    #[test]
-    fn history_hides_change_only_internal_tx() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let change_only_tx = fake_txid(0xC3);
-
-        insert_history_tx(
-            &db,
-            account,
-            &change_only_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -10_000,
-            17_252_102,
-            17_242_102,
-            false,
-            Some("2026-04-28T15:43:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &change_only_tx,
-            3,
-            Some(account),
-            Some(account),
-            7_242_102,
-            true,
-            Some("u-change-1"),
-            Some(1),
-        );
-        insert_output_with_address(
-            &db,
-            &change_only_tx,
-            3,
-            Some(account),
-            Some(account),
-            10_000_000,
-            true,
-            Some("u-change-2"),
-            Some(1),
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn history_keeps_shielding_tx_as_single_shielded_row() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let shielding_tx = fake_txid(0xC4);
-
-        insert_history_tx(
-            &db,
-            account,
-            &shielding_tx,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -10_000,
-            10_010_000,
-            10_000_000,
-            true,
-            Some("2026-04-28T15:44:00Z"),
-        );
-        insert_output(
-            &db,
-            &shielding_tx,
-            3,
-            Some(account),
-            Some(account),
-            10_000_000,
-            true,
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(shielding_tx));
-        assert_eq!(got[0].tx_kind, "shielded");
-        assert_eq!(got[0].display_amount, 10_000_000);
-        assert_eq!(got[0].display_pool, "shielded");
-    }
-
-    #[test]
-    fn history_sent_to_transparent_excludes_shielded_change() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xC5);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            1_265_000,
-            1_150_000,
-            false,
-            Some("2026-04-28T16:45:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            Some(account),
-            150_000,
-            false,
-            Some("t-ephemeral"),
-            Some(2),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-change"),
-            Some(1),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            None,
-            100_000,
-            false,
-            Some("t-recipient"),
-            None,
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 100_000);
-        assert_eq!(got[0].display_pool, "transparent");
-    }
-
-    #[test]
-    fn detail_sent_row_returns_recipient_address_and_memo() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD1);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -1_010_000,
-            1_010_000,
-            0,
-            false,
-            Some("2026-04-28T17:00:00Z"),
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            None,
-            1_000_000,
-            false,
-            Some("u-recipient"),
-            None,
-            Some(b"hello from activity"),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "sent",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs[0].memo.as_deref(), Some("hello from activity"));
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("u-recipient"));
-        assert_eq!(got.outputs[0].amount_zatoshi, 1_000_000);
-    }
-
-    #[test]
-    fn detail_sent_to_transparent_prefers_external_recipient_over_shielded_change() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD7);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            1_265_000,
-            1_150_000,
-            false,
-            Some("2026-04-28T17:05:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            Some(account),
-            150_000,
-            false,
-            Some("t-ephemeral"),
-            Some(2),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-change"),
-            Some(1),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            None,
-            100_000,
-            false,
-            Some("t-recipient"),
-            None,
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "sent",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("t-recipient"));
-        assert_eq!(got.outputs[0].amount_zatoshi, 100_000);
-    }
-
-    #[test]
-    fn detail_sent_to_own_transparent_receiver_uses_sent_note_address() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD8);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            None,
-            1,
-            Some(1_000_100),
-            -15_000,
-            6_980_000,
-            6_965_000,
-            false,
-            Some("2026-05-15T06:11:44Z"),
-        );
-        let recipient_output_index = insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            Some(account),
-            1_200_000,
-            false,
-            Some("u-merged-own-transparent-receiver"),
-            Some(0),
-        );
-        set_cached_transparent_receiver_address(
-            &db,
-            account,
-            "u-merged-own-transparent-receiver",
-            "t-recipient",
-        );
-        insert_sent_note(
-            &db,
-            &txid,
-            0,
-            recipient_output_index,
-            account,
-            None,
-            Some("t-recipient"),
-            1_200_000,
-            None,
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            5_765_000,
-            true,
-            None,
-            None,
-            Some(&[0xF6]),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "sent",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("t-recipient"));
-        assert_eq!(got.outputs[0].amount_zatoshi, 1_200_000);
-    }
-
-    #[test]
-    fn detail_sent_to_transparent_pool_prefers_cached_transparent_receiver() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD9);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -15_000,
-            18_990_000,
-            18_975_000,
-            false,
-            Some("2026-05-14T13:14:15Z"),
-        );
-        let recipient_output_index = insert_output_with_address(
-            &db,
-            &txid,
-            0,
-            Some(account),
-            Some(account),
-            11_000_000,
-            false,
-            Some("u-known-receiver"),
-            Some(0),
-        );
-        set_cached_transparent_receiver_address(
-            &db,
-            account,
-            "u-known-receiver",
-            "t-known-receiver",
-        );
-        insert_sent_note(
-            &db,
-            &txid,
-            0,
-            recipient_output_index,
-            account,
-            None,
-            Some("u-known-receiver"),
-            11_000_000,
-            None,
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            7_975_000,
-            true,
-            None,
-            None,
-            Some(&[0xF6]),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "sent",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("t-known-receiver"));
-        assert_eq!(got.outputs[0].amount_zatoshi, 11_000_000);
-    }
-
-    #[test]
-    fn detail_received_row_does_not_invent_from_address() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD2);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            2_000_000,
-            0,
-            2_000_000,
-            false,
-            Some("2026-04-28T17:01:00Z"),
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            None,
-            Some(account),
-            2_000_000,
-            false,
-            Some("u-my-receiver"),
-            Some(0),
-            Some(b"incoming memo"),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "received",
-        )
-        .unwrap();
-
-        assert_eq!(got.source_address, None);
-        assert_eq!(got.outputs[0].memo.as_deref(), Some("incoming memo"));
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("u-my-receiver"));
-    }
-
-    #[test]
-    fn detail_keeps_every_output_memo() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xDA);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            3_000_000,
-            0,
-            3_000_000,
-            false,
-            Some("2026-04-28T17:01:00Z"),
-        );
-        for (value, memo) in [(1_000_000, b"first memo"), (2_000_000, b"other memo")] {
-            insert_output_with_address_and_memo(
-                &db,
-                &txid,
-                3,
-                None,
-                Some(account),
-                value,
-                false,
-                Some("u-my-receiver"),
-                Some(0),
-                Some(memo),
+    fn a_received_detail_shows_every_memo_and_the_source_comes_from_the_raw_tx() {
+        let tx = spend(1, 3_000_000, 0, 3_000_000);
+        let outputs = [
+            with_memo(
+                output(1, 3, None, Some(me()), 1_000_000),
+                "u-mine",
+                b"first memo",
+            ),
+            with_memo(
+                output(1, 3, None, Some(me()), 2_000_000),
+                "u-mine",
+                b"other memo",
+            ),
+        ];
+        for kind in ["received", "receiving"] {
+            let memos: Vec<_> = detail_of(&tx, &outputs, kind)
+                .into_iter()
+                .map(|row| row.2)
+                .collect();
+            assert_eq!(
+                memos,
+                [Some("first memo".into()), Some("other memo".into())]
             );
         }
 
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "received",
-        )
-        .unwrap();
-
-        let memos: Vec<_> = got.outputs.iter().map(|o| o.memo.as_deref()).collect();
-        assert_eq!(memos, [Some("first memo"), Some("other memo")]);
-    }
-
-    #[test]
-    fn detail_received_transparent_output_surfaces_bare_t_address() {
-        // End-to-end guard for BUG-1: a received transparent output stores the
-        // account unified address in to_address, but the detail must surface
-        // the bare t-address (the cached transparent receiver). Exercises the
-        // read_outputs_for_tx subquery + the detail_address received pool-0
-        // branch together (the standalone detail_address unit test only covers
-        // the in-memory half).
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD3);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            2_000_000,
-            0,
-            2_000_000,
-            false,
-            Some("2026-06-20T10:00:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            0, // transparent pool
-            None,
-            Some(account),
-            2_000_000,
-            false,
-            Some("u-my-receiver"),
-            Some(0),
-        );
-        set_cached_transparent_receiver_address(&db, account, "u-my-receiver", "t-my-receiver");
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "received",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs.len(), 1);
-        // The fix: the bare t-address, not the unified address.
-        assert_eq!(got.outputs[0].address.as_deref(), Some("t-my-receiver"));
-    }
-
-    #[test]
-    fn detail_received_row_recovers_transparent_source_from_raw_tx() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD7);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            2_000_000,
-            0,
-            2_000_000,
-            false,
-            Some("2026-04-28T17:01:00Z"),
-        );
+        let expected = transparent_source_test_address();
         let raw = transparent_source_raw_tx();
-        set_history_tx_raw(&db, account, &txid, &raw);
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            None,
-            Some(account),
-            2_000_000,
-            false,
-            Some("u-my-receiver"),
-            Some(0),
-            Some(b"incoming memo"),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "received",
-        )
-        .unwrap();
-
-        let expected_source = transparent_source_test_address();
         assert_eq!(
-            got.source_address.as_deref(),
-            Some(expected_source.as_str())
+            received_source_from_raw_transaction(WalletNetwork::Test, None),
+            None
         );
-        assert_eq!(got.outputs.len(), 1);
-    }
-
-    #[test]
-    fn detail_receiving_row_uses_received_outputs() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD6);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            None,
-            1,
-            Some(1_000_100),
-            2_000_000,
-            0,
-            2_000_000,
-            false,
-            None,
-        );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            None,
-            Some(account),
-            2_000_000,
-            false,
-            Some("u-my-pending-receiver"),
-            Some(0),
-            Some(b"pending incoming memo"),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "receiving",
-        )
-        .unwrap();
-
-        assert_eq!(got.source_address, None);
         assert_eq!(
-            got.outputs[0].memo.as_deref(),
-            Some("pending incoming memo")
-        );
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(
-            got.outputs[0].address.as_deref(),
-            Some("u-my-pending-receiver")
+            received_source_from_raw_transaction(WalletNetwork::Test, Some(&raw)),
+            Some(expected)
         );
     }
 
     #[test]
-    fn detail_separates_same_account_self_send_by_kind() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD3);
+    fn a_self_send_detail_has_the_same_visible_output_under_sent_and_received() {
+        let tx = spend(1, -10_000, 1_010_000, 1_000_000);
+        let outputs = [
+            with_memo(own(1, 3, 1_000_000, 0), "u-self", b"self memo"),
+            with_memo(own(1, 3, 500_000, 1), "u-change", &[0xF6]),
+        ];
+        for kind in ["sent", "received"] {
+            assert_eq!(
+                detail_of(&tx, &outputs, kind),
+                [(Some("u-self".into()), 1_000_000, Some("self memo".into()))]
+            );
+        }
+        assert!(detail_of(&tx, &outputs, "shielded").is_empty());
+    }
 
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -10_000,
-            1_010_000,
-            1_000_000,
-            false,
-            Some("2026-04-28T17:02:00Z"),
+    #[test]
+    fn a_shielding_detail_shows_its_shielded_outputs_only_under_shielded() {
+        let tx = TxBase {
+            is_shielding: true,
+            ..spend(1, -10_000, 1_010_000, 1_000_000)
+        };
+        let outputs = [with_memo(own(1, 3, 1_000_000, 0), "u-shielded", &[0xF6])];
+        assert_eq!(
+            detail_of(&tx, &outputs, "shielded"),
+            [(Some("u-shielded".into()), 1_000_000, None)]
         );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-self"),
-            Some(0),
-            Some(b"self memo"),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            500_000,
-            true,
-            Some("u-change"),
-            Some(1),
-        );
+        assert!(detail_of(&tx, &outputs, "sent").is_empty());
+    }
 
-        let sent = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
+    #[test]
+    fn every_query_prepares_against_the_real_wallet_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("wallet.db");
+        let db = db.to_str().unwrap();
+        let seed = crate::keys::mnemonic_to_seed(&crate::keys::generate_mnemonic()).unwrap();
+        let uuid = crate::account::init_db_and_create_account(
+            db,
+            WalletNetwork::Regtest,
+            &seed,
+            None,
+            "A",
+        )
+        .unwrap()
+        .uuid;
+        let account = uuid::Uuid::parse_str(&uuid).unwrap();
+        let (account, txid) = (account.as_bytes().as_slice(), fake_txid(1));
+
+        assert!(get_transaction_history(db, None, &uuid).unwrap().is_empty());
+        let conn = open_readonly_conn(db).unwrap();
+        assert!(read_history_outputs(&conn, account, [txid.as_slice()])
+            .unwrap()
+            .is_empty());
+        assert!(read_raw_transaction_for_tx(&conn, account, &txid)
+            .unwrap()
+            .is_none());
+        let missing = get_transaction_detail(
+            db,
+            WalletNetwork::Regtest,
+            &uuid,
             &TxId::from_bytes(txid),
             "sent",
-        )
-        .unwrap();
-        let received = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "received",
-        )
-        .unwrap();
-
-        assert_eq!(sent.outputs[0].address.as_deref(), Some("u-self"));
-        assert_eq!(sent.outputs[0].memo.as_deref(), Some("self memo"));
-        assert_eq!(sent.outputs.len(), 1);
-        assert_eq!(sent.outputs[0].amount_zatoshi, 1_000_000);
-        assert_eq!(received.outputs[0].memo.as_deref(), Some("self memo"));
-        assert_eq!(received.outputs.len(), 1);
-        assert_eq!(received.outputs[0].amount_zatoshi, 1_000_000);
-    }
-
-    #[test]
-    fn detail_hides_change_only_outputs_and_empty_memos() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD4);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -10_000,
-            1_010_000,
-            1_000_000,
-            false,
-            Some("2026-04-28T17:03:00Z"),
         );
-        insert_output_with_address_and_memo(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-change"),
-            Some(1),
-            Some(&[0xF6]),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "sent",
-        )
-        .unwrap();
-
-        assert!(got.outputs.iter().all(|output| output.memo.is_none()));
-        assert!(got.outputs.is_empty());
-    }
-
-    #[test]
-    fn detail_shielding_row_shows_its_output() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD5);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -10_000,
-            1_010_000,
-            1_000_000,
-            true,
-            Some("2026-04-28T17:04:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &txid,
-            3,
-            Some(account),
-            Some(account),
-            1_000_000,
-            true,
-            Some("u-shielded-self"),
-            Some(0),
-        );
-
-        let got = get_transaction_detail(
-            db.path().to_str().unwrap(),
-            WalletNetwork::Test,
-            &account.to_string(),
-            &TxId::from_bytes(txid),
-            "shielded",
-        )
-        .unwrap();
-
-        assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].address.as_deref(), Some("u-shielded-self"));
-        assert_eq!(got.outputs[0].amount_zatoshi, 1_000_000);
-    }
-
-    #[test]
-    fn history_sorts_by_display_timestamp_before_limit() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let older_failed = fake_txid(0xC1);
-        let newer_self_send = fake_txid(0xC2);
-
-        insert_history_tx(
-            &db,
-            account,
-            &older_failed,
-            None,
-            2,
-            Some(1_000_100),
-            -10_010_000,
-            10_010_000,
-            0,
-            false,
-            Some("2026-04-28T13:04:00Z"),
-        );
-        mark_expired_unmined(&db, &older_failed);
-        insert_output(
-            &db,
-            &older_failed,
-            0,
-            Some(account),
-            None,
-            10_000_000,
-            false,
-        );
-
-        insert_history_tx(
-            &db,
-            account,
-            &newer_self_send,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            -40_000,
-            17_040_000,
-            17_000_000,
-            false,
-            Some("2026-04-28T16:32:00Z"),
-        );
-        insert_output_with_address(
-            &db,
-            &newer_self_send,
-            0,
-            Some(account),
-            Some(account),
-            17_000_000,
-            false,
-            Some("t-newer-self"),
-            Some(0),
-        );
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 3);
-        assert_eq!(got[0].txid, TxId::from_bytes(newer_self_send));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[1].txid, TxId::from_bytes(newer_self_send));
-        assert_eq!(got[1].tx_kind, "received");
-        assert_eq!(got[2].txid, TxId::from_bytes(older_failed));
-        assert!(got[2].expired_unmined);
-
-        let limited =
-            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
-                .unwrap();
-
-        assert_eq!(limited.len(), 1);
-        assert_eq!(limited[0].txid, TxId::from_bytes(newer_self_send));
-        assert_eq!(limited[0].tx_kind, "sent");
-    }
-
-    #[test]
-    fn history_prioritizes_unmined_receiving_rows() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let confirmed = fake_txid(0xE1);
-        let pending = fake_txid(0xE2);
-
-        insert_history_tx(
-            &db,
-            account,
-            &confirmed,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            1_000_000,
-            0,
-            1_000_000,
-            false,
-            Some("2026-04-28T16:32:00Z"),
-        );
-        insert_output(&db, &confirmed, 3, None, Some(account), 1_000_000, false);
-
-        insert_history_tx(
-            &db,
-            account,
-            &pending,
-            None,
-            0,
-            Some(1_000_100),
-            2_000_000,
-            0,
-            2_000_000,
-            false,
-            None,
-        );
-        insert_output(&db, &pending, 3, None, Some(account), 2_000_000, false);
-
-        let got =
-            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
-                .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(pending));
-        assert_eq!(got[0].tx_kind, "receiving");
-        assert_eq!(got[0].mined_height, 0);
-        assert_eq!(got[0].display_amount, 2_000_000);
-    }
-
-    #[test]
-    fn history_prioritizes_active_unmined_sent_rows() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let confirmed = fake_txid(0xE3);
-        let pending = fake_txid(0xE4);
-
-        insert_history_tx(
-            &db,
-            account,
-            &confirmed,
-            Some(1_000_000),
-            1,
-            Some(1_000_100),
-            1_000_000,
-            0,
-            1_000_000,
-            false,
-            Some("2026-04-28T16:32:00Z"),
-        );
-        insert_output(&db, &confirmed, 3, None, Some(account), 1_000_000, false);
-
-        insert_history_tx(
-            &db,
-            account,
-            &pending,
-            None,
-            0,
-            Some(1_000_100),
-            -1_010_000,
-            1_010_000,
-            0,
-            false,
-            None,
-        );
-        insert_output(&db, &pending, 3, Some(account), None, 1_000_000, false);
-
-        let got =
-            get_transaction_history(db.path().to_str().unwrap(), Some(1), &account.to_string())
-                .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(pending));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].mined_height, 0);
-        assert_eq!(got[0].display_amount, 1_000_000);
-    }
-
-    #[test]
-    fn history_accepts_unmined_tx_with_null_tx_index() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD1);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            None,
-            0,
-            Some(1_000_100),
-            -10_010_000,
-            10_010_000,
-            0,
-            false,
-            Some("2026-04-28T13:04:00Z"),
-        );
-        clear_tx_index(&db, &txid);
-        insert_output(&db, &txid, 0, Some(account), None, 10_000_000, false);
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(txid));
-        assert_eq!(got[0].tx_kind, "sent");
-    }
-
-    #[test]
-    fn history_shows_unmined_sent_when_output_metadata_missing() {
-        let db = fresh_history_db();
-        let account = test_account_uuid();
-        let txid = fake_txid(0xD2);
-
-        insert_history_tx(
-            &db,
-            account,
-            &txid,
-            None,
-            0,
-            Some(1_000_100),
-            -10_010_000,
-            10_010_000,
-            9_000_000,
-            false,
-            Some("2026-04-28T13:04:00Z"),
-        );
-        set_history_fee(&db, &txid, 10_000);
-        insert_output(&db, &txid, 3, Some(account), Some(account), 9_000_000, true);
-
-        let got = get_transaction_history(db.path().to_str().unwrap(), None, &account.to_string())
-            .unwrap();
-
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(txid));
-        assert_eq!(got[0].tx_kind, "sent");
-        assert_eq!(got[0].display_amount, 10_000_000);
-        assert_eq!(got[0].mined_height, 0);
+        assert_eq!(missing.err().as_deref(), Some("Transaction not found"));
+        assert!(get_resubmittable_txs(db, 1, &HashSet::new())
+            .unwrap()
+            .is_empty());
+        let pending = [BlockHeight::from(1)..BlockHeight::from(10)];
+        assert!(get_unmined_txids_with_mined_output_evidence(db, &pending)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
