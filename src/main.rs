@@ -907,22 +907,12 @@ fn reserve_wallet_file(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("Could not create wallet database: {e}"))
 }
 
-/// A created or imported account that is not yet in `zorg_index.db`.
-struct NewAccount {
-    uuid: String,
-    unified_address: String,
-    mnemonic: zeroize::Zeroizing<String>,
-    seed: secrecy::SecretVec<u8>,
-    /// The birthday to show with the recovery phrase; `None` for imports.
-    birthday: Option<u64>,
-}
-
 fn cmd_create(
     db: &str,
     net: WalletNetwork,
     server: Option<&str>,
     name: &str,
-) -> Result<NewAccount, String> {
+) -> Result<zorg::account::NewAccount, String> {
     let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let birthday =
         resolve_create_birthday(|| RUNTIME.block_on(zorg::sync_engine::chain_tip(&mut client)))?;
@@ -936,7 +926,7 @@ fn cmd_create(
     let created =
         zorg::account::init_db_and_create_account(db, net, &seed, Some(account_birthday), name)?;
     store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
-    Ok(NewAccount {
+    Ok(zorg::account::NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
         mnemonic,
@@ -992,10 +982,10 @@ fn cmd_import(
     name: &str,
     mnemonic: zeroize::Zeroizing<String>,
     seed: secrecy::SecretVec<u8>,
-) -> Result<NewAccount, String> {
+) -> Result<zorg::account::NewAccount, String> {
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
     store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
-    Ok(NewAccount {
+    Ok(zorg::account::NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
         mnemonic,
