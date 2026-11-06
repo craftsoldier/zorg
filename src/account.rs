@@ -33,6 +33,16 @@ pub struct CreatedAccount {
     pub unified_address: String,
 }
 
+/// A created or imported account that is not yet in `zorg_index.db`.
+pub struct NewAccount {
+    pub uuid: String,
+    pub unified_address: String,
+    pub mnemonic: zeroize::Zeroizing<String>,
+    pub seed: secrecy::SecretVec<u8>,
+    /// The birthday to show with the recovery phrase; `None` for imports.
+    pub birthday: Option<u64>,
+}
+
 /// An account as `zorg_index.db` records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
