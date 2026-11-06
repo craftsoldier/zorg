@@ -15,20 +15,10 @@ mod proposal_locks;
 mod send;
 mod transactions;
 
-// Re-export the split submodules so every
-// `crate::sync::propose_send` / `::get_wallet_balance` /
-// etc. call paths keep resolving with
-// the same visibility the monolithic `sync.rs` had before the refactor.
-// Functions were `pub fn` in the old file → `pub use`. Return-value
-// structs were `pub(crate) struct` → `pub(crate) use` (they're
-// reachable from anywhere in the crate but not re-exported to
-// downstream consumers, which matches the pre-refactor surface
-// exactly).
 pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
     decrypt_and_store_transaction, get_next_available_address, get_transaction_detail,
-    get_transaction_history, get_wallet_balance, get_wallet_balances, AddressRequestKind,
-    WalletBalance,
+    get_transaction_history, get_wallet_balance, WalletBalance,
 };
 
 pub(super) fn open_wallet_db(
@@ -145,10 +135,6 @@ pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncPr
         }),
     }
 }
-
-// ======================== Send ========================
-
-// ======================== Helpers ========================
 
 pub(crate) use proposal_locks::recover_previous_process;
 
