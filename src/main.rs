@@ -462,7 +462,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 }
                 zorg::account::transparent_address(selected)?
             } else if args.options.contains_key("--new") {
-                sync::get_next_available_address(db, net, uuid, sync::AddressRequestKind::Shielded)?
+                sync::get_next_available_address(db, net, uuid)?
             } else {
                 zorg::account::current_address(selected)?
             };
@@ -1063,16 +1063,13 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
             Some(0) => {
                 terminal::copy(transparent.as_ref().unwrap_or(&address)).map(|()| "Copied.".into())
             }
-            Some(_) => sync::get_next_available_address(
-                &account.db_path,
-                account.network,
-                &account.uuid,
-                sync::AddressRequestKind::Shielded,
-            )
-            .map(|new| {
-                address = new;
-                "New address.".into()
-            }),
+            Some(_) => {
+                sync::get_next_available_address(&account.db_path, account.network, &account.uuid)
+                    .map(|new| {
+                        address = new;
+                        "New address.".into()
+                    })
+            }
         };
     }
 }

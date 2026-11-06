@@ -24,11 +24,12 @@ use std::{
 
 use rusqlite::{types::Value, vtab::array::Array, OptionalExtension};
 use transparent::address::TransparentAddress;
-use zcash_client_backend::data_api::WalletWrite;
+use zcash_client_backend::data_api::{Balance, WalletWrite};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
     memo::{Memo, MemoBytes},
+    value::Zatoshis,
 };
 
 use crate::account::parse_account_uuid;
@@ -46,16 +47,8 @@ const IRONWOOD_POOL: i64 = 4;
 
 // ======================== Balance ========================
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WalletBalanceAvailability {
-    Available,
-    SummaryUnavailable,
-    AccountUnavailable,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WalletBalance {
-    pub availability: WalletBalanceAvailability,
     pub transparent: u64,
     pub sapling: u64,
     pub orchard: u64,
@@ -72,135 +65,48 @@ pub struct WalletBalance {
     pub total: u64,
 }
 
-impl WalletBalance {
-    fn unavailable(availability: WalletBalanceAvailability) -> Self {
-        debug_assert_ne!(availability, WalletBalanceAvailability::Available);
-        Self {
-            availability,
-            transparent: 0,
-            sapling: 0,
-            orchard: 0,
-            ironwood: 0,
-            transparent_locked: 0,
-            transparent_pending: 0,
-            change_pending_confirmation: 0,
-            value_pending_spendability: 0,
-            spendable: 0,
-            locked: 0,
-            total: 0,
-        }
-    }
-}
-
 pub fn get_wallet_balance(
     db_path: &str,
     network: WalletNetwork,
     account_uuid: &str,
 ) -> Result<WalletBalance, String> {
-    let mut balances = get_wallet_balances(db_path, network, std::slice::from_ref(&account_uuid))?;
-    Ok(balances
-        .pop()
-        .expect("get_wallet_balances returns one entry per requested account"))
-}
-
-/// Balances for several accounts from a single `get_wallet_summary`.
-///
-/// `get_wallet_summary` computes every account's balance regardless of
-/// which one the caller wants, so asking it once per account is
-/// quadratic in account count. Callers that need more than one account
-/// — a caller wanting several accounts pays for one get_wallet_summary instead of one per account —
-/// must use this instead of looping over `get_wallet_balance`.
-///
-/// Returns one entry per requested uuid, in the order given. An account
-/// missing from the summary yields `AccountUnavailable` rather than an
-/// error, matching the single-account behaviour, so one unknown account
-/// cannot fail the whole batch.
-pub fn get_wallet_balances(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuids: &[&str],
-) -> Result<Vec<WalletBalance>, String> {
-    let target_ids = account_uuids
-        .iter()
-        .map(|uuid| parse_account_uuid(uuid))
-        .collect::<Result<Vec<_>, _>>()?;
-
+    let account_id = parse_account_uuid(account_uuid)?;
     let summary = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
-
-    let Some(summary) = summary else {
-        return Ok(target_ids
-            .iter()
-            .map(|_| WalletBalance::unavailable(WalletBalanceAvailability::SummaryUnavailable))
-            .collect());
+    let Some(b) = summary
+        .as_ref()
+        .and_then(|s| s.account_balances().get(&account_id))
+    else {
+        return Ok(WalletBalance::default());
     };
-
-    Ok(target_ids
-        .iter()
-        .map(
-            |target_id| match summary.account_balances().get(target_id) {
-                Some(b) => {
-                    let transparent_change =
-                        u64::from(b.unshielded_balance().change_pending_confirmation());
-                    let sapling_change =
-                        u64::from(b.sapling_balance().change_pending_confirmation());
-                    let orchard_change =
-                        u64::from(b.orchard_balance().change_pending_confirmation());
-                    let ironwood_change =
-                        u64::from(b.ironwood_balance().change_pending_confirmation());
-                    let transparent_pending =
-                        u64::from(b.unshielded_balance().value_pending_spendability());
-                    let sapling_pending =
-                        u64::from(b.sapling_balance().value_pending_spendability());
-                    let orchard_pending =
-                        u64::from(b.orchard_balance().value_pending_spendability());
-                    let ironwood_pending =
-                        u64::from(b.ironwood_balance().value_pending_spendability());
-
-                    WalletBalance {
-                        availability: WalletBalanceAvailability::Available,
-                        transparent: u64::from(b.unshielded_balance().spendable_value()),
-                        sapling: u64::from(b.sapling_balance().spendable_value()),
-                        orchard: u64::from(b.orchard_balance().spendable_value()),
-                        ironwood: u64::from(b.ironwood_balance().spendable_value()),
-                        transparent_locked: u64::from(b.unshielded_balance().locked_value()),
-                        transparent_pending: transparent_change + transparent_pending,
-                        change_pending_confirmation: transparent_change
-                            + sapling_change
-                            + orchard_change
-                            + ironwood_change,
-                        value_pending_spendability: transparent_pending
-                            + sapling_pending
-                            + orchard_pending
-                            + ironwood_pending,
-                        spendable: u64::from(b.sapling_balance().spendable_value())
-                            + u64::from(b.orchard_balance().spendable_value())
-                            + u64::from(b.ironwood_balance().spendable_value()),
-                        locked: u64::from(b.unshielded_balance().locked_value())
-                            + u64::from(b.sapling_balance().locked_value())
-                            + u64::from(b.orchard_balance().locked_value())
-                            + u64::from(b.ironwood_balance().locked_value()),
-                        total: u64::from(b.unshielded_balance().spendable_value())
-                            + u64::from(b.sapling_balance().spendable_value())
-                            + u64::from(b.orchard_balance().spendable_value())
-                            + u64::from(b.ironwood_balance().spendable_value())
-                            + u64::from(b.unshielded_balance().locked_value())
-                            + u64::from(b.sapling_balance().locked_value())
-                            + u64::from(b.orchard_balance().locked_value())
-                            + u64::from(b.ironwood_balance().locked_value())
-                            + transparent_change
-                            + transparent_pending
-                            + sapling_change
-                            + sapling_pending
-                            + orchard_change
-                            + orchard_pending
-                            + ironwood_change
-                            + ironwood_pending,
-                    }
-                }
-                None => WalletBalance::unavailable(WalletBalanceAvailability::AccountUnavailable),
-            },
-        )
-        .collect())
+    let pools = [
+        b.unshielded_balance(),
+        *b.sapling_balance(),
+        *b.orchard_balance(),
+        *b.ironwood_balance(),
+    ];
+    let sum =
+        |value: fn(&Balance) -> Zatoshis| pools.iter().map(|p| u64::from(value(p))).sum::<u64>();
+    let [transparent, sapling, orchard, ironwood] = pools.map(|p| u64::from(p.spendable_value()));
+    let (change, pending, locked) = (
+        sum(Balance::change_pending_confirmation),
+        sum(Balance::value_pending_spendability),
+        sum(Balance::locked_value),
+    );
+    let unshielded = pools[0];
+    Ok(WalletBalance {
+        transparent,
+        sapling,
+        orchard,
+        ironwood,
+        transparent_locked: u64::from(unshielded.locked_value()),
+        transparent_pending: u64::from(unshielded.change_pending_confirmation())
+            + u64::from(unshielded.value_pending_spendability()),
+        change_pending_confirmation: change,
+        value_pending_spendability: pending,
+        spendable: sapling + orchard + ironwood,
+        locked,
+        total: transparent + sapling + orchard + ironwood + locked + change + pending,
+    })
 }
 
 // ======================== Diversified Address ========================
@@ -209,14 +115,12 @@ pub fn get_next_available_address(
     db_path: &str,
     network: WalletNetwork,
     account_uuid: &str,
-    address_request: AddressRequestKind,
 ) -> Result<String, String> {
     let account_id = parse_account_uuid(account_uuid)?;
-    let req = address_request.to_unified_address_request();
 
     let (ua, _) = with_wallet_db_write_lock("transactions.get_next_available_address", || {
         let mut db = open_wallet_db(db_path, network)?;
-        db.get_next_available_address(account_id, req)
+        db.get_next_available_address(account_id, crate::keys::shielded_address_request())
             .map_err(|e| match e {
                 zcash_client_sqlite::error::SqliteClientError::ChainHeightUnknown => {
                     "Sync this account before making a new address".to_string()
@@ -226,19 +130,6 @@ pub fn get_next_available_address(
             .ok_or_else(|| "No address available".to_string())
     })?;
     Ok(ua.encode(&network))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AddressRequestKind {
-    Shielded,
-}
-
-impl AddressRequestKind {
-    fn to_unified_address_request(self) -> zcash_keys::keys::UnifiedAddressRequest {
-        match self {
-            AddressRequestKind::Shielded => crate::keys::shielded_address_request(),
-        }
-    }
 }
 
 /// Returns unmined transactions that the wallet previously discovered in a
@@ -1702,23 +1593,6 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn unavailable_wallet_balance_is_zero_but_not_available() {
-        for availability in [
-            WalletBalanceAvailability::SummaryUnavailable,
-            WalletBalanceAvailability::AccountUnavailable,
-        ] {
-            let balance = WalletBalance::unavailable(availability);
-            assert_eq!(balance.availability, availability);
-            assert_eq!(balance.transparent, 0);
-            assert_eq!(balance.sapling, 0);
-            assert_eq!(balance.orchard, 0);
-            assert_eq!(balance.transparent_pending, 0);
-            assert_eq!(balance.change_pending_confirmation, 0);
-            assert_eq!(balance.value_pending_spendability, 0);
-        }
-    }
-
     /// Build a throwaway SQLite database with a minimal
     /// `v_transactions` table and return its `NamedTempFile`
     /// handle. Tests keep the handle alive for the duration of the
@@ -2605,71 +2479,6 @@ mod tests {
             &uuid_bytes,
             limit,
         ))
-    }
-
-    /// Pin the batched balance read to the single-account one.
-    ///
-    /// `get_wallet_balances` exists so a caller wanting several accounts
-    /// pays for one `get_wallet_summary` instead of one per account. It
-    /// must return exactly what looping over `get_wallet_balance` would,
-    /// including order and the unavailable-account fallbacks.
-    ///
-    /// Needs a real wallet DB, same as the history equivalence check:
-    ///
-    /// ```text
-    /// ZORG_HISTORY_EQUIV_DB=/path/to/zcash_wallet.db \
-    ///   cargo test --lib wallet_balances_batch_matches_single -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "requires a librustzcash-built wallet DB via ZORG_HISTORY_EQUIV_DB"]
-    fn wallet_balances_batch_matches_single() {
-        let db_path = std::env::var("ZORG_HISTORY_EQUIV_DB")
-            .expect("set ZORG_HISTORY_EQUIV_DB to a librustzcash-built wallet DB");
-        let conn = open_readonly_conn(&db_path).unwrap();
-        let uuids: Vec<String> = conn
-            .prepare("SELECT uuid FROM accounts ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
-            .unwrap()
-            .map(|raw| uuid::Uuid::from_slice(&raw.unwrap()).unwrap().to_string())
-            .collect();
-        assert!(!uuids.is_empty(), "{db_path} has no accounts");
-        drop(conn);
-
-        let network = WalletNetwork::Main;
-        let refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        let batched = get_wallet_balances(&db_path, network, &refs).unwrap();
-        assert_eq!(
-            batched.len(),
-            uuids.len(),
-            "batch must return one entry per requested account"
-        );
-
-        for (uuid, batch_entry) in uuids.iter().zip(batched.iter()) {
-            let single = get_wallet_balance(&db_path, network, uuid).unwrap();
-            assert_eq!(
-                batch_entry, &single,
-                "account {uuid}: batched balance diverged from get_wallet_balance"
-            );
-        }
-
-        // An account absent from the summary must degrade per entry, not
-        // fail the batch, so one stale uuid cannot blank a whole sweep.
-        let missing = uuid::Uuid::nil().to_string();
-        let mut with_missing: Vec<&str> = refs.clone();
-        with_missing.push(&missing);
-        let mixed = get_wallet_balances(&db_path, network, &with_missing).unwrap();
-        assert_eq!(mixed.len(), with_missing.len());
-        assert_eq!(
-            mixed.last().unwrap().availability,
-            WalletBalanceAvailability::AccountUnavailable
-        );
-        assert_eq!(
-            &mixed[..refs.len()],
-            &batched[..],
-            "a missing account must not disturb the others"
-        );
-        println!("compared {} accounts", uuids.len());
     }
 
     /// Pin `HISTORY_BASES_CTE` to the upstream `v_transactions` view.

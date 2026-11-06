@@ -170,21 +170,6 @@ impl SyncError {
             _ => None,
         }
     }
-
-    /// Whether this error is safe to treat as an endpoint failover
-    /// candidate. Local DB, parser, continuity, and wallet-state errors
-    /// must not cause endpoint switching.
-    #[allow(dead_code)]
-    pub(crate) fn is_endpoint_failover_candidate(&self) -> bool {
-        match self {
-            SyncError::Network(message) => is_endpoint_failover_candidate_message(message),
-            SyncError::Continuity { .. }
-            | SyncError::Db(_)
-            | SyncError::Parse(_)
-            | SyncError::WrongNetwork(_) => false,
-            SyncError::Other(message) => is_endpoint_failover_candidate_message(message),
-        }
-    }
 }
 
 /// Whether `message` describes a network failure that another server might not have.
@@ -258,7 +243,6 @@ mod tests {
     fn wrong_network_is_fatal_and_untagged() {
         let e = SyncError::WrongNetwork("http://x serves the main network".into());
         assert_eq!(e.recovery_strategy(), RecoveryStrategy::Fatal);
-        assert!(!e.is_endpoint_failover_candidate());
         assert_eq!(format!("{e}"), "http://x serves the main network");
     }
 
@@ -276,21 +260,15 @@ mod tests {
 
     #[test]
     fn endpoint_failover_candidate_is_limited_to_transport_failures() {
-        assert!(
-            SyncError::Network("gRPC connect failed: connection refused".into())
-                .is_endpoint_failover_candidate()
-        );
-        assert!(
-            SyncError::Other("DeadlineExceeded while reading stream".into())
-                .is_endpoint_failover_candidate()
-        );
-
-        assert!(!SyncError::Db("database is locked".into()).is_endpoint_failover_candidate());
-        assert!(!SyncError::Continuity {
-            at_height: 123,
-            detail: "PrevHashMismatch".into(),
-        }
-        .is_endpoint_failover_candidate());
+        assert!(is_endpoint_failover_candidate_message(
+            "gRPC connect failed: connection refused"
+        ));
+        assert!(is_endpoint_failover_candidate_message(
+            "DeadlineExceeded while reading stream"
+        ));
+        assert!(!is_endpoint_failover_candidate_message(
+            "database is locked"
+        ));
         assert!(!is_endpoint_failover_candidate_message(
             "Endpoint is for test, but this wallet uses main."
         ));
