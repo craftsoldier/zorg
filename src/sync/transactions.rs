@@ -68,7 +68,7 @@ pub fn get_wallet_balance(
     account_uuid: &str,
 ) -> Result<WalletBalance, String> {
     let account_id = parse_account_uuid(account_uuid)?;
-    let summary = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?;
+    let summary = crate::db::wallet_summary(db_path, network)?;
     let Some(b) = summary
         .as_ref()
         .and_then(|s| s.account_balances().get(&account_id))

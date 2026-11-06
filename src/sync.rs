@@ -146,8 +146,7 @@ pub use send::{
 /// How much of the wallet, from its birthday to the chain tip, has been
 /// scanned, from 0 to 1, or none before the first sync.
 pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<f64>, String> {
-    let Some(summary) = crate::wallet_summary_cache::get_wallet_summary_cached(db_path, network)?
-    else {
+    let Some(summary) = crate::db::wallet_summary(db_path, network)? else {
         return Ok(None);
     };
     let progress = summary.progress();

@@ -1,13 +1,11 @@
 use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
-use zcash_client_sqlite::{util::SystemClock, WalletDb};
+use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, WalletRead, WalletSummary};
+use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
 
 use crate::network::WalletNetwork;
 
@@ -22,25 +20,14 @@ pub(crate) const ACCOUNT_MUTATION_DB_BUSY_TIMEOUT: Duration = Duration::from_sec
 pub(crate) const SYNC_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const READ_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Seqlock-style write epoch for in-process wallet-summary cache invalidation.
-///
-/// Even values mean no write is in progress. Entering
-/// [`with_wallet_db_write_lock`] makes the epoch odd; the matching RAII
-/// drop (including unwind) makes it even again. Summary readers publish
-/// only when the epoch is even and unchanged across the load.
-static WALLET_DB_WRITE_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-struct WriteEpochGuard;
-
-impl Drop for WriteEpochGuard {
-    fn drop(&mut self) {
-        WALLET_DB_WRITE_EPOCH.fetch_add(1, Ordering::Release);
-    }
-}
-
-/// Current wallet-DB write epoch. Even = idle; odd = a locked write is active.
-pub(crate) fn wallet_db_write_epoch() -> u64 {
-    WALLET_DB_WRITE_EPOCH.load(Ordering::Acquire)
+/// `get_wallet_summary` for the default confirmation policy, read on a new connection.
+pub(crate) fn wallet_summary(
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<Option<WalletSummary<AccountUuid>>, String> {
+    open_wallet_db_for_read_with_timeout(db_path, network, READ_DB_BUSY_TIMEOUT)?
+        .get_wallet_summary(ConfirmationsPolicy::default())
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn open_wallet_db_with_timeout(
@@ -114,11 +101,6 @@ pub(crate) fn with_wallet_db_write_lock<T>(
     // Serializes wallet-DB writes across foreground
     // calls and Rust sync tasks inside this process. This
     // does not coordinate with a separate OS process that opens the same DB.
-    //
-    // Also drives a seqlock-style epoch so the process-wide wallet-summary
-    // cache can reject loads that overlapped a write. The epoch is global
-    // (not keyed by path), which may over-invalidate unrelated wallets —
-    // correctness over precision.
     static WALLET_DB_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     let lock = WALLET_DB_WRITE_LOCK.get_or_init(|| Mutex::new(()));
@@ -139,10 +121,6 @@ pub(crate) fn with_wallet_db_write_lock<T>(
         );
     }
 
-    // Odd while the write closure runs; Drop makes it even on every exit.
-    WALLET_DB_WRITE_EPOCH.fetch_add(1, Ordering::AcqRel);
-    let _epoch_guard = WriteEpochGuard;
-
     let hold_start = Instant::now();
     let result = write();
     let held = hold_start.elapsed();
@@ -153,7 +131,6 @@ pub(crate) fn with_wallet_db_write_lock<T>(
         );
     }
 
-    drop(_epoch_guard);
     drop(guard);
     result
 }
@@ -220,28 +197,15 @@ mod tests {
     }
 
     #[test]
-    fn write_lock_epoch_is_odd_inside_critical_section() {
-        // Under `cargo test` parallelism other suites may hold the write lock,
-        // so only assert the epoch parity that is exclusive to our section.
-        with_wallet_db_write_lock("test_epoch", || {
-            assert_eq!(wallet_db_write_epoch() % 2, 1);
-        });
-    }
-
-    #[test]
-    fn write_lock_epoch_completes_on_unwind() {
+    fn write_lock_is_released_on_unwind() {
         let result = catch_unwind(AssertUnwindSafe(|| {
             with_wallet_db_write_lock("test_panic", || {
-                panic!("force unwind while write epoch is odd");
+                panic!("force unwind inside the write lock");
             });
         }));
         assert!(result.is_err());
 
-        // The Drop guard must have made the epoch even again and released the
-        // mutex; otherwise this acquisition would hang or see a stuck odd epoch
-        // owned by the panicked section.
-        with_wallet_db_write_lock("test_after_panic", || {
-            assert_eq!(wallet_db_write_epoch() % 2, 1);
-        });
+        // A poisoned lock must still be acquirable; otherwise this would hang.
+        with_wallet_db_write_lock("test_after_panic", || {});
     }
 }
