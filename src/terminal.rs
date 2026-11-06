@@ -234,24 +234,6 @@ pub fn ask(
     }
 }
 
-/// Ignores SIGINT until dropped. `rpassword` raises SIGINT on Ctrl-C before it
-/// returns, which would kill zorg with echo and signals still switched off.
-struct IgnoreSigint(libc::sighandler_t);
-
-impl IgnoreSigint {
-    fn new() -> Self {
-        // SAFETY: `signal` only swaps the process's SIGINT disposition.
-        Self(unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) })
-    }
-}
-
-impl Drop for IgnoreSigint {
-    fn drop(&mut self) {
-        // SAFETY: restores the disposition `new` replaced.
-        unsafe { libc::signal(libc::SIGINT, self.0) };
-    }
-}
-
 /// Reads a hidden recovery phrase, from the terminal or, when stdin is
 /// piped, from stdin. At a terminal, input that `check` rejects is asked for
 /// again. Returns the phrase and the check's value.
@@ -264,21 +246,18 @@ pub fn read_mnemonic<T>(
         note("Enter to continue · Ctrl-C to cancel");
     }
     loop {
-        let phrase = if std::io::stdin().is_terminal() {
-            let _ignored = IgnoreSigint::new();
-            rpassword::prompt_password(&prompt)
+        let mut phrase = zeroize::Zeroizing::new(String::new());
+        if std::io::stdin().is_terminal() {
+            let term = Term::stderr();
+            term.write_str(&prompt)
+                .and_then(|()| term.read_secure_line())
+                .map(|line| *phrase = line)
         } else {
-            let piped = rpassword::ConfigBuilder::new()
-                .input_reader(std::io::stdin())
-                .output_discard()
-                .build();
-            rpassword::read_password_with_config(piped)
+            std::io::stdin().read_line(&mut phrase).map(drop)
         }
-        .map(zeroize::Zeroizing::new)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::Interrupted => INTERRUPTED.to_string(),
-            _ => format!("Failed to read mnemonic: {e}"),
-        })?;
+        .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
+        let kept = phrase.trim_end_matches(['\r', '\n']).len();
+        phrase.truncate(kept);
         match check(&phrase) {
             Ok(value) => return Ok((phrase, value)),
             Err(error) if interactive() => failure(&error),
