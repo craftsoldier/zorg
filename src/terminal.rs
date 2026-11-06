@@ -236,34 +236,44 @@ pub fn ask(
 
 /// Reads a hidden recovery phrase, from the terminal or, when stdin is
 /// piped, from stdin. At a terminal, input that `check` rejects is asked for
-/// again. Returns the phrase and the check's value.
+/// again, and an empty line, or Esc then Enter, fails with [`CANCELLED`].
+/// Returns the phrase and the check's value.
 pub fn read_mnemonic<T>(
     network: WalletNetwork,
     check: impl Fn(&str) -> Result<T, String>,
 ) -> Result<(zeroize::Zeroizing<String>, T), String> {
-    let prompt = format!("Recovery phrase · {} (hidden): ", network.display_name());
-    if interactive() {
-        note("Enter to continue · Ctrl-C to cancel");
-    }
-    loop {
-        let mut phrase = zeroize::Zeroizing::new(String::new());
-        if std::io::stdin().is_terminal() {
-            let term = Term::stderr();
-            term.write_str(&prompt)
-                .and_then(|()| term.read_secure_line())
-                .map(|line| *phrase = line)
-        } else {
-            std::io::stdin().read_line(&mut phrase).map(drop)
+    let cancelled = |line: &str| line.is_empty() || line == "\x1b";
+    let mut phrase = zeroize::Zeroizing::new(String::new());
+    if std::io::stdin().is_terminal() {
+        let prompt = format!(
+            "Recovery phrase · {} (hidden, Esc then Enter cancels)",
+            network.display_name()
+        );
+        *phrase = dialoguer::Password::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt(prompt)
+            .allow_empty_password(true)
+            .report(false)
+            .validate_with(|line: &String| {
+                if cancelled(line) {
+                    Ok(())
+                } else {
+                    check(line).map(drop)
+                }
+            })
+            .interact()
+            .map_err(|e| e.to_string())?;
+        if cancelled(&phrase) {
+            return Err(CANCELLED.to_string());
         }
-        .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
+    } else {
+        std::io::stdin()
+            .read_line(&mut phrase)
+            .map_err(|e| format!("Failed to read mnemonic: {e}"))?;
         let kept = phrase.trim_end_matches(['\r', '\n']).len();
         phrase.truncate(kept);
-        match check(&phrase) {
-            Ok(value) => return Ok((phrase, value)),
-            Err(error) if interactive() => failure(&error),
-            Err(error) => return Err(error),
-        }
     }
+    let value = check(&phrase)?;
+    Ok((phrase, value))
 }
 
 /// The approximate initial-sync range for a baseline duration in seconds.
