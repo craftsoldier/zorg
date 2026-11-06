@@ -661,7 +661,7 @@ fn print_database_status(
     let verified = zorg::sync_engine::last_completed_sync_at(db_path)?;
     println!(
         "{}",
-        render_sync_status(p.scanned_height, tip, verified, unix_now())
+        terminal::render_sync_status(p.scanned_height, tip, verified, terminal::unix_now())
     );
     Ok(())
 }
@@ -887,7 +887,10 @@ fn create_account(
         return Err(e);
     }
     if let Some(birthday) = created.birthday {
-        print!("{}", *recovery_phrase_text(&created.mnemonic, birthday));
+        print!(
+            "{}",
+            *terminal::recovery_phrase_text(&created.mnemonic, birthday)
+        );
     }
     println!("Account: {name}");
     println!("Address: {}", created.unified_address);
@@ -965,30 +968,6 @@ fn store_and_verify_mnemonic(
         let _ = zorg::secret_store::delete_mnemonic(db, net, account_uuid);
     }
     verified
-}
-
-/// The recovery phrase as numbered words, followed by the wallet birthday and
-/// how to keep them.
-fn recovery_phrase_text(mnemonic: &str, birthday: u64) -> zeroize::Zeroizing<String> {
-    use std::fmt::Write;
-
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    let mut text = zeroize::Zeroizing::new(String::with_capacity(256 + 16 * words.len()));
-    text.push_str("Recovery phrase (write it down and keep it offline):\n");
-    for (row, chunk) in words.chunks(4).enumerate() {
-        for (col, word) in chunk.iter().enumerate() {
-            let number = row * 4 + col + 1;
-            if col + 1 == chunk.len() {
-                let _ = write!(text, "  {number:>2}. {word}");
-            } else {
-                let _ = write!(text, "  {number:>2}. {word:<8}");
-            }
-        }
-        text.push('\n');
-    }
-    let _ = writeln!(text, "Wallet birthday: {birthday}");
-    text.push_str("A protected copy stays on this Mac.\n");
-    text
 }
 
 fn resolve_create_birthday(fetch_tip: impl FnOnce() -> Result<u64, String>) -> Result<u64, String> {
@@ -1280,7 +1259,7 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
             .clamp(1, 10);
         let start = current / page_size * page_size;
         let end = (start + page_size).min(txs.len());
-        let now = unix_now();
+        let now = terminal::unix_now();
         let items: Vec<String> = txs[start..end]
             .iter()
             .map(|tx| {
@@ -1302,7 +1281,7 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
                     0 if tx.expired_unmined => "expired".to_string(),
                     0 => "pending".to_string(),
                     height if tx.block_time == 0 => format!("block {height}"),
-                    _ => ago(now.saturating_sub(tx.block_time)),
+                    _ => terminal::ago(now.saturating_sub(tx.block_time)),
                 };
                 format!("{arrow} {kind:<10} {amount:>18}   {when}")
             })
@@ -1336,23 +1315,6 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
         }
         println!();
         terminal::wait_for("Esc back")?;
-    }
-}
-
-/// How long ago `seconds` is, in words: "just now", "5 min ago", "yesterday".
-fn ago(seconds: u64) -> String {
-    const HOUR: u64 = 3_600;
-    const DAY: u64 = 24 * HOUR;
-    match seconds {
-        0..60 => "just now".into(),
-        60..HOUR => format!("{} min ago", seconds / 60),
-        HOUR..DAY => format!("{} h ago", seconds / HOUR),
-        DAY..172_800 => "yesterday".into(),
-        172_800..2_592_000 => format!("{} days ago", seconds / DAY),
-        2_592_000..5_184_000 => "a month ago".into(),
-        5_184_000..31_536_000 => format!("{} months ago", seconds / 2_592_000),
-        31_536_000..63_072_000 => "a year ago".into(),
-        _ => format!("{} years ago", seconds / 31_536_000),
     }
 }
 
@@ -1463,7 +1425,10 @@ fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> 
     let mut status: Result<String, String> = Ok(String::new());
     terminal::clear()?;
     loop {
-        print!("{}", *recovery_phrase_text(&mnemonic, u64::from(birthday)));
+        print!(
+            "{}",
+            *terminal::recovery_phrase_text(&mnemonic, u64::from(birthday))
+        );
         match &status {
             Ok(message) => terminal::note(message),
             Err(error) => terminal::failure(error),
@@ -1481,18 +1446,18 @@ fn cmd_recovery(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
     print!(
         "{}",
-        *recovery_phrase_text(&phrase(account)?, u64::from(birthday))
+        *terminal::recovery_phrase_text(&phrase(account)?, u64::from(birthday))
     );
     Ok(())
 }
 
 fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     let bal = sync::get_wallet_balance(db, net, uuid)?;
-    println!("Spendable:  {}", fmt_zec(bal.spendable, net));
+    println!("Spendable:  {}", terminal::fmt_zec(bal.spendable, net));
     let pending = bal.change_pending_confirmation + bal.value_pending_spendability;
-    println!("Pending:    {}", fmt_zec(pending, net));
-    println!("Locked:     {}", fmt_zec(bal.locked, net));
-    println!("Total:      {}", fmt_zec(bal.total, net));
+    println!("Pending:    {}", terminal::fmt_zec(pending, net));
+    println!("Locked:     {}", terminal::fmt_zec(bal.locked, net));
+    println!("Total:      {}", terminal::fmt_zec(bal.total, net));
     for (pool, value) in [
         ("Transparent:", bal.transparent),
         ("Sapling:", bal.sapling),
@@ -1500,7 +1465,7 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
         ("Ironwood:", bal.ironwood),
     ] {
         if value > 0 {
-            println!("  {pool:<13} {}", fmt_zec(value, net));
+            println!("  {pool:<13} {}", terminal::fmt_zec(value, net));
         }
     }
     Ok(())
@@ -1633,7 +1598,10 @@ fn cmd_send(
                     }
                     progress.show("Waiting for Touch ID…");
                 } else {
-                    print!("{}", send_summary(to, amount_zat, proposed_fee, memo, net));
+                    print!(
+                        "{}",
+                        terminal::send_summary(to, amount_zat, proposed_fee, memo, net)
+                    );
                 }
                 let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
                 if interactive {
@@ -1723,8 +1691,8 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
             } else {
                 print!(
                     "Shield {}\nFee: {}\n",
-                    fmt_zec(amount, net),
-                    fmt_zec(fee, net)
+                    terminal::fmt_zec(amount, net),
+                    terminal::fmt_zec(fee, net)
                 );
             }
             let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
@@ -1775,25 +1743,6 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     }
 }
 
-/// The amount, recipient, fee and memo of a send, shown before it is authorized.
-fn send_summary(
-    to: &str,
-    amount_zat: u64,
-    fee_zat: u64,
-    memo: Option<&str>,
-    net: WalletNetwork,
-) -> String {
-    let mut text = format!(
-        "Send {} to\n  {to}\nFee: {}\n",
-        fmt_zec(amount_zat, net),
-        fmt_zec(fee_zat, net)
-    );
-    if let Some(memo) = memo {
-        text.push_str(&format!("Memo: {memo:?}\n"));
-    }
-    text
-}
-
 fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> Result<(), String> {
     let txs = sync::get_transaction_history(db, limit, uuid)?;
     if txs.is_empty() {
@@ -1809,7 +1758,7 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
             "  {:<10} {:<10} {:>16}  {:<8}  {}",
             tx.tx_kind,
             tx.display_pool,
-            fmt_zec(tx.display_amount, net),
+            terminal::fmt_zec(tx.display_amount, net),
             height,
             tx.txid
         );
@@ -1902,52 +1851,6 @@ fn parse_txid(text: &str) -> Result<zcash_primitives::transaction::TxId, String>
 }
 
 // ── helpers ──
-
-/// `zatoshis` with all 8 decimal places and the network's unit, e.g. "0.29000000 TAZ".
-fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
-    let (whole, fraction) = (zatoshis / 100_000_000, zatoshis % 100_000_000);
-    format!("{whole}.{fraction:08} {}", net.unit())
-}
-
-/// Unix seconds since the epoch (0 if the clock is somehow before 1970).
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// One honest status line: local scan position vs the live chain tip.
-/// `live_tip` is None when the network was unreachable — say so rather
-/// than let a locally-remembered tip claim completeness.
-fn render_sync_status(
-    scanned: u64,
-    live_tip: Option<u64>,
-    verified_at: Option<u64>,
-    now: u64,
-) -> String {
-    let verified = verified_at
-        .map(|t| ago(now.saturating_sub(t)))
-        .unwrap_or_else(|| "never".into());
-    match live_tip {
-        // Verified live right now; the timestamp only matters when behind.
-        Some(tip) if scanned >= tip => {
-            format!("fully synced ✓  height {scanned} (verified just now)")
-        }
-        Some(tip) => format!(
-            "behind {behind} blocks  scanned {scanned} / chain {tip}  \
-             (last verified {verified})\nrun: zorg sync",
-            behind = tip - scanned,
-        ),
-        None if scanned == 0 => {
-            format!("nothing scanned yet  (last verified {verified})\nrun: zorg sync")
-        }
-        None => format!(
-            "offline — last known height {scanned}  \
-             (not verified against the chain, last verified {verified})"
-        ),
-    }
-}
 
 fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
     const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
@@ -2149,45 +2052,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_phrase_is_numbered_in_order_with_birthday() {
-        let mnemonic = zorg::keys::generate_mnemonic();
-        let text = recovery_phrase_text(&mnemonic, 4_562_700);
-        let numbered: Vec<String> = text
-            .lines()
-            .filter(|line| line.starts_with("  "))
-            .flat_map(|line| {
-                line.split("  ")
-                    .filter(|cell| cell.contains(". "))
-                    .map(|cell| cell.trim().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let expected: Vec<String> = mnemonic
-            .split_whitespace()
-            .enumerate()
-            .map(|(i, word)| format!("{}. {word}", i + 1))
-            .collect();
-        assert_eq!(numbered, expected);
-        assert!(text.contains("Wallet birthday: 4562700"));
-    }
-
-    #[test]
-    fn send_summary_shows_amount_recipient_fee_and_memo() {
-        let summary = send_summary(
-            "u1dest",
-            150_000_000,
-            10_000,
-            Some("rent"),
-            WalletNetwork::Main,
-        );
-        assert_eq!(
-            summary,
-            "Send 1.50000000 ZEC to\n  u1dest\nFee: 0.00010000 ZEC\nMemo: \"rent\"\n"
-        );
-        assert!(!send_summary("u1dest", 1, 10_000, None, WalletNetwork::Test).contains("Memo"));
-    }
-
-    #[test]
     fn address_receivers_lists_the_pools_an_address_can_receive_into() {
         use zcash_address::{ToAddress, ZcashAddress};
         use zcash_keys::{address::UnifiedAddress, keys::UnifiedSpendingKey};
@@ -2235,16 +2099,6 @@ mod tests {
     }
 
     #[test]
-    fn amounts_are_labeled_per_network() {
-        assert_eq!(fmt_zec(29_000_000, WalletNetwork::Main), "0.29000000 ZEC");
-        assert_eq!(fmt_zec(29_000_000, WalletNetwork::Test), "0.29000000 TAZ");
-        assert_eq!(
-            fmt_zec(29_000_000, WalletNetwork::Regtest),
-            "0.29000000 TAZ"
-        );
-    }
-
-    #[test]
     fn send_amounts_are_exact_and_invalid_values_are_rejected() {
         for (input, expected) in [
             ("0.29", 29_000_000),
@@ -2283,40 +2137,5 @@ mod tests {
         assert!(resolve_create_birthday(|| Err("offline".into()))
             .unwrap_err()
             .contains("Could not determine wallet birthday"));
-    }
-
-    #[test]
-    fn status_renders_fully_synced() {
-        let s = render_sync_status(4_462_729, Some(4_462_729), Some(1_000), 2_000);
-        assert_eq!(s, "fully synced ✓  height 4462729 (verified just now)");
-        let s = render_sync_status(4_462_800, Some(4_462_729), None, 0);
-        assert!(s.starts_with("fully synced ✓"), "{s}");
-        assert!(s.contains("4462800"), "{s}");
-    }
-
-    #[test]
-    fn status_renders_behind_with_nudge() {
-        let s = render_sync_status(4_339_008, Some(4_462_634), Some(1_000), 2_000);
-        assert!(s.starts_with("behind 123626 blocks"), "{s}");
-        assert!(s.contains("scanned 4339008 / chain 4462634"), "{s}");
-        assert!(s.contains("last verified 16 min ago"), "{s}");
-        assert!(s.contains("run: zorg sync"), "{s}");
-    }
-
-    #[test]
-    fn status_renders_offline_without_claiming_completeness() {
-        let s = render_sync_status(4_339_008, None, Some(120), 120 + 3 * 3600);
-        assert!(s.starts_with("offline"), "{s}");
-        assert!(s.contains("last known height 4339008"), "{s}");
-        assert!(s.contains("not verified against the chain"), "{s}");
-        assert!(s.contains("3 h ago"), "{s}");
-    }
-
-    #[test]
-    fn status_renders_never_synced_wallet() {
-        let s = render_sync_status(0, None, None, 1_000);
-        assert!(s.contains("nothing scanned yet"), "{s}");
-        assert!(s.contains("last verified never"), "{s}");
-        assert!(s.contains("run: zorg sync"), "{s}");
     }
 }
