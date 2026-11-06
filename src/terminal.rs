@@ -93,9 +93,9 @@ pub fn short_address(address: &str) -> String {
     format!("{}…{}", &address[..8], &address[address.len() - 6..])
 }
 
-/// The privacy tag for a recipient of the given address kind.
-pub fn privacy_tag(kind: &str) -> String {
-    if matches!(kind, "unified" | "sapling") {
+/// The privacy tag for a payment: shielded, or transparent with its amount and recipient public.
+pub fn privacy_tag(shielded: bool) -> String {
+    if shielded {
         style(" Shielded ").black().on_green().to_string()
     } else {
         style(" Transparent · amount and recipient are public ")

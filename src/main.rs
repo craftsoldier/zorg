@@ -29,7 +29,7 @@ COMMANDS:
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
     address [--new | --transparent] [--account <name>]      Show the receive address, make a new one, or show the transparent one
-    address --validate <address>                           Validate a Zcash address
+    address --parse <address>                               Show the network, type and receivers of a Zcash address
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
@@ -86,7 +86,7 @@ const VALUE_OPTIONS: [&str; 7] = [
     "--memo",
     "--limit",
     "--birthday",
-    "--validate",
+    "--parse",
 ];
 
 /// Options that take no value.
@@ -120,8 +120,8 @@ fn command_spec(
         ),
         "balance" | "sync" | "status" | "recovery" => ("[--account <name>]", &["--account"], 0..=0),
         "address" => (
-            "[--new | --transparent] [--account <name>] | --validate <address>",
-            &["--new", "--transparent", "--account", "--validate"],
+            "[--new | --transparent] [--account <name>] | --parse <address>",
+            &["--new", "--transparent", "--account", "--parse"],
             0..=0,
         ),
         "delete" => ("--account <name>", &["--account"], 0..=0),
@@ -215,16 +215,16 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let option = |name: &str| args.options.get(name).cloned();
     let lwd = option("--lwd");
     let cmd = args.command.as_deref().unwrap_or("accounts");
-    if let Some(address) = option("--validate") {
+    if let Some(address) = option("--parse") {
         if ["--new", "--transparent", "--account"]
             .iter()
             .any(|name| args.options.contains_key(name))
         {
             return Err(
-                "--validate cannot be combined with --new, --transparent, or --account".into(),
+                "--parse cannot be combined with --new, --transparent, or --account".into(),
             );
         }
-        println!("Valid: {}", sync::validate_address(&address)?);
+        print!("{}", address_summary(&address)?);
         return Ok(());
     }
     let accounts = zorg::account::read_index(&root)?;
@@ -1494,6 +1494,53 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The networks, type, receivers and memo support of a Zcash address, one row per line.
+fn address_summary(address: &str) -> Result<String, String> {
+    use zcash_keys::address::Address;
+    use zcash_protocol::PoolType;
+
+    let parsed: zcash_address::ZcashAddress =
+        address.parse().map_err(|e| format!("Invalid: {e}"))?;
+    let decoded: Vec<_> = WalletNetwork::ALL
+        .into_iter()
+        .filter_map(|net| {
+            Some((
+                net,
+                Address::try_from_zcash_address(&net, parsed.clone()).ok()?,
+            ))
+        })
+        .collect();
+    let (_, addr) = decoded
+        .first()
+        .ok_or("Invalid: not a supported Zcash address")?;
+    let networks: Vec<_> = decoded.iter().map(|(net, _)| net.as_str()).collect();
+    let receivers: Vec<_> = [PoolType::ORCHARD, PoolType::SAPLING, PoolType::TRANSPARENT]
+        .into_iter()
+        .filter(|pool| parsed.can_receive_as(*pool))
+        .map(|pool| pool.to_string().to_lowercase())
+        .collect();
+    let kind = match addr {
+        Address::Unified(_) => "unified",
+        Address::Sapling(_) => "sapling",
+        Address::Transparent(_) => "transparent",
+        Address::Tex(_) => "tex",
+    };
+    let memo = if parsed.can_receive_memo() {
+        "yes"
+    } else {
+        "no"
+    };
+    let rows = [
+        ("network", networks.join("/")),
+        ("type", kind.into()),
+        ("receivers", receivers.join(", ")),
+        ("memo", memo.into()),
+    ];
+    Ok(rows
+        .map(|(label, value)| format!("{}\n", terminal::row(label, 9, value)))
+        .concat())
+}
+
 fn cmd_send(
     account: &zorg::account::Account,
     server: Option<&str>,
@@ -1536,10 +1583,12 @@ fn cmd_send(
             parse_zatoshi_amount(&amount)?
         }
     };
-    let kind = sync::validate_address(to).unwrap_or_default();
+    let to_address = to
+        .parse::<zcash_address::ZcashAddress>()
+        .map_err(|e| format!("Bad address: {e}"))?;
     let asked_memo;
     let memo = match memo {
-        None if guided && matches!(kind.as_str(), "unified" | "sapling") => {
+        None if guided && to_address.can_receive_memo() => {
             asked_memo = terminal::ask("Memo (optional)", true, |_| Ok(()))?;
             (!asked_memo.is_empty()).then_some(asked_memo.as_str())
         }
@@ -1557,7 +1606,7 @@ fn cmd_send(
             format!(
                 "Send {} {unit}   {}",
                 console::style(terminal::zec(amount_zat, 0)).bold(),
-                terminal::privacy_tag(&kind)
+                terminal::privacy_tag(!to_address.is_transparent_only())
             ),
             terminal::row(
                 "from",
@@ -1683,7 +1732,7 @@ fn cmd_shield(
             format!(
                 "Shield {} {unit}   {}",
                 console::style(terminal::zec(amount, 0)).bold(),
-                terminal::privacy_tag("unified")
+                terminal::privacy_tag(true)
             ),
             terminal::row("from", 5, format!("{} · transparent", account.name)),
             terminal::row("fee", 5, format!("{} {unit}", terminal::zec(fee, 0))),
@@ -2182,6 +2231,72 @@ mod tests {
             "Send 1.50000000 ZEC to\n  u1dest\nFee: 0.00010000 ZEC\nMemo: \"rent\"\n"
         );
         assert!(!send_summary("u1dest", 1, 10_000, None, WalletNetwork::Test).contains("Memo"));
+    }
+
+    #[test]
+    fn address_summary_lists_network_type_receivers_and_memo() {
+        use zcash_keys::{address::UnifiedAddress, keys::UnifiedSpendingKey};
+
+        let net = WalletNetwork::Regtest;
+        let (shielded, _) = UnifiedSpendingKey::from_seed(&net, &[7; 32], 0u32.try_into().unwrap())
+            .unwrap()
+            .to_unified_full_viewing_key()
+            .default_address(keys::shielded_address_request())
+            .unwrap();
+        let transparent = UnifiedAddress::from_receivers(
+            None,
+            None,
+            Some(transparent::address::TransparentAddress::PublicKeyHash(
+                [1; 20],
+            )),
+            None,
+            None,
+        )
+        .unwrap();
+        let rows = |address: &str| {
+            address_summary(address)
+                .unwrap()
+                .lines()
+                .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&shielded.encode(&net)),
+            [
+                "network regtest",
+                "type unified",
+                "receivers orchard, sapling",
+                "memo yes"
+            ]
+        );
+        assert_eq!(
+            rows(&transparent.encode(&net)),
+            [
+                "network regtest",
+                "type unified",
+                "receivers transparent",
+                "memo no"
+            ]
+        );
+        assert_eq!(
+            rows("t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"),
+            [
+                "network main",
+                "type transparent",
+                "receivers transparent",
+                "memo no"
+            ]
+        );
+        assert_eq!(
+            rows("tmEZhbWHTpdKMw5it8YDspUXSMGQyFwovpU"),
+            [
+                "network test/regtest",
+                "type transparent",
+                "receivers transparent",
+                "memo no"
+            ]
+        );
+        assert!(address_summary("not an address").is_err());
     }
 
     #[test]
