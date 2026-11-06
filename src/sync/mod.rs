@@ -17,8 +17,8 @@ mod transactions;
 
 pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
-    decrypt_and_store_transaction, get_next_available_address, get_transaction_detail,
-    get_transaction_history, get_wallet_balance, WalletBalance,
+    get_next_available_address, get_transaction_detail, get_transaction_history,
+    get_wallet_balance, WalletBalance,
 };
 
 pub(super) fn open_wallet_db(
