@@ -29,7 +29,7 @@ COMMANDS:
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
     address [--new | --transparent] [--account <name>]      Show the receive address, make a new one, or show the transparent one
-    address --parse <address>                               Show the network, type and receivers of a Zcash address
+    address --parse <address>                               Show the receivers of a Zcash address
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
@@ -224,7 +224,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 "--parse cannot be combined with --new, --transparent, or --account".into(),
             );
         }
-        print!("{}", address_summary(&address)?);
+        for pool in address_receivers(&address)? {
+            println!("{pool}");
+        }
         return Ok(());
     }
     let accounts = zorg::account::read_index(&root)?;
@@ -1494,51 +1496,21 @@ fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The networks, type, receivers and memo support of a Zcash address, one row per line.
-fn address_summary(address: &str) -> Result<String, String> {
-    use zcash_keys::address::Address;
+/// The pools a Zcash address can receive into.
+fn address_receivers(address: &str) -> Result<Vec<zcash_protocol::PoolType>, String> {
     use zcash_protocol::PoolType;
 
-    let parsed: zcash_address::ZcashAddress =
-        address.parse().map_err(|e| format!("Invalid: {e}"))?;
-    let decoded: Vec<_> = WalletNetwork::ALL
-        .into_iter()
-        .filter_map(|net| {
-            Some((
-                net,
-                Address::try_from_zcash_address(&net, parsed.clone()).ok()?,
-            ))
-        })
-        .collect();
-    let (_, addr) = decoded
-        .first()
-        .ok_or("Invalid: not a supported Zcash address")?;
-    let networks: Vec<_> = decoded.iter().map(|(net, _)| net.as_str()).collect();
-    let receivers: Vec<_> = [PoolType::ORCHARD, PoolType::SAPLING, PoolType::TRANSPARENT]
-        .into_iter()
-        .filter(|pool| parsed.can_receive_as(*pool))
-        .map(|pool| pool.to_string().to_lowercase())
-        .collect();
-    let kind = match addr {
-        Address::Unified(_) => "unified",
-        Address::Sapling(_) => "sapling",
-        Address::Transparent(_) => "transparent",
-        Address::Tex(_) => "tex",
-    };
-    let memo = if parsed.can_receive_memo() {
-        "yes"
-    } else {
-        "no"
-    };
-    let rows = [
-        ("network", networks.join("/")),
-        ("type", kind.into()),
-        ("receivers", receivers.join(", ")),
-        ("memo", memo.into()),
-    ];
-    Ok(rows
-        .map(|(label, value)| format!("{}\n", terminal::row(label, 9, value)))
-        .concat())
+    let address: zcash_keys::address::Address = address
+        .parse::<zcash_address::ZcashAddress>()
+        .map_err(|e| format!("Invalid: {e}"))?
+        .convert()
+        .map_err(|e| format!("Invalid: {e}"))?;
+    Ok(
+        [PoolType::ORCHARD, PoolType::SAPLING, PoolType::TRANSPARENT]
+            .into_iter()
+            .filter(|pool| address.can_receive_as(*pool))
+            .collect(),
+    )
 }
 
 fn cmd_send(
@@ -2234,8 +2206,10 @@ mod tests {
     }
 
     #[test]
-    fn address_summary_lists_network_type_receivers_and_memo() {
+    fn address_receivers_lists_the_pools_an_address_can_receive_into() {
+        use zcash_address::{ToAddress, ZcashAddress};
         use zcash_keys::{address::UnifiedAddress, keys::UnifiedSpendingKey};
+        use zcash_protocol::{consensus::NetworkType, PoolType};
 
         let net = WalletNetwork::Regtest;
         let (shielded, _) = UnifiedSpendingKey::from_seed(&net, &[7; 32], 0u32.try_into().unwrap())
@@ -2253,50 +2227,21 @@ mod tests {
             None,
         )
         .unwrap();
-        let rows = |address: &str| {
-            address_summary(address)
-                .unwrap()
-                .lines()
-                .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-                .collect::<Vec<_>>()
-        };
         assert_eq!(
-            rows(&shielded.encode(&net)),
-            [
-                "network regtest",
-                "type unified",
-                "receivers orchard, sapling",
-                "memo yes"
-            ]
+            address_receivers(&shielded.encode(&net)).unwrap(),
+            [PoolType::ORCHARD, PoolType::SAPLING]
         );
         assert_eq!(
-            rows(&transparent.encode(&net)),
-            [
-                "network regtest",
-                "type unified",
-                "receivers transparent",
-                "memo no"
-            ]
+            address_receivers(&transparent.encode(&net)).unwrap(),
+            [PoolType::TRANSPARENT]
         );
         assert_eq!(
-            rows("t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"),
-            [
-                "network main",
-                "type transparent",
-                "receivers transparent",
-                "memo no"
-            ]
+            address_receivers("t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs").unwrap(),
+            [PoolType::TRANSPARENT]
         );
-        assert_eq!(
-            rows("tmEZhbWHTpdKMw5it8YDspUXSMGQyFwovpU"),
-            [
-                "network test/regtest",
-                "type transparent",
-                "receivers transparent",
-                "memo no"
-            ]
-        );
-        assert!(address_summary("not an address").is_err());
+        let sprout = ZcashAddress::from_sprout(NetworkType::Main, [0; 64]).encode();
+        assert!(address_receivers(&sprout).is_err());
+        assert!(address_receivers("not an address").is_err());
     }
 
     #[test]

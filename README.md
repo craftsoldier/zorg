@@ -48,7 +48,7 @@ zorg balance --account Savings
 | `zorg create [name] --import [--birthday <height>] [--network <net>]` | Import an existing recovery phrase. |
 | `zorg balance [--account <name>]` | Show spendable, pending, locked, and total balances. |
 | `zorg address [--new \| --transparent] [--account <name>]` | Show a receiving address, generate a new shielded address, or show the transparent address. |
-| `zorg address --parse <address>` | Show the network, type and receivers of an address. |
+| `zorg address --parse <address>` | Show the receivers of an address. |
 | `zorg sync [--account <name>]` | Sync all accounts, or one named account. |
 | `zorg status [--account <name>]` | Show account sync status. |
 | `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send a payment. |
