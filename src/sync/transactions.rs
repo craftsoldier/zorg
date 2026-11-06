@@ -11,8 +11,7 @@
 //!     `decrypt_and_store_transaction`, `set_transaction_status`).
 //!
 //! None of these belong to the orchestration loop — the loop lives
-//! in `sync_engine/mod.rs`. They're one-shot lookups the UI drives
-//! directly, so extracting them into their own submodule keeps
+//! in `sync_engine/mod.rs`. They're one-shot lookups, so extracting them into their own submodule keeps
 //! `sync/mod.rs` focused on per-wallet infrastructure (DB open,
 //! chain-tip update, scan range management).
 
@@ -280,10 +279,8 @@ impl TxOutput {
         } else if self.output_pool == 0 {
             // Received transparent outputs: surface the bare t-address. The
             // wallet stores the account UA in `to_address`, so without this
-            // recovery the UA leaks into the receiving-address line and the
-            // desktop receipt's address-prefix heuristic mislabels a
-            // transparent->transparent receive as shielded (crimson shield +
-            // u1 address). Mirrors the `sent` pool-0 branch above.
+            // recovery the UA leaks into the receiving-address line.
+            // Mirrors the `sent` pool-0 branch above.
             self.transparent_receiver_address
                 .clone()
                 .or_else(|| self.to_address.clone())
@@ -1394,8 +1391,7 @@ mod tests {
     //!
     //! `get_resubmittable_txs` is a thin wrapper around a `v_transactions`
     //! SELECT, but the SELECT is the entire contract: it's the piece that
-    //! encodes the four resubmit invariants we copied from
-    //! `zcash-android-wallet-sdk`'s `SELECTION_TRX_RESUBMISSION`.
+    //! encodes the four resubmit invariants.
     //!
     //! We test against a stand-in schema: a real SQLite DB with a plain
     //! `v_transactions` table mirroring the columns the production view

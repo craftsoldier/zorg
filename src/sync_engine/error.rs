@@ -172,40 +172,6 @@ impl SyncError {
     }
 }
 
-/// Whether `message` describes a network failure that another server might not have.
-pub fn is_endpoint_failover_candidate_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("wrong network")
-        || lower.contains("endpoint is for")
-        || lower.contains("database is locked")
-        || lower.contains("proposal not found")
-        || lower.contains("send flow mismatch")
-        || lower.contains("insufficient")
-        || lower.contains("invalid amount")
-        || lower.contains("invalid address")
-    {
-        return false;
-    }
-
-    lower.contains("network:")
-        || lower.contains("deadlineexceeded")
-        || lower.contains("deadline exceeded")
-        || lower.contains("unavailable")
-        || lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("grpc connect failed")
-        || lower.contains("connect failed")
-        || lower.contains("connection refused")
-        || lower.contains("connection reset")
-        || lower.contains("connection closed")
-        || lower.contains("dns")
-        || lower.contains("failed to lookup address")
-        || lower.contains("tls error")
-        || lower.contains("transport error")
-        || lower.contains("http2")
-        || lower.contains("socket")
-}
-
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -256,25 +222,6 @@ mod tests {
             SyncError::Other("???".into()).recovery_strategy(),
             RecoveryStrategy::RetryWithBackoff,
         );
-    }
-
-    #[test]
-    fn endpoint_failover_candidate_is_limited_to_transport_failures() {
-        assert!(is_endpoint_failover_candidate_message(
-            "gRPC connect failed: connection refused"
-        ));
-        assert!(is_endpoint_failover_candidate_message(
-            "DeadlineExceeded while reading stream"
-        ));
-        assert!(!is_endpoint_failover_candidate_message(
-            "database is locked"
-        ));
-        assert!(!is_endpoint_failover_candidate_message(
-            "Endpoint is for test, but this wallet uses main."
-        ));
-        assert!(!is_endpoint_failover_candidate_message(
-            "Proposal not found (expired or already executed)"
-        ));
     }
 
     #[test]
