@@ -600,29 +600,35 @@ impl Progress {
         Self(bar)
     }
 
-    /// A progress bar out of 100 that draws nothing until [`Progress::show`].
+    /// A progress bar that draws nothing until [`Progress::set_progress`].
     pub fn hidden_bar() -> Self {
-        let bar = ProgressBar::with_draw_target(Some(100), ProgressDrawTarget::hidden());
+        let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
         bar.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {bar:30.cyan/dim} {pos:>3}%  {msg}")
+            ProgressStyle::with_template("{spinner:.cyan} {bar:30.cyan/dim} {percent:>3}%  {eta}")
                 .expect("template")
                 .progress_chars("━━─"),
         );
         Self(bar)
     }
 
-    /// Moves a bar to `percent`, from 0 to 100.
-    pub fn set_percent(&self, percent: u64) {
-        self.0.set_position(percent);
+    /// Shows the bar at `done` of `total`, and its time left from how fast `done` moves.
+    pub fn set_progress(&self, done: u64, total: u64) {
+        self.reveal();
+        self.0.set_length(total);
+        self.0.set_position(done);
     }
 
     /// Shows the spinner with `message`, or changes its message.
     pub fn show(&self, message: &str) {
+        self.reveal();
+        self.0.set_message(message.to_string());
+    }
+
+    fn reveal(&self) {
         if self.0.is_hidden() {
             self.0.set_draw_target(ProgressDrawTarget::stdout());
             self.0.enable_steady_tick(Duration::from_millis(80));
         }
-        self.0.set_message(message.to_string());
     }
 
     /// Removes the spinner line.

@@ -131,9 +131,9 @@ pub use send::{
 
 // ======================== Sync State & Orchestration ========================
 
-/// How much of the wallet, from its birthday to the chain tip, has been
-/// scanned, from 0 to 1, or none before the first sync.
-pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<f64>, String> {
+/// How many notes of the wallet's scan window have been scanned, as
+/// `(scanned, total)`, or none before the first sync. For display only.
+pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<(u64, u64)>, String> {
     let Some(summary) = crate::db::wallet_summary(db_path, network)? else {
         return Ok(None);
     };
@@ -143,5 +143,5 @@ pub fn scan_progress(db_path: &str, network: WalletNetwork) -> Result<Option<f64
         .into_iter()
         .chain([progress.scan()])
         .fold((0, 0), |(n, d), r| (n + r.numerator(), d + r.denominator()));
-    Ok((total > 0).then(|| scanned as f64 / total as f64))
+    Ok((total > 0).then_some((scanned, total)))
 }

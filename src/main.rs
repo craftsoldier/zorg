@@ -539,8 +539,8 @@ fn sync_text(account: &zorg::account::Account) -> String {
         sync::get_sync_progress(&account.db_path, account.network).is_ok_and(|p| p.is_complete);
     match sync::scan_progress(&account.db_path, account.network) {
         _ if synced => "synced".into(),
-        Ok(Some(done)) => {
-            let done = done.min(0.99);
+        Ok(Some((scanned, total))) => {
+            let done = (scanned as f64 / total as f64).min(0.99);
             format!("{} {:>2.0}%", terminal::bar(done, 24), done * 100.0)
         }
         _ => "syncing…".into(),
@@ -613,8 +613,8 @@ fn sync_database(
         if terminal::interactive() {
             let progress = &progress;
             scope.spawn(move || loop {
-                if let Ok(Some(done)) = sync::scan_progress(db_path, net) {
-                    progress.set_percent((done * 100.0) as u64);
+                if let Ok(Some((done, total))) = sync::scan_progress(db_path, net) {
+                    progress.set_progress(done, total);
                 }
                 if stopped.recv_timeout(std::time::Duration::from_secs(1))
                     != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
@@ -627,15 +627,7 @@ fn sync_database(
             db_path,
             client,
             net,
-            |event| {
-                if terminal::interactive() && event.chain_tip_height > 0 {
-                    progress.show(&format!(
-                        "block {} of {}",
-                        event.scanned_height.min(event.chain_tip_height),
-                        event.chain_tip_height
-                    ));
-                }
-            },
+            |_| {},
         ));
         drop(stop);
         result
