@@ -260,7 +260,26 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        zorg::secret_store::mnemonic(&account.db_path, account.network, &account.uuid)?;
+        if zorg::secret_store::mnemonic_if_present(
+            &account.db_path,
+            account.network,
+            &account.uuid,
+        )?
+        .is_none()
+        {
+            terminal::failure(&format!(
+                "No recovery phrase for {:?} on this Mac, so zorg cannot open it. \
+                 Delete the account, then import it again from your written phrase.",
+                account.name
+            ));
+            println!();
+            cmd_delete(&root, account, saved.hide_balances)?;
+            return if zorg::account::read_index(&root)?.len() < accounts.len() {
+                run_in(root, args)
+            } else {
+                Ok(())
+            };
+        }
         let actions = ["Send", "Receive", "Transactions", "Settings", "Shield"].map(String::from);
         let mut hidden = saved.hide_balances;
         // Warnings would print over the screen; sync failures show in the sync row.
@@ -340,22 +359,10 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             terminal::clear()?;
             println!("{}\n", console::style(&actions[choice]).bold());
             let result = match choice {
-                0 => zorg::account::birthday_height(account).and_then(|birthday| {
-                    let missing = missing_phrase_error(account, birthday);
-                    cmd_send(
-                        account,
-                        server(account.network).as_deref(),
-                        &[],
-                        None,
-                        &missing,
-                    )
-                }),
+                0 => cmd_send(account, server(account.network).as_deref(), &[], None),
                 1 => receive(account),
                 2 => history(account, hidden),
-                4 => zorg::account::birthday_height(account).and_then(|birthday| {
-                    let missing = missing_phrase_error(account, birthday);
-                    cmd_shield(account, server(account.network).as_deref(), &missing)
-                }),
+                4 => cmd_shield(account, server(account.network).as_deref()),
                 _ => settings(&root, account, &accounts, &saved, &args.options, hidden),
             };
             match result {
@@ -471,20 +478,15 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             if args.options.contains_key("--memo") {
                 return Err("--memo cannot be used with --shield".into());
             }
-            let birthday = zorg::account::birthday_height(selected)?;
-            let missing = missing_phrase_error(selected, birthday);
-            cmd_shield(selected, server(net).as_deref(), &missing)
+            cmd_shield(selected, server(net).as_deref())
         }
         "send" => {
             let memo = option("--memo");
-            let birthday = zorg::account::birthday_height(selected)?;
-            let missing = missing_phrase_error(selected, birthday);
             cmd_send(
                 selected,
                 server(net).as_deref(),
                 &args.positional,
                 memo.as_deref(),
-                &missing,
             )
         }
         "history" => {
@@ -498,7 +500,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             cmd_history(db, net, limit, uuid)
         }
         "tx" => cmd_tx(selected, &args.positional[0], false),
-        "recovery" => cmd_recovery(net, selected),
+        "recovery" => cmd_recovery(selected),
         "delete" => {
             if name.is_none() && !terminal::interactive() {
                 return Err("Usage: zorg delete --account <name>".into());
@@ -1442,11 +1444,21 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
     )
 }
 
+/// The account's recovery phrase, or the commands that restore it when this Mac has none.
+fn phrase(account: &zorg::account::Account) -> Result<zeroize::Zeroizing<String>, String> {
+    match zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?
+    {
+        Some(phrase) => Ok(phrase),
+        None => Err(missing_phrase_error(
+            account,
+            zorg::account::birthday_height(account)?,
+        )),
+    }
+}
+
 fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
-    let mnemonic =
-        zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?
-            .ok_or_else(|| missing_phrase_error(account, birthday))?;
+    let mnemonic = phrase(account)?;
     let copy = ["Copy phrase".to_string()];
     let mut status: Result<String, String> = Ok(String::new());
     terminal::clear()?;
@@ -1465,11 +1477,12 @@ fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> 
     }
 }
 
-fn cmd_recovery(net: WalletNetwork, account: &zorg::account::Account) -> Result<(), String> {
+fn cmd_recovery(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
-    let mnemonic = zorg::secret_store::mnemonic_if_present(&account.db_path, net, &account.uuid)?
-        .ok_or_else(|| missing_phrase_error(account, birthday))?;
-    print!("{}", *recovery_phrase_text(&mnemonic, u64::from(birthday)));
+    print!(
+        "{}",
+        *recovery_phrase_text(&phrase(account)?, u64::from(birthday))
+    );
     Ok(())
 }
 
@@ -1515,7 +1528,6 @@ fn cmd_send(
     server: Option<&str>,
     positional: &[String],
     memo: Option<&str>,
-    missing_phrase: &str,
 ) -> Result<(), String> {
     let (db, net, uuid) = (
         account.db_path.as_str(),
@@ -1610,7 +1622,7 @@ fn cmd_send(
         RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
             server,
             proposal,
-            |network, account| {
+            |_, _| {
                 // A failed seed load releases the proposal's inputs, so failing here does too.
                 if interactive {
                     if proposed_fee != fee {
@@ -1623,12 +1635,7 @@ fn cmd_send(
                 } else {
                     print!("{}", send_summary(to, amount_zat, proposed_fee, memo, net));
                 }
-                let seed = load_seed(
-                    db,
-                    network,
-                    &account.expose_uuid().to_string(),
-                    missing_phrase,
-                )?;
+                let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
                 if interactive {
                     progress.show("Building the transaction…");
                 }
@@ -1683,12 +1690,7 @@ fn cmd_send(
 
 /// Moves `account`'s transparent funds into its shielded balance, after the
 /// same authorization as a send.
-fn cmd_shield(
-    account: &zorg::account::Account,
-    server: Option<&str>,
-    missing_phrase: &str,
-) -> Result<(), String> {
-    let db = &account.db_path;
+fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<(), String> {
     let net = account.network;
     RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
@@ -1713,7 +1715,7 @@ fn cmd_shield(
     let result = RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
         server,
         proposal,
-        |network, account| {
+        |_, _| {
             // A failed seed load releases the proposal's inputs, so cancelling here does too.
             if interactive {
                 terminal::confirm("shield", 0, None, card)?;
@@ -1725,12 +1727,7 @@ fn cmd_shield(
                     fmt_zec(fee, net)
                 );
             }
-            let seed = load_seed(
-                db,
-                network,
-                &account.expose_uuid().to_string(),
-                missing_phrase,
-            )?;
+            let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
             if interactive {
                 progress.show("Building the transaction…");
             }
@@ -1990,18 +1987,6 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
         return Err("Amount exceeds the maximum supply of 21,000,000 ZEC".into());
     }
     Ok(zatoshis)
-}
-
-/// The account's stored seed; fails with `missing_phrase` when no phrase exists.
-fn load_seed(
-    db: &str,
-    net: WalletNetwork,
-    account_uuid: &str,
-    missing_phrase: &str,
-) -> Result<secrecy::SecretVec<u8>, String> {
-    let mnemonic = zorg::secret_store::mnemonic_if_present(db, net, account_uuid)?
-        .ok_or_else(|| missing_phrase.to_string())?;
-    keys::mnemonic_to_seed(&mnemonic)
 }
 
 #[cfg(test)]
