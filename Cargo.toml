@@ -23,7 +23,7 @@ packaged = ["dep:security-framework"]
 
 [dependencies]
 sapling-crypto = { version = "0.9", default-features = false, features = ["circuit"] }
-uuid = "1.1"
+uuid = { version = "1.1", features = ["v4"] }
 
 # Key generation
 bip0039 = "0.12"
@@ -39,14 +39,14 @@ security-framework = { version = "3.7", features = ["OSX_10_15"], optional = tru
 blake2b_simd = "1"
 
 # Random number generation
-rand = "0.10"
+rand = { version = "0.10", default-features = false, features = ["sys_rng"] }
 
 # Async runtime & gRPC
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tonic = { version = "0.14", default-features = false, features = ["channel", "tls-webpki-roots", "tls-ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tonic = { version = "0.14", default-features = false, features = ["tls-webpki-roots", "tls-ring"] }
 
 # SQLite, for zorg's own queries against the wallet DB
-rusqlite = "0.37"
+rusqlite = { version = "0.37", features = ["array"] }
 
 # Logging
 log = "0.4"
@@ -83,13 +83,11 @@ features = [
     "orchard",
     "transparent-inputs",
     "lightwalletd-tonic",
-    "lightwalletd-tonic-tls-webpki-roots",
-    "sync",
 ]
 
 [dependencies.zcash_client_sqlite]
 version = "0.23.0"
-features = ["orchard", "transparent-inputs", "unstable", "serde"]
+features = ["orchard", "transparent-inputs"]
 
 # Keep Orchard aligned with the released librustzcash family
 # to avoid type conflicts.
@@ -99,8 +97,6 @@ version = "0.16.0"
 [dev-dependencies]
 tempfile = "3"
 incrementalmerkletree = "0.9"
-hex = "0.4"
-rusqlite = "0.37"
 
 # Debug builds with high opt-level for usable crypto performance.
 # Release builds are unaffected.
