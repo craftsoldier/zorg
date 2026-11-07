@@ -138,25 +138,17 @@ pub(super) async fn run_enhancement(
                     let start = u32::from(req.block_range_start()) as u64;
                     let end = u32::from(end_height) as u64;
 
-                    match lwd::get_taddress_txids(client, addr_str, start, end.saturating_sub(1))
-                        .await
+                    let mut stream =
+                        lwd::get_taddress_txids(client, addr_str, start, end.saturating_sub(1))
+                            .await?;
+                    while let Some(raw) =
+                        lwd::next_stream_message(&mut stream, "get_taddress_txids stream").await?
                     {
-                        Ok(mut stream) => loop {
-                            match lwd::next_stream_message(&mut stream, "get_taddress_txids stream")
-                                .await
-                            {
-                                Ok(Some(raw)) => {
-                                    if !raw.data.is_empty() {
-                                        if let Err(e) = store_transaction(db, &raw) {
-                                            log::warn!("sync: could not store transaction: {e}");
-                                        }
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(e) => return Err(e),
+                        if !raw.data.is_empty() {
+                            if let Err(e) = store_transaction(db, &raw) {
+                                log::warn!("sync: could not store transaction: {e}");
                             }
-                        },
-                        Err(e) => return Err(e),
+                        }
                     }
                 }
             }
