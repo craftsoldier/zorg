@@ -1483,12 +1483,8 @@ fn cmd_send(
         }
         memo => memo,
     };
-    // The card shows an estimate, so nothing is locked while it waits.
-    let fee = if interactive {
-        sync::estimate_fee(account, to, amount_zat, memo)?
-    } else {
-        0
-    };
+    // The card and summary show an estimate, so nothing is locked while they wait.
+    let fee = sync::estimate_fee(account, to, amount_zat, memo)?;
     let card = |full: bool| {
         let total = amount_zat + fee;
         let mut lines = vec![
@@ -1522,31 +1518,28 @@ fn cmd_send(
     let confirmed = if interactive {
         terminal::confirm("send", to.len(), card)
     } else {
+        print!("{}", terminal::send_summary(to, amount_zat, fee, memo, net));
         Ok(())
     };
     let result = confirmed.and_then(|()| {
+        // Authenticate before proposing, so no inputs are locked while Touch ID waits.
+        if interactive {
+            progress.show("Waiting for Touch ID…");
+        }
+        let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
         let proposal = sync::propose_send(account, to, amount_zat, memo)?;
         let proposed_fee = proposal.fee_zatoshi;
         RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
             &mut client,
             proposal,
             |_, _| {
-                // A failed seed load releases the proposal's inputs, so failing here does too.
-                if interactive {
-                    if proposed_fee != fee {
-                        return Err(format!(
-                            "the fee changed to {} {unit}; send again",
-                            terminal::zec(proposed_fee, 0)
-                        ));
-                    }
-                    progress.show("Waiting for Touch ID…");
-                } else {
-                    print!(
-                        "{}",
-                        terminal::send_summary(to, amount_zat, proposed_fee, memo, net)
-                    );
+                // An error here releases the proposal's inputs.
+                if proposed_fee != fee {
+                    return Err(format!(
+                        "the fee changed to {} {unit}; send again",
+                        terminal::zec(proposed_fee, 0)
+                    ));
                 }
-                let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
                 if interactive {
                     progress.show("Building the transaction…");
                 }
@@ -1606,9 +1599,8 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
-    let proposal = sync::propose_shield(account)?;
-    let fee = proposal.fee_zatoshi;
-    let amount = proposal.transparent_input_zatoshi().saturating_sub(fee);
+    // The card and summary show an estimate, so nothing is locked while they wait.
+    let (amount, fee) = sync::estimate_shield(account)?;
     let card = |_full: bool| {
         vec![
             format!(
@@ -1623,34 +1615,52 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     let progress = terminal::Progress::hidden();
     let broadcasting = std::cell::Cell::new(false);
 
-    let result = RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
-        &mut client,
-        proposal,
-        |_, _| {
-            // A failed seed load releases the proposal's inputs, so cancelling here does too.
-            if interactive {
-                terminal::confirm("shield", 0, card)?;
-                progress.show("Waiting for Touch ID…");
-            } else {
-                print!(
-                    "Shield {}\nFee: {}\n",
-                    terminal::fmt_zec(amount, net),
-                    terminal::fmt_zec(fee, net)
-                );
-            }
-            let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
-            if interactive {
-                progress.show("Building the transaction…");
-            }
-            Ok(seed)
-        },
-        &|| {
-            broadcasting.set(true);
-            if interactive {
-                progress.show("Broadcasting…");
-            }
-        },
-    ));
+    let confirmed = if interactive {
+        terminal::confirm("shield", 0, card)
+    } else {
+        print!(
+            "Shield {}\nFee: {}\n",
+            terminal::fmt_zec(amount, net),
+            terminal::fmt_zec(fee, net)
+        );
+        Ok(())
+    };
+    let result = confirmed.and_then(|()| {
+        // Authenticate before proposing, so no inputs are locked while Touch ID waits.
+        if interactive {
+            progress.show("Waiting for Touch ID…");
+        }
+        let seed = keys::mnemonic_to_seed(&phrase(account)?)?;
+        let proposal = sync::propose_shield(account)?;
+        let proposed_fee = proposal.fee_zatoshi;
+        let proposed_amount = proposal
+            .transparent_input_zatoshi()
+            .saturating_sub(proposed_fee);
+        RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
+            &mut client,
+            proposal,
+            |_, _| {
+                // An error here releases the proposal's inputs.
+                if (proposed_amount, proposed_fee) != (amount, fee) {
+                    return Err(format!(
+                        "the shield changed to {} {unit} with a {} {unit} fee; shield again",
+                        terminal::zec(proposed_amount, 0),
+                        terminal::zec(proposed_fee, 0)
+                    ));
+                }
+                if interactive {
+                    progress.show("Building the transaction…");
+                }
+                Ok(seed)
+            },
+            &|| {
+                broadcasting.set(true);
+                if interactive {
+                    progress.show("Broadcasting…");
+                }
+            },
+        ))
+    });
     progress.clear();
     match result {
         Ok(result) if interactive => {
