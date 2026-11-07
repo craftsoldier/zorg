@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use nonempty::NonEmpty;
 use rusqlite::{params, OptionalExtension};
 use shardtree::error::{InsertionError, ShardTreeError};
@@ -149,19 +147,6 @@ async fn maybe_sleep_for_e2e_sync_batch_delay() {
 
 fn is_pending_scan_range(range: &ScanRange) -> bool {
     range.priority() != ScanPriority::Ignored && range.priority() != ScanPriority::Scanned
-}
-
-fn recovery_resubmit_exclusions(
-    db_path: &str,
-    ranges: &[ScanRange],
-) -> Result<HashSet<Vec<u8>>, SyncError> {
-    let pending_ranges = ranges
-        .iter()
-        .filter(|range| is_pending_scan_range(range))
-        .map(|range| range.block_range().clone())
-        .collect::<Vec<_>>();
-    crate::sync::get_unmined_txids_with_mined_output_evidence(db_path, &pending_ranges)
-        .map_err(SyncError::db)
 }
 
 fn pending_scan_blocks(ranges: &[ScanRange]) -> u64 {
@@ -792,17 +777,9 @@ async fn run_sync_impl(
     // and must not abort the sync.
     //
     // We reuse the same `client` instead of opening a fresh channel.
-    let startup_ranges = db
-        .suggest_scan_ranges()
-        .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
-    let startup_resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &startup_ranges)?;
-    let _ = crate::sync::resubmit_pending_transactions(
-        db_data_path,
-        &mut client,
-        tip.height as u32,
-        &startup_resubmit_exclusions,
-    )
-    .await;
+    let _ =
+        crate::sync::resubmit_pending_transactions(db_data_path, &mut client, tip.height as u32)
+            .await;
 
     // 3. Download subtree roots (incremental)
     download_subtree_roots(&mut client, &mut db, db_data_path).await?;
@@ -1280,14 +1257,9 @@ async fn run_sync_impl(
             },
         };
 
-        // Truncation can temporarily clear a transaction's mined height while
-        // retaining note positions that prove compact scanning found it mined.
-        // Exclude those transactions from recovery resubmission while scanning
-        // can still restore their mined heights.
         let post_scan_ranges = db
             .suggest_scan_ranges()
             .map_err(|e| SyncError::db(format!("suggest_scan_ranges: {e}")))?;
-        let resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &post_scan_ranges)?;
 
         // Enhancement
         run_enhancement(&mut client, &mut db).await?;
@@ -1356,7 +1328,6 @@ async fn run_sync_impl(
                     db_data_path,
                     &mut client,
                     fresh_tip_height,
-                    &resubmit_exclusions,
                 )
                 .await;
             }

@@ -3,7 +3,6 @@
 //! Uses `zcash_client_backend`'s `propose_transfer` + `create_proposed_transactions`
 //! pipeline.
 
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::num::NonZeroUsize;
 
@@ -460,7 +459,7 @@ async fn execute_stored<N: std::fmt::Display>(
     for txid in &txids {
         let raw_tx: Vec<u8> = read_conn
             .query_row(
-                "SELECT raw FROM transactions WHERE txid = ?1",
+                "SELECT raw FROM v_transactions WHERE txid = ?1 AND raw IS NOT NULL LIMIT 1",
                 rusqlite::params![txid.as_ref()],
                 |r| r.get(0),
             )
@@ -575,9 +574,8 @@ pub(crate) async fn resubmit_pending_transactions(
     db_path: &str,
     client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<tonic::transport::Channel>,
     current_height: u32,
-    excluded: &HashSet<Vec<u8>>,
 ) -> Result<(), String> {
-    let txs = crate::sync::transactions::get_resubmittable_txs(db_path, current_height, excluded)?;
+    let txs = crate::sync::transactions::get_resubmittable_txs(db_path, current_height)?;
     for tx in txs {
         let resp = crate::sync_engine::send_transaction(client, &tx.raw_tx).await;
         match resp {
