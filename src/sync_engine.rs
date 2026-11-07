@@ -45,8 +45,13 @@ pub(crate) enum SyncError {
     /// `BlockHeightDiscontinuity` at `at_height`, meaning the wallet's
     /// stored chain state no longer agrees with the one lightwalletd is
     /// serving. Recovery is to `truncate_to_height(at_height - REWIND_DISTANCE)`
-    /// and restart the scan loop from the rewound state.
-    Continuity { at_height: u64, detail: String },
+    /// and restart the scan loop from the rewound state. `tree_conflict` marks
+    /// a commitment tree root conflict, which rewinds further on each attempt.
+    Continuity {
+        at_height: u64,
+        detail: String,
+        tree_conflict: bool,
+    },
 
     /// Transient network or gRPC failure. The existing exponential-backoff
     /// retry path is the right response.
@@ -117,7 +122,23 @@ impl SyncError {
     pub(crate) fn continuity(at_height: u64, detail: impl Into<String>) -> Self {
         let detail = detail.into();
         log::warn!("sync: chain continuity broken at height {at_height}: {detail}");
-        SyncError::Continuity { at_height, detail }
+        SyncError::Continuity {
+            at_height,
+            detail,
+            tree_conflict: false,
+        }
+    }
+
+    /// Log and construct a `Continuity` error for a commitment tree root
+    /// conflict found while scanning from `at_height`.
+    pub(crate) fn tree_conflict(at_height: u64, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        log::warn!("sync: chain continuity broken at height {at_height}: {detail}");
+        SyncError::Continuity {
+            at_height,
+            detail,
+            tree_conflict: true,
+        }
     }
 
     /// Log and construct a `Network` error in one step.
@@ -164,12 +185,13 @@ impl SyncError {
     }
 
     pub(crate) fn is_commitment_tree_root_conflict(&self) -> bool {
-        match self {
-            SyncError::Continuity { detail, .. } => detail
-                .to_ascii_lowercase()
-                .contains("commitment tree root conflict"),
-            _ => false,
-        }
+        matches!(
+            self,
+            SyncError::Continuity {
+                tree_conflict: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn rewind_distance_for_attempt(&self, attempt_index: u32) -> u64 {
@@ -197,7 +219,9 @@ impl SyncError {
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SyncError::Continuity { at_height, detail } => {
+            SyncError::Continuity {
+                at_height, detail, ..
+            } => {
                 write!(f, "chain continuity broken at height {at_height}: {detail}")
             }
             SyncError::Network(msg) => write!(f, "network: {msg}"),
@@ -1175,7 +1199,7 @@ async fn run_sync_impl(
                 }
                 ChainError::Wallet(wallet_err) if is_commitment_tree_root_conflict(&wallet_err) => {
                     let at_height = u32::from(start) as u64;
-                    SyncError::continuity(
+                    SyncError::tree_conflict(
                         at_height,
                         format!(
                             "commitment tree root conflict while scanning from {at_height}: {wallet_err}"
