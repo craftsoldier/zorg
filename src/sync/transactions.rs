@@ -22,7 +22,7 @@ use std::{
 
 use rusqlite::{types::Value, vtab::array::Array, OptionalExtension};
 use transparent::address::TransparentAddress;
-use zcash_client_backend::data_api::{Balance, WalletWrite};
+use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, Balance, WalletWrite};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::BranchId,
@@ -34,7 +34,7 @@ use crate::account::{parse_account_uuid, Account};
 use crate::db::with_wallet_db_write_lock;
 use crate::network::WalletNetwork;
 
-use super::{open_readonly_conn, open_wallet_db};
+use super::{open_readonly_conn, open_wallet_db, open_wallet_db_for_read};
 
 const TRANSPARENT_POOL: i64 = 0;
 const SAPLING_POOL: i64 = 2;
@@ -63,8 +63,10 @@ pub struct WalletBalance {
 
 pub fn get_wallet_balance(account: &Account) -> Result<WalletBalance, String> {
     let account_id = parse_account_uuid(&account.uuid)?;
-    let summary = crate::db::wallet_summary(&account.db_path, account.network)?;
-    let Some(b) = summary
+    let snapshot = open_wallet_db_for_read(&account.db_path, account.network)?
+        .get_wallet_snapshot(ConfirmationsPolicy::default())
+        .map_err(|e| e.to_string())?;
+    let Some(b) = snapshot
         .as_ref()
         .and_then(|s| s.account_balances().get(&account_id))
     else {

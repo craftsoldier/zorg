@@ -21,7 +21,7 @@ use tonic::{
     Request, Response, Status,
 };
 use zcash_client_backend::{
-    data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees},
+    data_api::{chain::CommitmentTreeRoot, wallet::ConfirmationsPolicy, WalletCommitmentTrees},
     proto::service::{
         self, compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
         GetAddressUtxosArg, GetAddressUtxosReply, GetSubtreeRootsArg, RawTransaction, SendResponse,
@@ -315,11 +315,12 @@ async fn fetch_subtree_roots<N>(
 pub(super) async fn download_subtree_roots(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
-    db_path: &str,
 ) -> Result<(), SyncError> {
     let (sap_start, orch_start, ironwood_start) = {
-        let summary = crate::db::wallet_summary(db_path, *db.params()).map_err(SyncError::db)?;
-        match summary {
+        let snapshot = db
+            .get_wallet_snapshot(ConfirmationsPolicy::default())
+            .map_err(|e| SyncError::db(e.to_string()))?;
+        match snapshot {
             Some(s) => (
                 s.next_sapling_subtree_index(),
                 s.next_orchard_subtree_index(),

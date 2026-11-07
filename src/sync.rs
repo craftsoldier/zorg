@@ -1,4 +1,4 @@
-use zcash_client_backend::data_api::WalletRead;
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 
 use crate::{
     db::{
@@ -54,47 +54,23 @@ fn is_completed_sync_status(
         && last_completed_height == Some(chain_tip_height)
 }
 
-/// Reads only the two wallet heights needed for status and completion checks.
-///
-/// `WalletSummary` uses `birthday - 1` before the first block has been fully
-/// scanned, so preserve that behavior when `block_fully_scanned` has no value.
-pub(crate) fn wallet_scan_heights(db: &mut WalletDatabase) -> Result<Option<(u64, u64)>, String> {
-    wallet_scan_heights_in_snapshot(db, || {})
-}
-
-fn wallet_scan_heights_in_snapshot(
-    db: &mut WalletDatabase,
-    after_chain_height: impl FnOnce(),
-) -> Result<Option<(u64, u64)>, String> {
-    // The callback is a deterministic test seam: the first SELECT has fixed
-    // the SQLite snapshot before a concurrent writer is allowed to commit.
-    // Production callers always pass a no-op.
-    let mut after_chain_height = Some(after_chain_height);
-    db.transactionally(|db| {
-        let Some(chain_tip_height) = db.chain_height()? else {
-            return Ok(None);
-        };
-        if let Some(after_chain_height) = after_chain_height.take() {
-            after_chain_height();
-        }
-        let scanned_height = match db.block_fully_scanned()? {
-            Some(block) => u32::from(block.block_height()) as u64,
-            None => {
-                let Some(birthday_height) = db.get_wallet_birthday()? else {
-                    return Ok(None);
-                };
-                u32::from(birthday_height).saturating_sub(1) as u64
-            }
-        };
-
-        Ok(Some((scanned_height, u32::from(chain_tip_height) as u64)))
-    })
-    .map_err(|e: zcash_client_sqlite::error::SqliteClientError| format!("{e}"))
+/// The wallet's fully scanned height and chain tip height, or none before the
+/// wallet has a chain tip and birthday.
+pub(crate) fn wallet_scan_heights(db: &WalletDatabase) -> Result<Option<(u64, u64)>, String> {
+    Ok(db
+        .get_wallet_snapshot(ConfirmationsPolicy::default())
+        .map_err(|e| e.to_string())?
+        .map(|snapshot| {
+            (
+                u32::from(snapshot.fully_scanned_height()) as u64,
+                u32::from(snapshot.chain_tip_height()) as u64,
+            )
+        }))
 }
 
 pub fn get_sync_progress(db_path: &str, network: WalletNetwork) -> Result<SyncProgress, String> {
-    let mut db = open_wallet_db_for_read(db_path, network)?;
-    match wallet_scan_heights(&mut db)? {
+    let db = open_wallet_db_for_read(db_path, network)?;
+    match wallet_scan_heights(&db)? {
         Some((scanned_height, chain_tip_height)) => {
             let last_completed_height =
                 super::sync_engine::completed_sync_height_for_status(db_path).unwrap_or_else(|e| {
