@@ -35,6 +35,51 @@ use crate::{db::with_wallet_db_write_lock, network::WalletNetwork};
 use super::block_source::MemoryBlockSource;
 use super::{SyncError, WalletDatabase};
 
+/// A connection to a lightwalletd server that passed the network check.
+pub type LwdClient = CompactTxStreamerClient<Channel>;
+
+/// Connects to `explicit`, or to the first of `network`'s built-in servers
+/// that answers and serves `network`.
+pub async fn connect_endpoint(
+    network: WalletNetwork,
+    explicit: Option<&str>,
+) -> Result<LwdClient, String> {
+    let defaults;
+    let urls = match explicit.as_ref() {
+        Some(url) => std::slice::from_ref(url),
+        None => {
+            defaults = network.default_lightwalletd_urls();
+            defaults
+        }
+    };
+    let mut last_error = String::new();
+    for (i, url) in urls.iter().enumerate() {
+        match connect(network, url).await {
+            Ok(client) => {
+                if i > 0 {
+                    log::warn!("failing over to {url}");
+                }
+                return Ok(client);
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                if i + 1 < urls.len() {
+                    log::warn!("{url} unreachable ({last_error}); trying next endpoint");
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// The server's current chain tip height.
+pub async fn chain_tip(client: &mut LwdClient) -> Result<u64, String> {
+    get_latest_block(client)
+        .await
+        .map(|tip| tip.height)
+        .map_err(|e| e.to_string())
+}
+
 const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTWALLETD_UNARY_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const LIGHTWALLETD_STREAM_START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -72,7 +117,7 @@ where
 
 /// Opens a channel to `lightwalletd_url` and rejects a server that does not
 /// serve `network`.
-pub(crate) async fn connect(
+async fn connect(
     network: WalletNetwork,
     lightwalletd_url: &str,
 ) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
