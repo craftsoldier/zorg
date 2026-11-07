@@ -4,7 +4,11 @@ use std::ops::RangeInclusive;
 mod terminal;
 
 use zcash_client_backend::data_api::AccountBirthday;
-use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
+use zcash_protocol::{
+    consensus::{NetworkUpgrade, Parameters},
+    value::{COIN, MAX_MONEY},
+    TxId,
+};
 use zorg::keys;
 use zorg::network::WalletNetwork;
 use zorg::sync;
@@ -1790,20 +1794,13 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
 }
 
 /// The txid in `text`, written the way block explorers and `zorg history` show it.
-fn parse_txid(text: &str) -> Result<zcash_primitives::transaction::TxId, String> {
-    let mut bytes: [u8; 32] = hex::decode(text.trim())
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or("Not a valid txid; expected 64 hexadecimal characters")?;
-    bytes.reverse();
-    Ok(zcash_primitives::transaction::TxId::from_bytes(bytes))
+fn parse_txid(text: &str) -> Result<TxId, String> {
+    TxId::from_hex(text.trim()).ok_or("Not a valid txid; expected 64 hexadecimal characters".into())
 }
 
 // ── helpers ──
 
 fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
-    const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
-    const MAX_ZATOSHIS: u64 = 21_000_000 * ZATOSHIS_PER_ZEC;
     let amount = amount.trim();
     if amount.starts_with('-') {
         return Err("Amount must be positive".into());
@@ -1829,13 +1826,13 @@ fn parse_zatoshi_amount(amount: &str) -> Result<u64, String> {
             * 10_u64.pow((8 - fraction.len()) as u32)
     };
     let zatoshis = whole
-        .checked_mul(ZATOSHIS_PER_ZEC)
+        .checked_mul(COIN)
         .and_then(|value| value.checked_add(fractional))
         .ok_or("Amount exceeds the maximum supply")?;
     if zatoshis == 0 {
         return Err("Amount must be greater than zero".into());
     }
-    if zatoshis > MAX_ZATOSHIS {
+    if zatoshis > MAX_MONEY {
         return Err("Amount exceeds the maximum supply of 21,000,000 ZEC".into());
     }
     Ok(zatoshis)

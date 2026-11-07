@@ -297,7 +297,6 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.3.1",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -779,17 +778,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
-name = "futures-macro"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -808,7 +796,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-macro",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -1525,12 +1512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
 name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1795,7 +1776,6 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
- "chacha20",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -2708,7 +2688,6 @@ checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 
@@ -2955,7 +2934,6 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27228f279facfd6b9dd015cea88538020c30f87c8a4aa59e8ed85808d81febb5"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "bech32",
  "bip32",
@@ -2964,7 +2942,6 @@ dependencies = [
  "byteorder",
  "document-features",
  "flume",
- "futures-util",
  "getset",
  "group",
  "hex",
@@ -3019,7 +2996,6 @@ dependencies = [
  "maybe-rayon",
  "nonempty",
  "orchard",
- "pastey",
  "pczt",
  "prost",
  "rand 0.10.3",
@@ -3032,7 +3008,6 @@ dependencies = [
  "schemerz-rusqlite",
  "secp256k1",
  "secrecy",
- "serde",
  "shardtree",
  "static_assertions",
  "subtle",
@@ -3073,7 +3048,6 @@ dependencies = [
  "blake2b_simd",
  "bls12_381",
  "bs58",
- "byteorder",
  "corez",
  "document-features",
  "group",

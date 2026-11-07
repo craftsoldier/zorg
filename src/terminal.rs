@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use console::{style, Key, Term};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use zcash_protocol::value::COIN;
 use zorg::network::WalletNetwork;
 
 /// Error for a confirmation answered with Esc or `n`; nothing was done.
@@ -28,12 +29,12 @@ pub fn interactive() -> bool {
 
 /// `zatoshis` in ZEC with trailing zeros trimmed, keeping at least `min_decimals`.
 pub fn zec(zatoshis: u64, min_decimals: usize) -> String {
-    let fraction = format!("{:08}", zatoshis % 100_000_000);
+    let fraction = format!("{:08}", zatoshis % COIN);
     let mut fraction = fraction.trim_end_matches('0').to_string();
     while fraction.len() < min_decimals {
         fraction.push('0');
     }
-    let whole = zatoshis / 100_000_000;
+    let whole = zatoshis / COIN;
     if fraction.is_empty() {
         whole.to_string()
     } else {
@@ -335,7 +336,7 @@ pub fn ago(seconds: u64) -> String {
 
 /// `zatoshis` with all 8 decimal places and the network's unit, e.g. "0.29000000 TAZ".
 pub fn fmt_zec(zatoshis: u64, net: WalletNetwork) -> String {
-    let (whole, fraction) = (zatoshis / 100_000_000, zatoshis % 100_000_000);
+    let (whole, fraction) = (zatoshis / COIN, zatoshis % COIN);
     format!("{whole}.{fraction:08} {}", net.unit())
 }
 
