@@ -723,7 +723,6 @@ async fn repair_anchor_root_mismatch_if_needed(
 async fn refresh_utxos(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
-    network: WalletNetwork,
 ) -> Result<(), SyncError> {
     for account_id in db
         .get_account_ids()
@@ -737,7 +736,7 @@ async fn refresh_utxos(
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| SyncError::db(format!("get_transparent_receivers: {e}")))?
             .into_keys()
-            .map(|addr| addr.encode(&network))
+            .map(|addr| addr.encode(db.params()))
             .collect();
 
         if addresses.is_empty() {
@@ -911,7 +910,7 @@ async fn run_sync_impl(
     // Retained send-lock expiry requires a usable target height.
     crate::sync::recover_previous_process(db_data_path, network).map_err(SyncError::db)?;
 
-    refresh_utxos(&mut client, &mut db, network).await?;
+    refresh_utxos(&mut client, &mut db).await?;
 
     // 2.5. Resubmit eligible unmined wallet txs now that we know the
     // current tip. Best-effort: failures are logged inside the helper
@@ -931,7 +930,7 @@ async fn run_sync_impl(
     .await;
 
     // 3. Download subtree roots (incremental)
-    download_subtree_roots(&mut client, &mut db, db_data_path, network).await?;
+    download_subtree_roots(&mut client, &mut db, db_data_path).await?;
 
     // 4. Calculate initial scan target (before any scanning)
     let initial_ranges = db
@@ -1420,7 +1419,7 @@ async fn run_sync_impl(
         let resubmit_exclusions = recovery_resubmit_exclusions(db_data_path, &post_scan_ranges)?;
 
         // Enhancement
-        run_enhancement(&mut client, &mut db, network).await?;
+        run_enhancement(&mut client, &mut db).await?;
 
         // Post-batch auto-resubmit.
         //
