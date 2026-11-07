@@ -260,13 +260,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        if zorg::secret_store::mnemonic_if_present(
-            &account.db_path,
-            account.network,
-            &account.uuid,
-        )?
-        .is_none()
-        {
+        if zorg::secret_store::mnemonic_if_present(account)?.is_none() {
             terminal::failure(&format!(
                 "No recovery phrase for {:?} on this Mac, so zorg cannot open it. \
                  Delete the account, then import it again from your written phrase.",
@@ -840,25 +834,29 @@ fn create_account(
         cmd_import(db, net, account_birthday, &name, mnemonic, seed)
     } else {
         cmd_create(db, net, server(net).as_deref(), &name)
-    };
-    let created = match result {
+    }
+    .and_then(|created| {
+        let account = zorg::account::Account {
+            uuid: created.uuid.clone(),
+            name: name.clone(),
+            network: net,
+            db_path: db.to_string(),
+        };
+        store_and_verify_mnemonic(&account, &created.mnemonic)?;
+        Ok((created, account))
+    });
+    let (created, new_account) = match result {
         Ok(created) => created,
         Err(e) => {
             let _ = zorg::account::remove_wallet_files(db);
             return Err(e);
         }
     };
-    let new_account = zorg::account::Account {
-        uuid: created.uuid.clone(),
-        name: name.clone(),
-        network: net,
-        db_path: db.to_string(),
-    };
     if let Err(e) = zorg::account::secure_wallet_db_file(&db_path)
         .and_then(|()| zorg::account::index_new_account(root, &new_account, &created.seed))
     {
         let _ = zorg::account::remove_wallet_files(db);
-        let _ = zorg::secret_store::delete_mnemonic(db, net, &created.uuid);
+        let _ = zorg::secret_store::delete_mnemonic(&new_account);
         return Err(e);
     }
     if let Some(birthday) = created.birthday {
@@ -900,7 +898,6 @@ fn cmd_create(
     let seed = keys::mnemonic_to_seed(&mnemonic)?;
     let created =
         zorg::account::init_db_and_create_account(db, net, &seed, Some(account_birthday), name)?;
-    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
     Ok(zorg::account::NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -913,14 +910,12 @@ fn cmd_create(
 /// Stores the mnemonic and checks an authenticated read-back against the input.
 /// On a failed read-back the stored entry is removed.
 fn store_and_verify_mnemonic(
-    db: &str,
-    net: WalletNetwork,
-    account_uuid: &str,
+    account: &zorg::account::Account,
     mnemonic: &str,
 ) -> Result<(), String> {
-    zorg::secret_store::store_mnemonic(db, net, account_uuid, mnemonic)
+    zorg::secret_store::store_mnemonic(account, mnemonic)
         .map_err(|e| format!("Failed to store mnemonic: {e}"))?;
-    let verified = zorg::secret_store::mnemonic(db, net, account_uuid)
+    let verified = zorg::secret_store::mnemonic(account)
         .map_err(|e| format!("Failed to read the mnemonic back: {e}"))
         .and_then(|stored| {
             if stored.as_str() == mnemonic {
@@ -930,7 +925,7 @@ fn store_and_verify_mnemonic(
             }
         });
     if verified.is_err() {
-        let _ = zorg::secret_store::delete_mnemonic(db, net, account_uuid);
+        let _ = zorg::secret_store::delete_mnemonic(account);
     }
     verified
 }
@@ -959,7 +954,6 @@ fn cmd_import(
     seed: secrecy::SecretVec<u8>,
 ) -> Result<zorg::account::NewAccount, String> {
     let created = zorg::account::init_db_and_create_account(db, net, &seed, birthday, name)?;
-    store_and_verify_mnemonic(db, net, &created.uuid, &mnemonic)?;
     Ok(zorg::account::NewAccount {
         uuid: created.uuid,
         unified_address: created.unified_address,
@@ -1332,9 +1326,9 @@ fn cmd_delete(
         }
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
     }
-    zorg::secret_store::authenticate(&account.db_path, account.network, &account.uuid)?;
+    zorg::secret_store::authenticate(account)?;
     zorg::account::delete_account(root, account, || {
-        zorg::secret_store::delete_mnemonic(&account.db_path, account.network, &account.uuid)
+        zorg::secret_store::delete_mnemonic(account)
     })?;
     if interactive {
         terminal::success(&format!("Deleted account {}", account.name));
@@ -1361,8 +1355,7 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
 
 /// The account's recovery phrase, or the commands that restore it when this Mac has none.
 fn phrase(account: &zorg::account::Account) -> Result<zeroize::Zeroizing<String>, String> {
-    match zorg::secret_store::mnemonic_if_present(&account.db_path, account.network, &account.uuid)?
-    {
+    match zorg::secret_store::mnemonic_if_present(account)? {
         Some(phrase) => Ok(phrase),
         None => Err(missing_phrase_error(
             account,

@@ -1,4 +1,4 @@
-use crate::{keys, network::WalletNetwork};
+use crate::{account::Account, keys, network::WalletNetwork};
 use std::path::Path;
 use zcash_client_backend::data_api::WalletRead;
 use zeroize::Zeroizing;
@@ -14,25 +14,16 @@ use age as backend;
 use keychain as backend;
 
 /// The account's recovery phrase, read with macOS authentication.
-pub fn mnemonic(
-    db: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<Zeroizing<String>, String> {
-    mnemonic_if_present(db, network, account_uuid)?
-        .ok_or_else(|| "Mnemonic not found for account".to_string())
+pub fn mnemonic(account: &Account) -> Result<Zeroizing<String>, String> {
+    mnemonic_if_present(account)?.ok_or_else(|| "Mnemonic not found for account".to_string())
 }
 
 /// The account's recovery phrase, or `None` when the selected store has no entry.
-pub fn mnemonic_if_present(
-    db: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<Option<Zeroizing<String>>, String> {
+pub fn mnemonic_if_present(account: &Account) -> Result<Option<Zeroizing<String>>, String> {
     let Some(bytes) = backend::read(
-        root(db)?,
-        mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid)?,
+        root(&account.db_path)?,
+        mnemonic_store_service_for_network(account.network),
+        &account_mnemonic_key(&account.uuid)?,
     )?
     else {
         return Ok(None);
@@ -40,14 +31,17 @@ pub fn mnemonic_if_present(
     let text =
         std::str::from_utf8(&bytes).map_err(|_| "Mnemonic is not valid UTF-8".to_string())?;
     let wallet = crate::db::WalletDatabase::from_connection(
-        crate::db::open_readonly_conn_with_timeout(db, Some(crate::db::READ_DB_BUSY_TIMEOUT))?,
-        network,
+        crate::db::open_readonly_conn_with_timeout(
+            &account.db_path,
+            Some(crate::db::READ_DB_BUSY_TIMEOUT),
+        )?,
+        account.network,
         zcash_client_sqlite::util::SystemClock,
         rand::rand_core::UnwrapErr(rand::rngs::SysRng),
     );
     if !wallet
         .validate_seed(
-            crate::account::parse_account_uuid(account_uuid)?,
+            crate::account::parse_account_uuid(&account.uuid)?,
             &keys::mnemonic_to_seed(text)?,
         )
         .map_err(|e| format!("Failed to check recovery phrase: {e}"))?
@@ -57,37 +51,32 @@ pub fn mnemonic_if_present(
     Ok(Some(Zeroizing::new(text.to_string())))
 }
 
-pub fn store_mnemonic(
-    db: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-    mnemonic: &str,
-) -> Result<(), String> {
+pub fn store_mnemonic(account: &Account, mnemonic: &str) -> Result<(), String> {
     backend::write(
-        root(db)?,
-        mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid)?,
+        root(&account.db_path)?,
+        mnemonic_store_service_for_network(account.network),
+        &account_mnemonic_key(&account.uuid)?,
         mnemonic.as_bytes(),
     )
 }
 
 /// Authorizes access to an existing secret without exporting its contents.
 /// Missing files are allowed; authentication errors are returned.
-pub fn authenticate(db: &str, network: WalletNetwork, account_uuid: &str) -> Result<(), String> {
+pub fn authenticate(account: &Account) -> Result<(), String> {
     backend::read(
-        root(db)?,
-        mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid)?,
+        root(&account.db_path)?,
+        mnemonic_store_service_for_network(account.network),
+        &account_mnemonic_key(&account.uuid)?,
     )?;
     Ok(())
 }
 
 /// Removes the account's stored phrase. A missing entry is not an error.
-pub fn delete_mnemonic(db: &str, network: WalletNetwork, account_uuid: &str) -> Result<(), String> {
+pub fn delete_mnemonic(account: &Account) -> Result<(), String> {
     backend::delete(
-        root(db)?,
-        mnemonic_store_service_for_network(network),
-        &account_mnemonic_key(account_uuid)?,
+        root(&account.db_path)?,
+        mnemonic_store_service_for_network(account.network),
+        &account_mnemonic_key(&account.uuid)?,
     )
 }
 
@@ -120,14 +109,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("regtest.db");
         for uuid in ["", "../other-account", "not-a-uuid"] {
-            assert!(
-                store_mnemonic(db.to_str().unwrap(), WalletNetwork::Regtest, uuid, "unused")
-                    .is_err()
-            );
-            assert!(
-                mnemonic_if_present(db.to_str().unwrap(), WalletNetwork::Regtest, uuid).is_err()
-            );
-            assert!(delete_mnemonic(db.to_str().unwrap(), WalletNetwork::Regtest, uuid).is_err());
+            let account = Account {
+                uuid: uuid.into(),
+                name: "Invalid".into(),
+                network: WalletNetwork::Regtest,
+                db_path: db.to_str().unwrap().into(),
+            };
+            assert!(store_mnemonic(&account, "unused").is_err());
+            assert!(mnemonic_if_present(&account).is_err());
+            assert!(delete_mnemonic(&account).is_err());
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -149,9 +139,15 @@ mod tests {
         )
         .unwrap()
         .uuid;
-        store_mnemonic(db, WalletNetwork::Regtest, &uuid, &phrase).unwrap();
-        let result = mnemonic(db, WalletNetwork::Regtest, &uuid);
-        delete_mnemonic(db, WalletNetwork::Regtest, &uuid).unwrap();
+        let account = Account {
+            uuid,
+            name: "Roundtrip".into(),
+            network: WalletNetwork::Regtest,
+            db_path: db.into(),
+        };
+        store_mnemonic(&account, &phrase).unwrap();
+        let result = mnemonic(&account);
+        delete_mnemonic(&account).unwrap();
         assert!(result.unwrap().as_str() == phrase.as_str());
     }
 }
