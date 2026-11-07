@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use nonempty::NonEmpty;
 use rusqlite::{params, OptionalExtension};
-use shardtree::error::{InsertionError, QueryError, ShardTreeError};
+use shardtree::error::{InsertionError, ShardTreeError};
 use tonic::transport::Channel;
 use zcash_client_backend::data_api::{
     chain::{self, error::Error as ChainError, scan_cached_blocks},
@@ -74,12 +74,11 @@ const SANDBLASTING_END: u32 = 2_050_000;
 const BATCH_SIZE_SANDBLASTING: u32 = 100;
 
 const MAX_WITNESS_REPAIR_PASSES_PER_RUN: u32 = 3;
-const WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS: u64 = 10_000;
 const SYNC_META_TABLE: &str = "ext_zorg_sync_meta";
 const LAST_COMPLETED_SYNC_HEIGHT_KEY: &str = "last_completed_sync_height";
 const SYNC_IN_PROGRESS_KEY: &str = "sync_in_progress";
 const LAST_COMPLETED_SYNC_AT_KEY: &str = "last_completed_sync_at";
-const WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY: &str = "witness_check_last_clean_height";
+const WITNESS_CHECK_VERSION_KEY: &str = "witness_check_version";
 type SyncCompletionMeta = (Option<u64>, Option<bool>);
 // `truncate_to_chain_state` only injects a canonical frontier when the requested
 // height is below the retained checkpoint window. Start at the pruning depth
@@ -188,75 +187,6 @@ fn describe_block_range(range: &std::ops::Range<BlockHeight>) -> String {
     format!("{}..{}", u32::from(range.start), u32::from(range.end))
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct WitnessCheckMeta {
-    last_clean_height: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WitnessCheckRunReason {
-    Forced,
-    MissingMarker,
-    TipBelowLastClean { last_clean_height: u64 },
-    MaxCleanAgeReached { age_blocks: u64 },
-    MetadataUnavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WitnessCheckDecision {
-    Run(WitnessCheckRunReason),
-    Skip {
-        last_clean_height: u64,
-        age_blocks: u64,
-    },
-}
-
-impl WitnessCheckRunReason {
-    fn description(self) -> String {
-        match self {
-            WitnessCheckRunReason::Forced => "forced by repair/reorg signal".into(),
-            WitnessCheckRunReason::MissingMarker => "no clean marker".into(),
-            WitnessCheckRunReason::TipBelowLastClean { last_clean_height } => format!(
-                "tip moved below last clean height (last_clean_height={last_clean_height})"
-            ),
-            WitnessCheckRunReason::MaxCleanAgeReached { age_blocks } => format!(
-                "clean marker is stale (age_blocks={age_blocks}, max_age_blocks={WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS})"
-            ),
-            WitnessCheckRunReason::MetadataUnavailable => "metadata unavailable".into(),
-        }
-    }
-}
-
-fn decide_witness_check(
-    meta: WitnessCheckMeta,
-    current_tip_height: u64,
-    force_check: bool,
-) -> WitnessCheckDecision {
-    if force_check {
-        return WitnessCheckDecision::Run(WitnessCheckRunReason::Forced);
-    }
-
-    let Some(last_clean_height) = meta.last_clean_height else {
-        return WitnessCheckDecision::Run(WitnessCheckRunReason::MissingMarker);
-    };
-
-    if last_clean_height > current_tip_height {
-        return WitnessCheckDecision::Run(WitnessCheckRunReason::TipBelowLastClean {
-            last_clean_height,
-        });
-    }
-
-    let age_blocks = current_tip_height - last_clean_height;
-    if age_blocks >= WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS {
-        return WitnessCheckDecision::Run(WitnessCheckRunReason::MaxCleanAgeReached { age_blocks });
-    }
-
-    WitnessCheckDecision::Skip {
-        last_clean_height,
-        age_blocks,
-    }
-}
-
 fn read_sync_meta<T>(conn: &rusqlite::Connection, key: &str) -> Result<Option<T>, String>
 where
     T: std::str::FromStr,
@@ -293,13 +223,6 @@ where
     }))
 }
 
-fn read_witness_check_meta(db_data_path: &str) -> Result<WitnessCheckMeta, String> {
-    let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
-    Ok(WitnessCheckMeta {
-        last_clean_height: read_sync_meta(&conn, WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY)?,
-    })
-}
-
 fn read_sync_completion_meta(db_data_path: &str) -> Result<SyncCompletionMeta, String> {
     let conn = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))?;
     Ok((
@@ -326,20 +249,6 @@ fn write_sync_meta(db_data_path: &str, entries: &[(&str, String)]) -> Result<(),
         .map_err(|e| format!("commit sync metadata transaction: {e}"))
 }
 
-fn witness_check_decision(
-    db_data_path: &str,
-    current_tip_height: u64,
-    force_check: bool,
-) -> WitnessCheckDecision {
-    match read_witness_check_meta(db_data_path) {
-        Ok(meta) => decide_witness_check(meta, current_tip_height, force_check),
-        Err(e) => {
-            log::warn!("sync: witness repair metadata unavailable, running check: {e}");
-            WitnessCheckDecision::Run(WitnessCheckRunReason::MetadataUnavailable)
-        }
-    }
-}
-
 fn ensure_sync_meta_table(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ext_zorg_sync_meta (
@@ -352,13 +261,10 @@ fn ensure_sync_meta_table(conn: &rusqlite::Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_witness_check_clean(db_data_path: &str, current_tip_height: u64) -> Result<(), String> {
+fn mark_witness_check_clean(db_data_path: &str) -> Result<(), String> {
     write_sync_meta(
         db_data_path,
-        &[(
-            WITNESS_CHECK_LAST_CLEAN_HEIGHT_KEY,
-            current_tip_height.to_string(),
-        )],
+        &[(WITNESS_CHECK_VERSION_KEY, env!("CARGO_PKG_VERSION").into())],
     )
 }
 
@@ -453,61 +359,30 @@ fn queue_witness_repairs_if_needed(
     db: &mut WalletDatabase,
     current_tip_height: u64,
     repair_passes_this_run: &mut u32,
-    force_check: bool,
 ) -> Result<Option<u64>, SyncError> {
-    match witness_check_decision(db_data_path, current_tip_height, force_check) {
-        WitnessCheckDecision::Run(reason) => {
-            log::info!(
-                "sync: witness repair check running ({})",
-                reason.description(),
-            );
-        }
-        WitnessCheckDecision::Skip {
-            last_clean_height,
-            age_blocks,
-        } => {
-            log::info!(
-                "sync: witness repair check skipped \
-                 (last_clean_height={last_clean_height}, current_tip={current_tip_height}, \
-                 age_blocks={age_blocks}, max_age_blocks={WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS})",
-            );
-            return Ok(None);
-        }
+    let checked_version = open_readonly_conn_with_timeout(db_data_path, Some(SYNC_DB_BUSY_TIMEOUT))
+        .and_then(|conn| read_sync_meta::<String>(&conn, WITNESS_CHECK_VERSION_KEY))
+        .unwrap_or_else(|e| {
+            log::warn!("sync: witness repair metadata unavailable, running check: {e}");
+            None
+        });
+    if checked_version.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
     }
+    log::info!("sync: witness repair check running");
 
     let rescan_ranges = with_wallet_db_write_lock("sync_engine.check_witnesses", || {
-        match db.check_witnesses() {
-            Ok(ranges) => Ok(ranges),
-            Err(error) if is_witness_position_beyond_tree(&error) => {
-                let cleared = clear_unmined_note_commitment_positions(db_data_path)?;
-                if cleared == 0 {
-                    return Err(SyncError::db(format!("check_witnesses: {error}")));
-                }
-
-                log::warn!(
-                    "sync: cleared {} stale commitment-tree position(s) from unmined notes after reorg; retrying witness check",
-                    cleared,
-                );
-                db.check_witnesses().map_err(|retry_error| {
-                    SyncError::db(format!(
-                        "check_witnesses after clearing unmined note positions: {retry_error}"
-                    ))
-                })
-            }
-            Err(error) => Err(SyncError::db(format!("check_witnesses: {error}"))),
-        }
+        db.check_witnesses()
+            .map_err(|e| SyncError::db(format!("check_witnesses: {e}")))
     })?;
 
     let Some(nonempty_ranges) = NonEmpty::from_vec(rescan_ranges) else {
         if let Err(e) = with_wallet_db_write_lock("sync_engine.mark_witness_check_clean", || {
-            mark_witness_check_clean(db_data_path, current_tip_height)
+            mark_witness_check_clean(db_data_path)
         }) {
             log::warn!("sync: witness repair clean marker update failed: {e}");
         } else {
-            log::info!(
-                "sync: witness repair check found no work; marked clean at height {}",
-                current_tip_height,
-            );
+            log::info!("sync: witness repair check found no work; marked clean for this version");
         }
         return Ok(None);
     };
@@ -949,7 +824,6 @@ async fn run_sync_impl(
     let mut main_rewinds_this_run: u32 = 0;
     let mut witness_repair_passes_this_run: u32 = 0;
     let mut anchor_root_repair_passes_this_run: u32 = 0;
-    let mut force_witness_check_this_run = false;
 
     // Phase-transition markers used only for logging. Progress through the
     // scan queue is implicitly ordered by `ScanPriority::Verify` >
@@ -1000,7 +874,6 @@ async fn run_sync_impl(
                     &mut db,
                     current_tip_height,
                     &mut witness_repair_passes_this_run,
-                    force_witness_check_this_run,
                 )?
                 .is_some()
                     || repair_anchor_root_mismatch_if_needed(
@@ -1012,7 +885,6 @@ async fn run_sync_impl(
                     .await?
                     .is_some()
                 {
-                    force_witness_check_this_run = true;
                     prefetch = None;
                     continue;
                 } else {
@@ -1389,7 +1261,6 @@ async fn run_sync_impl(
                         *current_rewinds,
                         MAX_REWINDS_PER_RUN,
                     );
-                    force_witness_check_this_run = true;
                     if actual_rewind_height_u64 < current_tip_height && post_rewind_pending == 0 {
                         return Err(SyncError::continuity(
                             current_tip_height,
@@ -1562,59 +1433,6 @@ fn is_commitment_tree_root_conflict(err: &SqliteClientError) -> bool {
         err,
         SqliteClientError::CommitmentTree(ShardTreeError::Insert(InsertionError::Conflict(_)))
     )
-}
-
-fn is_witness_position_beyond_tree(err: &SqliteClientError) -> bool {
-    matches!(
-        err,
-        SqliteClientError::CommitmentTree(ShardTreeError::Query(QueryError::NotContained(_)))
-    )
-}
-
-fn clear_unmined_note_commitment_positions(db_data_path: &str) -> Result<usize, SyncError> {
-    let mut conn = open_wallet_raw_conn_with_timeout(db_data_path, SYNC_DB_BUSY_TIMEOUT)
-        .map_err(|e| SyncError::db(format!("open DB to repair unmined note positions: {e}")))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| SyncError::db(format!("begin unmined note position repair: {e}")))?;
-    let mut cleared = 0;
-
-    for table in [
-        "sapling_received_notes",
-        "orchard_received_notes",
-        "ironwood_received_notes",
-    ] {
-        let exists = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-                [table],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|e| SyncError::db(format!("inspect {table} before position repair: {e}")))?;
-        if !exists {
-            continue;
-        }
-
-        cleared += tx
-            .execute(
-                &format!(
-                    "UPDATE {table} AS rn
-                     SET commitment_tree_position = NULL
-                     WHERE commitment_tree_position IS NOT NULL
-                     AND EXISTS (
-                         SELECT 1 FROM transactions AS tx
-                         WHERE tx.id_tx = rn.transaction_id
-                         AND tx.mined_height IS NULL
-                     )"
-                ),
-                [],
-            )
-            .map_err(|e| SyncError::db(format!("repair unmined positions in {table}: {e}")))?;
-    }
-
-    tx.commit()
-        .map_err(|e| SyncError::db(format!("commit unmined note position repair: {e}")))?;
-    Ok(cleared)
 }
 
 fn should_use_empty_chain_state(
@@ -1795,74 +1613,18 @@ mod tests {
     }
 
     #[test]
-    fn witness_check_runs_without_a_clean_marker() {
-        assert_eq!(
-            decide_witness_check(WitnessCheckMeta::default(), 3_364_776, false),
-            WitnessCheckDecision::Run(WitnessCheckRunReason::MissingMarker),
-        );
-    }
-
-    #[test]
-    fn witness_check_skips_when_recent_clean_marker_is_fresh() {
-        let meta = WitnessCheckMeta {
-            last_clean_height: Some(3_364_774),
-        };
-
-        assert_eq!(
-            decide_witness_check(meta, 3_364_776, false),
-            WitnessCheckDecision::Skip {
-                last_clean_height: 3_364_774,
-                age_blocks: 2,
-            },
-        );
-    }
-
-    #[test]
-    fn witness_check_runs_when_forced_or_marker_is_stale() {
-        let meta = WitnessCheckMeta {
-            last_clean_height: Some(1_000),
-        };
-
-        assert_eq!(
-            decide_witness_check(meta, 1_001, true),
-            WitnessCheckDecision::Run(WitnessCheckRunReason::Forced),
-        );
-        assert_eq!(
-            decide_witness_check(meta, 1_000 + WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS, false),
-            WitnessCheckDecision::Run(WitnessCheckRunReason::MaxCleanAgeReached {
-                age_blocks: WITNESS_CHECK_MAX_CLEAN_AGE_BLOCKS,
-            }),
-        );
-    }
-
-    #[test]
-    fn witness_check_runs_when_tip_rewinds() {
-        assert_eq!(
-            decide_witness_check(
-                WitnessCheckMeta {
-                    last_clean_height: Some(3_364_776),
-                },
-                3_364_775,
-                false,
-            ),
-            WitnessCheckDecision::Run(WitnessCheckRunReason::TipBelowLastClean {
-                last_clean_height: 3_364_776,
-            }),
-        );
-    }
-
-    #[test]
     fn witness_check_clean_marker_round_trips_through_sync_meta_table() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let db_path = file.path().to_str().unwrap();
 
-        mark_witness_check_clean(db_path, 3_364_776).unwrap();
+        mark_witness_check_clean(db_path).unwrap();
 
+        let conn = open_readonly_conn_with_timeout(db_path, None).unwrap();
         assert_eq!(
-            read_witness_check_meta(db_path).unwrap(),
-            WitnessCheckMeta {
-                last_clean_height: Some(3_364_776),
-            },
+            read_sync_meta::<String>(&conn, WITNESS_CHECK_VERSION_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
         );
     }
 
@@ -1989,74 +1751,5 @@ mod tests {
             zcash_protocol::consensus::BlockHeight::from_u32(2_500_000),
         );
         assert!(!is_commitment_tree_root_conflict(&block_conflict));
-    }
-
-    #[test]
-    fn witness_position_beyond_tree_is_recognised() {
-        use incrementalmerkletree::{Address, Level};
-
-        let not_contained = SqliteClientError::CommitmentTree(ShardTreeError::Query(
-            QueryError::NotContained(Address::from_parts(Level::new(0), 0)),
-        ));
-        assert!(is_witness_position_beyond_tree(&not_contained));
-
-        let incomplete = SqliteClientError::CommitmentTree(ShardTreeError::Query(
-            QueryError::TreeIncomplete(vec![]),
-        ));
-        assert!(!is_witness_position_beyond_tree(&incomplete));
-    }
-
-    #[test]
-    fn unmined_note_position_repair_preserves_mined_notes() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let db_path = file.path().to_str().unwrap();
-        let conn = rusqlite::Connection::open(db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE transactions (
-                id_tx INTEGER PRIMARY KEY,
-                mined_height INTEGER
-             );
-             CREATE TABLE sapling_received_notes (
-                id INTEGER PRIMARY KEY,
-                transaction_id INTEGER NOT NULL,
-                commitment_tree_position INTEGER
-             );
-             CREATE TABLE ironwood_received_notes (
-                id INTEGER PRIMARY KEY,
-                transaction_id INTEGER NOT NULL,
-                commitment_tree_position INTEGER
-             );
-             INSERT INTO transactions (id_tx, mined_height) VALUES (1, NULL), (2, 500);
-             INSERT INTO sapling_received_notes
-                (id, transaction_id, commitment_tree_position)
-                VALUES (1, 1, 3), (2, 2, 4);
-             INSERT INTO ironwood_received_notes
-                (id, transaction_id, commitment_tree_position)
-                VALUES (1, 1, 0), (2, 2, 1);",
-        )
-        .unwrap();
-        drop(conn);
-
-        assert_eq!(clear_unmined_note_commitment_positions(db_path).unwrap(), 2);
-
-        let conn = rusqlite::Connection::open(db_path).unwrap();
-        let sapling_positions = conn
-            .prepare("SELECT commitment_tree_position FROM sapling_received_notes ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Option<u64>>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let ironwood_positions = conn
-            .prepare("SELECT commitment_tree_position FROM ironwood_received_notes ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get::<_, Option<u64>>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(sapling_positions, vec![None, Some(4)]);
-        assert_eq!(ironwood_positions, vec![None, Some(1)]);
-        assert_eq!(clear_unmined_note_commitment_positions(db_path).unwrap(), 0);
     }
 }
