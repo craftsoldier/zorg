@@ -329,11 +329,8 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 }
             };
             let keys = [('b', balances), ('s', "settings")];
-            let shieldable =
-                sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-                    .is_ok_and(|b| {
-                        b.transparent + b.transparent_pending >= sync::SHIELDING_THRESHOLD
-                    });
+            let shieldable = sync::get_wallet_balance(account)
+                .is_ok_and(|b| b.transparent + b.transparent_pending >= sync::SHIELDING_THRESHOLD);
             let items = if shieldable {
                 vec![
                     actions[0].clone(),
@@ -412,7 +409,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             .iter()
             .map(|a| {
                 let balance = zorg::account::ensure_database_exists(a)
-                    .and_then(|()| sync::get_wallet_balance(&a.db_path, a.network, &a.uuid))
+                    .and_then(|()| sync::get_wallet_balance(a))
                     .map(|b| terminal::zec(b.total, 2))
                     .unwrap_or_else(|_| "?".into());
                 format!("{:<20} {balance} {}", a.name, a.network.unit())
@@ -457,7 +454,6 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     let selected = selected.ok_or("Choose an account")?;
     let db = &selected.db_path;
     let net = selected.network;
-    let uuid = &selected.uuid;
     let result = match cmd {
         "address" => {
             let address = if args.options.contains_key("--transparent") {
@@ -466,14 +462,14 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 }
                 zorg::account::transparent_address(selected)?
             } else if args.options.contains_key("--new") {
-                sync::get_next_available_address(db, net, uuid)?
+                sync::get_next_available_address(selected)?
             } else {
                 zorg::account::current_address(selected)?
             };
             println!("{address}");
             Ok(())
         }
-        "balance" => cmd_balance(db, net, uuid),
+        "balance" => cmd_balance(selected),
         "send" if args.options.contains_key("--shield") => {
             if args.options.contains_key("--memo") {
                 return Err("--memo cannot be used with --shield".into());
@@ -497,7 +493,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                     Err(_) => Err("--limit must be a whole number"),
                 })
                 .transpose()?;
-            cmd_history(db, net, limit, uuid)
+            cmd_history(selected, limit)
         }
         "tx" => cmd_tx(selected, &args.positional[0], false),
         "recovery" => cmd_recovery(selected),
@@ -515,20 +511,19 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
 
 /// The account screen's balance row for `account`, as dots when `hide` is set.
 fn balance_row(account: &zorg::account::Account, hide: bool) -> String {
-    let balance = sync::get_wallet_balance(&account.db_path, account.network, &account.uuid)
-        .map_or("unknown".to_string(), |b| {
-            let unit = account.network.unit();
-            let transparent = b.transparent + b.transparent_pending + b.transparent_locked;
-            match (hide, transparent) {
-                (true, _) => format!("•••• {unit}"),
-                (false, 0) => format!("{} {unit}", terminal::zec(b.total, 2)),
-                (false, t) => format!(
-                    "{} {unit} · {} transparent",
-                    terminal::zec(b.total, 2),
-                    terminal::zec(t, 2)
-                ),
-            }
-        });
+    let balance = sync::get_wallet_balance(account).map_or("unknown".to_string(), |b| {
+        let unit = account.network.unit();
+        let transparent = b.transparent + b.transparent_pending + b.transparent_locked;
+        match (hide, transparent) {
+            (true, _) => format!("•••• {unit}"),
+            (false, 0) => format!("{} {unit}", terminal::zec(b.total, 2)),
+            (false, t) => format!(
+                "{} {unit} · {} transparent",
+                terminal::zec(b.total, 2),
+                terminal::zec(t, 2)
+            ),
+        }
+    });
     terminal::row("balance", 7, balance)
 }
 
@@ -1015,13 +1010,10 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
             Some(0) => {
                 terminal::copy(transparent.as_ref().unwrap_or(&address)).map(|()| "Copied.".into())
             }
-            Some(_) => {
-                sync::get_next_available_address(&account.db_path, account.network, &account.uuid)
-                    .map(|new| {
-                        address = new;
-                        "New address.".into()
-                    })
-            }
+            Some(_) => sync::get_next_available_address(account).map(|new| {
+                address = new;
+                "New address.".into()
+            }),
         };
     }
 }
@@ -1211,12 +1203,8 @@ fn show_viewing_key(account: &zorg::account::Account) -> Result<(), String> {
 /// newest first, with amounts as dots when `hide` is set, and Enter to show
 /// one in full, until Esc goes back.
 fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
-    let (db, net, uuid) = (
-        account.db_path.as_str(),
-        account.network,
-        account.uuid.as_str(),
-    );
-    let txs = sync::get_transaction_history(db, None, uuid)?;
+    let net = account.network;
+    let txs = sync::get_transaction_history(account, None)?;
     if txs.is_empty() {
         println!("No transactions yet.\n");
         return terminal::wait_for("Esc back");
@@ -1299,17 +1287,14 @@ fn cmd_delete(
     if interactive {
         let unit = account.network.unit();
         let balance = address.as_ref().map(|_| {
-            sync::get_wallet_balance(&account.db_path, account.network, &account.uuid).map_or(
-                "unknown".to_string(),
-                |b| {
-                    let amount = if hide {
-                        "••••".into()
-                    } else {
-                        terminal::zec(b.total, 2)
-                    };
-                    format!("{amount} {unit}")
-                },
-            )
+            sync::get_wallet_balance(account).map_or("unknown".to_string(), |b| {
+                let amount = if hide {
+                    "••••".into()
+                } else {
+                    terminal::zec(b.total, 2)
+                };
+                format!("{amount} {unit}")
+            })
         });
         let card = |full: bool| {
             let mut lines = vec![format!(
@@ -1419,8 +1404,9 @@ fn cmd_recovery(account: &zorg::account::Account) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_balance(db: &str, net: WalletNetwork, uuid: &str) -> Result<(), String> {
-    let bal = sync::get_wallet_balance(db, net, uuid)?;
+fn cmd_balance(account: &zorg::account::Account) -> Result<(), String> {
+    let net = account.network;
+    let bal = sync::get_wallet_balance(account)?;
     println!("Spendable:  {}", terminal::fmt_zec(bal.spendable, net));
     let pending = bal.change_pending_confirmation + bal.value_pending_spendability;
     println!("Pending:    {}", terminal::fmt_zec(pending, net));
@@ -1462,15 +1448,11 @@ fn cmd_send(
     positional: &[String],
     memo: Option<&str>,
 ) -> Result<(), String> {
-    let (db, net, uuid) = (
-        account.db_path.as_str(),
-        account.network,
-        account.uuid.as_str(),
-    );
+    let net = account.network;
     let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
-    let balance = sync::get_wallet_balance(db, net, uuid)?.spendable;
+    let balance = sync::get_wallet_balance(account)?.spendable;
     let guided = positional.len() < 2;
     let to = match positional.first() {
         Some(to) => to.clone(),
@@ -1510,7 +1492,7 @@ fn cmd_send(
     };
     // The card shows an estimate, so nothing is locked while it waits.
     let fee = if interactive {
-        sync::estimate_fee(db, net, uuid, to, amount_zat, memo)?
+        sync::estimate_fee(account, to, amount_zat, memo)?
     } else {
         0
     };
@@ -1550,7 +1532,7 @@ fn cmd_send(
         Ok(())
     };
     let result = confirmed.and_then(|()| {
-        let proposal = sync::propose_send(db, net, uuid, to, amount_zat, memo)?;
+        let proposal = sync::propose_send(account, to, amount_zat, memo)?;
         let proposed_fee = proposal.fee_zatoshi;
         RUNTIME.block_on(sync::execute_proposal_with_seed_loader(
             &mut client,
@@ -1631,7 +1613,7 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
-    let proposal = sync::propose_shield(&account.db_path, net, &account.uuid)?;
+    let proposal = sync::propose_shield(account)?;
     let fee = proposal.fee_zatoshi;
     let amount = proposal.transparent_input_zatoshi().saturating_sub(fee);
     let card = |_full: bool| {
@@ -1711,8 +1693,8 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
     }
 }
 
-fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> Result<(), String> {
-    let txs = sync::get_transaction_history(db, limit, uuid)?;
+fn cmd_history(account: &zorg::account::Account, limit: Option<u32>) -> Result<(), String> {
+    let txs = sync::get_transaction_history(account, limit)?;
     if txs.is_empty() {
         println!("No transactions yet.");
     }
@@ -1726,7 +1708,7 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
             "  {:<10} {:<10} {:>16}  {:<8}  {}",
             tx.tx_kind,
             tx.display_pool,
-            terminal::fmt_zec(tx.display_amount, net),
+            terminal::fmt_zec(tx.display_amount, account.network),
             height,
             tx.txid
         );
@@ -1737,13 +1719,9 @@ fn cmd_history(db: &str, net: WalletNetwork, limit: Option<u32>, uuid: &str) -> 
 /// Prints the transaction `txid` in full: one section per history row it makes,
 /// with amounts as dots when `hide` is set.
 fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<(), String> {
-    let (db, net, uuid) = (
-        account.db_path.as_str(),
-        account.network,
-        account.uuid.as_str(),
-    );
+    let net = account.network;
     let txid = parse_txid(txid)?;
-    let rows: Vec<_> = sync::get_transaction_history(db, None, uuid)?
+    let rows: Vec<_> = sync::get_transaction_history(account, None)?
         .into_iter()
         .filter(|tx| tx.txid == txid)
         .collect();
@@ -1762,7 +1740,7 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
         }
     };
     for tx in rows {
-        let detail = sync::get_transaction_detail(db, net, uuid, &txid, &tx.tx_kind)?;
+        let detail = sync::get_transaction_detail(account, &txid, &tx.tx_kind)?;
         let status = if tx.mined_height > 0 {
             format!("mined at block {}", tx.mined_height)
         } else if tx.expired_unmined {

@@ -31,7 +31,7 @@ use zcash_protocol::{
     value::Zatoshis,
 };
 
-use crate::account::parse_account_uuid;
+use crate::account::{parse_account_uuid, Account};
 use crate::db::with_wallet_db_write_lock;
 use crate::network::WalletNetwork;
 
@@ -62,13 +62,9 @@ pub struct WalletBalance {
     pub total: u64,
 }
 
-pub fn get_wallet_balance(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<WalletBalance, String> {
-    let account_id = parse_account_uuid(account_uuid)?;
-    let summary = crate::db::wallet_summary(db_path, network)?;
+pub fn get_wallet_balance(account: &Account) -> Result<WalletBalance, String> {
+    let account_id = parse_account_uuid(&account.uuid)?;
+    let summary = crate::db::wallet_summary(&account.db_path, account.network)?;
     let Some(b) = summary
         .as_ref()
         .and_then(|s| s.account_balances().get(&account_id))
@@ -108,15 +104,11 @@ pub fn get_wallet_balance(
 
 // ======================== Diversified Address ========================
 
-pub fn get_next_available_address(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<String, String> {
-    let account_id = parse_account_uuid(account_uuid)?;
+pub fn get_next_available_address(account: &Account) -> Result<String, String> {
+    let account_id = parse_account_uuid(&account.uuid)?;
 
     let (ua, _) = with_wallet_db_write_lock("transactions.get_next_available_address", || {
-        let mut db = open_wallet_db(db_path, network)?;
+        let mut db = open_wallet_db(&account.db_path, account.network)?;
         db.get_next_available_address(account_id, crate::keys::shielded_address_request())
             .map_err(|e| match e {
                 zcash_client_sqlite::error::SqliteClientError::ChainHeightUnknown => {
@@ -126,7 +118,7 @@ pub fn get_next_available_address(
             })?
             .ok_or_else(|| "No address available".to_string())
     })?;
-    Ok(ua.encode(&network))
+    Ok(ua.encode(&account.network))
 }
 
 /// Returns unmined transactions that the wallet previously discovered in a
@@ -325,15 +317,14 @@ struct ClassifiedTx {
 }
 
 pub fn get_transaction_history(
-    db_path: &str,
+    account: &Account,
     limit: Option<u32>,
-    account_uuid: &str,
 ) -> Result<Vec<TransactionInfo>, String> {
-    let uuid = uuid::Uuid::parse_str(account_uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
+    let uuid = uuid::Uuid::parse_str(&account.uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
     let uuid_bytes = uuid.as_bytes().to_vec();
 
     // Open a separate read-only connection (WalletDb.conn is private).
-    let conn = open_readonly_conn(db_path)?;
+    let conn = open_readonly_conn(&account.db_path)?;
     let read_tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("SQL error: {e}"))?;
@@ -401,16 +392,14 @@ fn assemble_history(
 }
 
 pub fn get_transaction_detail(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
+    account: &Account,
     txid: &TxId,
     tx_kind: &str,
 ) -> Result<TransactionDetail, String> {
-    let uuid = uuid::Uuid::parse_str(account_uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
+    let uuid = uuid::Uuid::parse_str(&account.uuid).map_err(|e| format!("Invalid UUID: {e}"))?;
     let uuid_bytes = uuid.as_bytes().to_vec();
 
-    let conn = open_readonly_conn(db_path)?;
+    let conn = open_readonly_conn(&account.db_path)?;
     let read_tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("SQL error: {e}"))?;
@@ -434,7 +423,7 @@ pub fn get_transaction_detail(
     let source_address =
         if matches!(tx_kind, "received" | "receiving") && !visible_outputs.is_empty() {
             let raw_tx = read_raw_transaction_for_tx(&read_tx, &uuid_bytes, txid.as_ref())?;
-            received_source_from_raw_transaction(network, raw_tx.as_deref())
+            received_source_from_raw_transaction(account.network, raw_tx.as_deref())
         } else {
             None
         };
@@ -1596,10 +1585,18 @@ mod tests {
         )
         .unwrap()
         .uuid;
+        let wallet_account = Account {
+            uuid: uuid.clone(),
+            name: "A".into(),
+            network: WalletNetwork::Regtest,
+            db_path: db.into(),
+        };
         let account = uuid::Uuid::parse_str(&uuid).unwrap();
         let (account, txid) = (account.as_bytes().as_slice(), fake_txid(1));
 
-        assert!(get_transaction_history(db, None, &uuid).unwrap().is_empty());
+        assert!(get_transaction_history(&wallet_account, None)
+            .unwrap()
+            .is_empty());
         let conn = open_readonly_conn(db).unwrap();
         assert!(read_history_outputs(&conn, account, [txid.as_slice()])
             .unwrap()
@@ -1607,13 +1604,7 @@ mod tests {
         assert!(read_raw_transaction_for_tx(&conn, account, &txid)
             .unwrap()
             .is_none());
-        let missing = get_transaction_detail(
-            db,
-            WalletNetwork::Regtest,
-            &uuid,
-            &TxId::from_bytes(txid),
-            "sent",
-        );
+        let missing = get_transaction_detail(&wallet_account, &TxId::from_bytes(txid), "sent");
         assert_eq!(missing.err().as_deref(), Some("Transaction not found"));
         assert!(get_resubmittable_txs(db, 1, &HashSet::new())
             .unwrap()
