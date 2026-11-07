@@ -316,10 +316,9 @@ pub(super) async fn download_subtree_roots(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
     db_path: &str,
-    network: WalletNetwork,
 ) -> Result<(), SyncError> {
     let (sap_start, orch_start, ironwood_start) = {
-        let summary = crate::db::wallet_summary(db_path, network).map_err(SyncError::db)?;
+        let summary = crate::db::wallet_summary(db_path, *db.params()).map_err(SyncError::db)?;
         match summary {
             Some(s) => (
                 s.next_sapling_subtree_index(),

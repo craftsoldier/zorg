@@ -37,7 +37,6 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 
 use crate::db::with_wallet_db_write_lock;
-use crate::network::WalletNetwork;
 
 use super::{lwd, SyncError, WalletDatabase};
 
@@ -52,8 +51,8 @@ use super::{lwd, SyncError, WalletDatabase};
 pub(super) async fn run_enhancement(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
-    network: WalletNetwork,
 ) -> Result<(), SyncError> {
+    let network = *db.params();
     let mut failed_txids: HashSet<String> = HashSet::new();
 
     for _ in 0..3 {
@@ -253,6 +252,7 @@ fn transaction_status_from_raw_height(raw_height: u64) -> Result<TransactionStat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::WalletNetwork;
 
     #[test]
     fn backend_recovers_fees_for_wallet_owned_transparent_inputs() {
