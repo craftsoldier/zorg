@@ -87,45 +87,34 @@ pub(crate) const REWIND_DISTANCE: u64 = 10;
 pub(crate) const MAX_REWINDS_PER_RUN: u32 = 3;
 
 impl SyncError {
-    /// Log and construct a `Continuity` error in one step.
-    ///
-    /// Uses `log::warn!` rather than `log::error!` because a reorg is an
-    /// expected, recoverable event — the reorg-recovery path in the scan
-    /// loop will rewind the wallet and restart automatically.
+    /// Construct a `Continuity` error.
     pub(crate) fn continuity(at_height: u64, detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        log::warn!("sync: chain continuity broken at height {at_height}: {detail}");
-        SyncError::Continuity { at_height, detail }
+        SyncError::Continuity {
+            at_height,
+            detail: detail.into(),
+        }
     }
 
-    /// Log and construct a `Network` error in one step.
+    /// Construct a `Network` error.
     pub(crate) fn net(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Network(msg)
+        SyncError::Network(msg.into())
     }
 
-    /// Log and construct a `Db` error in one step.
+    /// Construct a `Db` error.
     pub(crate) fn db(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Db(msg)
+        SyncError::Db(msg.into())
     }
 
-    /// Log and construct a `Parse` error in one step.
+    /// Construct a `Parse` error.
     pub(crate) fn parse(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Parse(msg)
+        SyncError::Parse(msg.into())
     }
 
-    /// Log and construct an `Other` error in one step. Used for call sites
-    /// that don't fit a specific category (and for `scan_cached_blocks`
-    /// fall-through cases that the scan branch didn't classify).
+    /// Construct an `Other` error. Used for call sites that don't fit a
+    /// specific category (and for `scan_cached_blocks` fall-through cases
+    /// that the scan branch didn't classify).
     pub(crate) fn other(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Other(msg)
+        SyncError::Other(msg.into())
     }
 
     /// Whether another sync attempt may succeed: network and unclassified
@@ -961,8 +950,12 @@ async fn run_sync_impl(
                         );
                         (bs, Some(ts))
                     }
+                    Some(Ok(Err(e))) => {
+                        log::warn!("sync: prefetch failed ({e}), downloading fresh");
+                        (download_blocks(&mut client, start, end - 1).await?, None)
+                    }
                     _ => {
-                        // Prefetch failed — download synchronously.
+                        // The prefetch task ended without a result.
                         log::warn!("sync: prefetch failed, downloading fresh");
                         (download_blocks(&mut client, start, end - 1).await?, None)
                     }
@@ -1135,6 +1128,7 @@ async fn run_sync_impl(
                 } else {
                     ("main", &mut main_rewinds_this_run)
                 };
+                log::warn!("sync: {phase_name} {sync_err}");
                 if *current_rewinds >= MAX_REWINDS_PER_RUN {
                     log::error!(
                         "sync: {phase_name} rewind budget exhausted \
