@@ -25,7 +25,7 @@
 
 use std::collections::HashSet;
 
-use tonic::{transport::Channel, Code, Status};
+use tonic::{transport::Channel, Code};
 use zcash_client_backend::{
     data_api::{
         wallet::decrypt_and_store_transaction, TransactionDataRequest, TransactionStatus,
@@ -101,29 +101,27 @@ pub(super) async fn run_enhancement(
                                 }
                             }
                         }
-                        Err(e) => match classify_get_transaction_error(&e) {
-                            GetTransactionErrorAction::MarkTxidNotRecognized => {
-                                log::warn!("sync: get_transaction did not recognize {txid}: {e}");
-                                failed_txids.insert(*txid);
-                                let txid = *txid;
-                                if let Err(e) = with_wallet_db_write_lock(
-                                    "sync_engine.enhance.set_transaction_status",
-                                    || {
-                                        db.set_transaction_status(
-                                            txid,
-                                            TransactionStatus::TxidNotRecognized,
-                                        )
-                                    },
-                                ) {
-                                    log::error!("sync: set_transaction_status failed: {e}");
-                                }
+                        Err(e) if e.code() == Code::NotFound => {
+                            log::warn!("sync: get_transaction did not recognize {txid}: {e}");
+                            failed_txids.insert(*txid);
+                            let txid = *txid;
+                            if let Err(e) = with_wallet_db_write_lock(
+                                "sync_engine.enhance.set_transaction_status",
+                                || {
+                                    db.set_transaction_status(
+                                        txid,
+                                        TransactionStatus::TxidNotRecognized,
+                                    )
+                                },
+                            ) {
+                                log::error!("sync: set_transaction_status failed: {e}");
                             }
-                            GetTransactionErrorAction::RetryAsNetwork => {
-                                return Err(SyncError::net(format!(
-                                    "get_transaction failed for {txid}: {e}"
-                                )));
-                            }
-                        },
+                        }
+                        Err(e) => {
+                            return Err(SyncError::net(format!(
+                                "get_transaction failed for {txid}: {e}"
+                            )));
+                        }
                     }
                 }
                 TransactionDataRequest::TransactionsInvolvingAddress(req) => {
@@ -181,19 +179,6 @@ fn request_is_actionable(request: &TransactionDataRequest) -> bool {
         TransactionDataRequest::TransactionsInvolvingAddress(req) => {
             req.block_range_end().is_some()
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GetTransactionErrorAction {
-    MarkTxidNotRecognized,
-    RetryAsNetwork,
-}
-
-fn classify_get_transaction_error(status: &Status) -> GetTransactionErrorAction {
-    match status.code() {
-        Code::NotFound => GetTransactionErrorAction::MarkTxidNotRecognized,
-        _ => GetTransactionErrorAction::RetryAsNetwork,
     }
 }
 
@@ -331,33 +316,6 @@ mod tests {
             assert_eq!(
                 db.get_transaction(parent.txid()).unwrap().is_some(),
                 wallet_owned_input
-            );
-        }
-    }
-
-    #[test]
-    fn get_transaction_not_found_marks_txid_not_recognized() {
-        let status = Status::new(Code::NotFound, "txid not recognized");
-
-        assert_eq!(
-            classify_get_transaction_error(&status),
-            GetTransactionErrorAction::MarkTxidNotRecognized,
-        );
-    }
-
-    #[test]
-    fn get_transaction_transient_errors_retry_as_network() {
-        for code in [
-            Code::Unavailable,
-            Code::DeadlineExceeded,
-            Code::Cancelled,
-            Code::Unknown,
-            Code::Internal,
-        ] {
-            let status = Status::new(code, "temporary failure");
-            assert_eq!(
-                classify_get_transaction_error(&status),
-                GetTransactionErrorAction::RetryAsNetwork,
             );
         }
     }
