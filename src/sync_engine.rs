@@ -46,9 +46,8 @@ mod lwd;
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
-use lwd::{
-    connect, download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state,
-};
+pub use lwd::{chain_tip, connect_endpoint, LwdClient};
+use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream, get_tree_state};
 pub(crate) use lwd::{get_latest_block, next_stream_message, send_transaction};
 
 /// Progress event sent to caller.
@@ -1445,51 +1444,6 @@ fn should_use_empty_chain_state(
 }
 
 // ======================== Public Lightwalletd Helpers ========================
-
-/// A connection to a lightwalletd server that passed the network check.
-pub type LwdClient = CompactTxStreamerClient<Channel>;
-
-/// Connects to `explicit`, or to the first of `network`'s built-in servers
-/// that answers and serves `network`.
-pub async fn connect_endpoint(
-    network: WalletNetwork,
-    explicit: Option<&str>,
-) -> Result<LwdClient, String> {
-    let defaults;
-    let urls = match explicit.as_ref() {
-        Some(url) => std::slice::from_ref(url),
-        None => {
-            defaults = network.default_lightwalletd_urls();
-            defaults
-        }
-    };
-    let mut last_error = String::new();
-    for (i, url) in urls.iter().enumerate() {
-        match connect(network, url).await {
-            Ok(client) => {
-                if i > 0 {
-                    log::warn!("failing over to {url}");
-                }
-                return Ok(client);
-            }
-            Err(e) => {
-                last_error = e.to_string();
-                if i + 1 < urls.len() {
-                    log::warn!("{url} unreachable ({last_error}); trying next endpoint");
-                }
-            }
-        }
-    }
-    Err(last_error)
-}
-
-/// The server's current chain tip height.
-pub async fn chain_tip(client: &mut LwdClient) -> Result<u64, String> {
-    get_latest_block(client)
-        .await
-        .map(|tip| tip.height)
-        .map_err(|e| e.to_string())
-}
 
 /// The birthday of an account whose first block is `height`: empty note
 /// commitment trees at or below Sapling activation, otherwise the tree state
