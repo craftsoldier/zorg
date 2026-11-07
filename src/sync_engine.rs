@@ -1140,73 +1140,32 @@ async fn run_sync_impl(
                 }
                 let requested_rewind_height = at_height.saturating_sub(REWIND_DISTANCE);
                 *current_rewinds += 1;
-                // `truncate_to_height` does NOT silently clamp to the
-                // nearest checkpoint. If the requested height is below
-                // the earliest available checkpoint it returns
-                // `SqliteClientError::RequestedRewindInvalid` with
-                // `safe_rewind_height: Option<BlockHeight>`. When
-                // `safe_rewind_height` is `Some(h)` the library is
-                // telling us the deepest checkpoint it can land on;
-                // retry at that height so a reorg near genesis (or
-                // right after a birthday-bounded import) still
-                // recovers. When it's `None` there is genuinely
-                // nowhere safe to rewind to, and we surface the
-                // failure as fatal.
-                let target = BlockHeight::from_u32(requested_rewind_height as u32);
-                let actual_rewind_height = with_wallet_db_write_lock(
-                    "sync_engine.truncate_to_height",
-                    || -> Result<BlockHeight, SyncError> {
-                        match db.truncate_to_height(target) {
-                            Ok(h) => Ok(h),
-                            Err(SqliteClientError::RequestedRewindInvalid {
-                                safe_rewind_height: Some(safe),
-                                requested_height,
-                            }) => {
-                                log::warn!(
-                                    "sync: {phase_name} rewind target {requested_height} \
-                                     below earliest checkpoint; retrying at safe_rewind_height={safe}",
-                                );
-                                db.truncate_to_height(safe).map_err(|e| {
-                                    if is_sqlite_lock_contention(&e) {
-                                        SyncError::other(format!(
-                                            "truncate_to_height({safe}) retry: SQLite lock contention: {e}"
-                                        ))
-                                    } else {
-                                        SyncError::db(format!(
-                                            "truncate_to_height({safe}) retry after RequestedRewindInvalid: {e}"
-                                        ))
-                                    }
-                                })
-                            }
-                            Err(SqliteClientError::RequestedRewindInvalid {
-                                safe_rewind_height: None,
-                                requested_height,
-                            }) => {
-                                log::error!(
-                                    "sync: {phase_name} rewind to {requested_height} \
-                                     rejected and no safe_rewind_height is available; \
-                                     cannot recover from this reorg in-place",
-                                );
-                                Err(SyncError::db(format!(
-                                    "truncate_to_height({requested_height}): no safe rewind height"
-                                )))
-                            }
-                            Err(e) if is_sqlite_lock_contention(&e) => {
-                                // Transient lock contention on the rewind. The
-                                // outer retry wrapper will re-invoke run_sync_impl
-                                // after a backoff, which re-detects the continuity
-                                // error and triggers the rewind again. If the
-                                // lock has cleared by then, the retry succeeds.
-                                Err(SyncError::other(format!(
-                                    "truncate_to_height({requested_rewind_height}): SQLite lock contention: {e}"
-                                )))
-                            }
-                            Err(e) => Err(SyncError::db(format!(
-                                "truncate_to_height({requested_rewind_height}): {e}"
-                            ))),
+                // Truncate to exactly the requested height. When the wallet holds
+                // no checkpoint there (for example below its birthday), the server's
+                // tree state at that height becomes the new checkpoint.
+                let actual_rewind_height = BlockHeight::from_u32(requested_rewind_height as u32);
+                let chain_state =
+                    if should_use_empty_chain_state(&network, actual_rewind_height + 1)? {
+                        chain::ChainState::empty(actual_rewind_height, BlockHash([0u8; 32]))
+                    } else {
+                        get_tree_state(&mut client, requested_rewind_height)
+                            .await?
+                            .to_chain_state()
+                            .map_err(|e| SyncError::parse(format!("parse tree state: {e}")))?
+                    };
+                with_wallet_db_write_lock("sync_engine.truncate_to_chain_state", || {
+                    db.truncate_to_chain_state(chain_state).map_err(|e| {
+                        if is_sqlite_lock_contention(&e) {
+                            SyncError::other(format!(
+                                "truncate_to_chain_state({requested_rewind_height}): SQLite lock contention: {e}"
+                            ))
+                        } else {
+                            SyncError::db(format!(
+                                "truncate_to_chain_state({requested_rewind_height}): {e}"
+                            ))
                         }
-                    },
-                )?;
+                    })
+                })?;
                 let current_tip = BlockHeight::from_u32(current_tip_height as u32);
                 let post_rewind_ranges = with_wallet_db_write_lock(
                     "sync_engine.update_chain_tip.after_rewind",
