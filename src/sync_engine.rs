@@ -95,11 +95,6 @@ pub(crate) enum RecoveryStrategy {
 /// librustzcash's responsibility to enforce.
 pub(crate) const REWIND_DISTANCE: u64 = 10;
 
-/// Commitment-tree root conflicts can be produced by a stale local tree over a
-/// wider range than a normal one-block chain reorg. Escalate each retry inside
-/// a single sync run so we do not keep landing on the same bad shard boundary.
-pub(crate) const COMMITMENT_TREE_REWIND_DISTANCES: [u64; 3] = [10, 100, 1000];
-
 /// Maximum number of reorg-triggered rewinds allowed inside a single
 /// `run_sync_impl` invocation. Caps runaway rewind loops: if the chain is
 /// flapping fast enough to blow through this budget, `run_sync_impl` bails
@@ -160,36 +155,6 @@ impl SyncError {
             SyncError::Db(_) | SyncError::Parse(_) | SyncError::WrongNetwork(_) => {
                 RecoveryStrategy::Fatal
             }
-        }
-    }
-
-    pub(crate) fn is_commitment_tree_root_conflict(&self) -> bool {
-        match self {
-            SyncError::Continuity { detail, .. } => detail
-                .to_ascii_lowercase()
-                .contains("commitment tree root conflict"),
-            _ => false,
-        }
-    }
-
-    pub(crate) fn rewind_distance_for_attempt(&self, attempt_index: u32) -> u64 {
-        if self.is_commitment_tree_root_conflict() {
-            let idx = usize::try_from(attempt_index).unwrap_or(usize::MAX);
-            COMMITMENT_TREE_REWIND_DISTANCES
-                .get(idx)
-                .copied()
-                .unwrap_or_else(|| *COMMITMENT_TREE_REWIND_DISTANCES.last().unwrap())
-        } else {
-            REWIND_DISTANCE
-        }
-    }
-
-    pub(crate) fn rewind_target_for_attempt(&self, attempt_index: u32) -> Option<u64> {
-        match self {
-            SyncError::Continuity { at_height, .. } => {
-                Some(at_height.saturating_sub(self.rewind_distance_for_attempt(attempt_index)))
-            }
-            _ => None,
         }
     }
 }
@@ -1173,15 +1138,6 @@ async fn run_sync_impl(
                         ),
                     )
                 }
-                ChainError::Wallet(wallet_err) if is_commitment_tree_root_conflict(&wallet_err) => {
-                    let at_height = u32::from(start) as u64;
-                    SyncError::continuity(
-                        at_height,
-                        format!(
-                            "commitment tree root conflict while scanning from {at_height}: {wallet_err}"
-                        ),
-                    )
-                }
                 ChainError::Wallet(wallet_err) => {
                     // Transient SQLite lock contention (e.g. another wallet
                     // connection holds a write lock) must retry, not bail out.
@@ -1226,12 +1182,7 @@ async fn run_sync_impl(
                         );
                         return Err(sync_err);
                     }
-                    let rewind_attempt_index = *current_rewinds;
-                    let rewind_distance =
-                        sync_err.rewind_distance_for_attempt(rewind_attempt_index);
-                    let requested_rewind_height = sync_err
-                        .rewind_target_for_attempt(rewind_attempt_index)
-                        .unwrap_or(to_height);
+                    let requested_rewind_height = to_height;
                     *current_rewinds += 1;
                     // `truncate_to_height` does NOT silently clamp to the
                     // nearest checkpoint. If the requested height is below
@@ -1322,7 +1273,7 @@ async fn run_sync_impl(
                     log::info!(
                         "sync: {phase_name} rewound to {actual_rewind_height} \
                          after reorg (requested={requested_rewind_height}, \
-                         distance={rewind_distance}, attempt {}/{}); \
+                         distance={REWIND_DISTANCE}, attempt {}/{}); \
                          post_rewind_pending={post_rewind_pending}, first_pending={first_pending}, \
                          summary={summary:?}; restarting scan loop",
                         *current_rewinds,
