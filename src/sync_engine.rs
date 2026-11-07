@@ -37,8 +37,8 @@ use lwd::{download_blocks, download_subtree_roots, get_tree_state};
 pub(crate) use lwd::{get_latest_block, send_transaction};
 use transparent::refresh_utxos;
 
-/// Classified sync-engine failure. Carries enough information for the retry
-/// wrapper to pick the right recovery strategy via `recovery_strategy`.
+/// Classified sync-engine failure. The scan loop rewinds on `Continuity`;
+/// the retry wrapper asks `is_transient` whether to try again.
 #[derive(Debug, Clone)]
 pub(crate) enum SyncError {
     /// `scan_cached_blocks` reported a `PrevHashMismatch` or
@@ -70,23 +70,6 @@ pub(crate) enum SyncError {
     Other(String),
 }
 
-/// Strategy the sync loop should apply when it encounters a `SyncError`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecoveryStrategy {
-    /// Retry the failing operation after exponential backoff. The outer
-    /// `run_sync_inner` wrapper already implements this with a 3-retry,
-    /// 2s/4s/8s schedule.
-    RetryWithBackoff,
-
-    /// Rewind the wallet's chain state to `to_height` (via
-    /// `WalletDb::truncate_to_height`) and restart the scan loop. Used for
-    /// continuity errors.
-    Rewind { to_height: u64 },
-
-    /// No automatic recovery is safe. Propagate the error up to the caller.
-    Fatal,
-}
-
 /// Number of blocks the wallet rewinds past a detected reorg. Matches
 /// `CompactBlockProcessor.REWIND_DISTANCE` in zcash-android-wallet-sdk.
 ///
@@ -94,11 +77,6 @@ pub(crate) enum RecoveryStrategy {
 /// because `truncate_to_height` only accepts checkpoint boundaries; that's
 /// librustzcash's responsibility to enforce.
 pub(crate) const REWIND_DISTANCE: u64 = 10;
-
-/// Commitment-tree root conflicts can be produced by a stale local tree over a
-/// wider range than a normal one-block chain reorg. Escalate each retry inside
-/// a single sync run so we do not keep landing on the same bad shard boundary.
-pub(crate) const COMMITMENT_TREE_REWIND_DISTANCES: [u64; 3] = [10, 100, 1000];
 
 /// Maximum number of reorg-triggered rewinds allowed inside a single
 /// `run_sync_impl` invocation. Caps runaway rewind loops: if the chain is
@@ -109,88 +87,43 @@ pub(crate) const COMMITMENT_TREE_REWIND_DISTANCES: [u64; 3] = [10, 100, 1000];
 pub(crate) const MAX_REWINDS_PER_RUN: u32 = 3;
 
 impl SyncError {
-    /// Log and construct a `Continuity` error in one step.
-    ///
-    /// Uses `log::warn!` rather than `log::error!` because a reorg is an
-    /// expected, recoverable event — the reorg-recovery path in the scan
-    /// loop will rewind the wallet and restart automatically.
+    /// Construct a `Continuity` error.
     pub(crate) fn continuity(at_height: u64, detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        log::warn!("sync: chain continuity broken at height {at_height}: {detail}");
-        SyncError::Continuity { at_height, detail }
+        SyncError::Continuity {
+            at_height,
+            detail: detail.into(),
+        }
     }
 
-    /// Log and construct a `Network` error in one step.
+    /// Construct a `Network` error.
     pub(crate) fn net(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Network(msg)
+        SyncError::Network(msg.into())
     }
 
-    /// Log and construct a `Db` error in one step.
+    /// Construct a `Db` error.
     pub(crate) fn db(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Db(msg)
+        SyncError::Db(msg.into())
     }
 
-    /// Log and construct a `Parse` error in one step.
+    /// Construct a `Parse` error.
     pub(crate) fn parse(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Parse(msg)
+        SyncError::Parse(msg.into())
     }
 
-    /// Log and construct an `Other` error in one step. Used for call sites
-    /// that don't fit a specific category (and for `scan_cached_blocks`
-    /// fall-through cases that the scan branch didn't classify).
+    /// Construct an `Other` error. Used for call sites that don't fit a
+    /// specific category (and for `scan_cached_blocks` fall-through cases
+    /// that the scan branch didn't classify).
     pub(crate) fn other(msg: impl Into<String>) -> Self {
-        let msg = msg.into();
-        log::error!("sync: {msg}");
-        SyncError::Other(msg)
+        SyncError::Other(msg.into())
     }
 
-    /// Map this error to the recovery action the sync loop should take.
-    pub(crate) fn recovery_strategy(&self) -> RecoveryStrategy {
-        match self {
-            SyncError::Continuity { at_height, .. } => RecoveryStrategy::Rewind {
-                to_height: at_height.saturating_sub(REWIND_DISTANCE),
-            },
-            SyncError::Network(_) | SyncError::Other(_) => RecoveryStrategy::RetryWithBackoff,
-            SyncError::Db(_) | SyncError::Parse(_) | SyncError::WrongNetwork(_) => {
-                RecoveryStrategy::Fatal
-            }
-        }
-    }
-
-    pub(crate) fn is_commitment_tree_root_conflict(&self) -> bool {
-        match self {
-            SyncError::Continuity { detail, .. } => detail
-                .to_ascii_lowercase()
-                .contains("commitment tree root conflict"),
-            _ => false,
-        }
-    }
-
-    pub(crate) fn rewind_distance_for_attempt(&self, attempt_index: u32) -> u64 {
-        if self.is_commitment_tree_root_conflict() {
-            let idx = usize::try_from(attempt_index).unwrap_or(usize::MAX);
-            COMMITMENT_TREE_REWIND_DISTANCES
-                .get(idx)
-                .copied()
-                .unwrap_or_else(|| *COMMITMENT_TREE_REWIND_DISTANCES.last().unwrap())
-        } else {
-            REWIND_DISTANCE
-        }
-    }
-
-    pub(crate) fn rewind_target_for_attempt(&self, attempt_index: u32) -> Option<u64> {
-        match self {
-            SyncError::Continuity { at_height, .. } => {
-                Some(at_height.saturating_sub(self.rewind_distance_for_attempt(attempt_index)))
-            }
-            _ => None,
-        }
+    /// Whether another sync attempt may succeed: network and unclassified
+    /// failures, and a reorg whose rewind budget ran out in this attempt.
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            SyncError::Network(_) | SyncError::Other(_) | SyncError::Continuity { .. }
+        )
     }
 }
 
@@ -773,33 +706,17 @@ pub async fn run_sync_inner(
         match run_sync_impl(db_data_path, client, network, &progress_fn).await {
             Ok(()) => return Ok(()),
             Err(sync_err) => {
-                // Inspect the typed error's recovery strategy before
-                // flattening to a `String` at the public boundary. Fatal
-                // variants (`Db`, `Parse`) bail out immediately with no
-                // retry — repeatedly hammering a DB corruption or a
-                // deserialization bug doesn't fix it and just costs time.
-                // Transient variants (`Network`, `Other`) fall through to
-                // the existing exponential-backoff retry path.
-                //
-                // A `Rewind` strategy reaching this layer means the inline
-                // reorg-recovery inside `run_sync_impl` exhausted its
-                // phase budget. Treat it as a retry-worthy
-                // transient: the next attempt gets a fresh rewind budget,
-                // which is often enough to get past a multi-level reorg
-                // that couldn't be cleared in one run.
-                let strategy = sync_err.recovery_strategy();
+                // A `Continuity` error reaching this layer means the scan
+                // loop exhausted its rewind budget; the next attempt gets a
+                // fresh one.
                 let err_string = sync_err.to_string();
-                match strategy {
-                    RecoveryStrategy::Fatal => {
-                        log::error!("sync: fatal error, not retrying: {err_string}");
-                        return Err(err_string);
-                    }
-                    RecoveryStrategy::RetryWithBackoff | RecoveryStrategy::Rewind { .. } => {
-                        last_err = err_string;
-                        if attempt == MAX_RETRIES {
-                            log::error!("sync: all {} retries exhausted", MAX_RETRIES);
-                        }
-                    }
+                if !sync_err.is_transient() {
+                    log::error!("sync: fatal error, not retrying: {err_string}");
+                    return Err(err_string);
+                }
+                last_err = err_string;
+                if attempt == MAX_RETRIES {
+                    log::error!("sync: all {} retries exhausted", MAX_RETRIES);
                 }
             }
         }
@@ -1033,8 +950,12 @@ async fn run_sync_impl(
                         );
                         (bs, Some(ts))
                     }
+                    Some(Ok(Err(e))) => {
+                        log::warn!("sync: prefetch failed ({e}), downloading fresh");
+                        (download_blocks(&mut client, start, end - 1).await?, None)
+                    }
                     _ => {
-                        // Prefetch failed — download synchronously.
+                        // The prefetch task ended without a result.
                         log::warn!("sync: prefetch failed, downloading fresh");
                         (download_blocks(&mut client, start, end - 1).await?, None)
                     }
@@ -1173,15 +1094,6 @@ async fn run_sync_impl(
                         ),
                     )
                 }
-                ChainError::Wallet(wallet_err) if is_commitment_tree_root_conflict(&wallet_err) => {
-                    let at_height = u32::from(start) as u64;
-                    SyncError::continuity(
-                        at_height,
-                        format!(
-                            "commitment tree root conflict while scanning from {at_height}: {wallet_err}"
-                        ),
-                    )
-                }
                 ChainError::Wallet(wallet_err) => {
                     // Transient SQLite lock contention (e.g. another wallet
                     // connection holds a write lock) must retry, not bail out.
@@ -1210,141 +1122,133 @@ async fn run_sync_impl(
         // later reorg.
         match scan_result {
             Ok(_) => {}
-            Err(sync_err) => match sync_err.recovery_strategy() {
-                RecoveryStrategy::Rewind { to_height } => {
-                    let (phase_name, current_rewinds) = if is_verify_phase {
-                        ("verify", &mut verify_rewinds_this_run)
-                    } else {
-                        ("main", &mut main_rewinds_this_run)
-                    };
-                    if *current_rewinds >= MAX_REWINDS_PER_RUN {
-                        log::error!(
-                            "sync: {phase_name} rewind budget exhausted \
-                             ({}/{}); propagating error",
-                            *current_rewinds,
-                            MAX_REWINDS_PER_RUN,
-                        );
-                        return Err(sync_err);
-                    }
-                    let rewind_attempt_index = *current_rewinds;
-                    let rewind_distance =
-                        sync_err.rewind_distance_for_attempt(rewind_attempt_index);
-                    let requested_rewind_height = sync_err
-                        .rewind_target_for_attempt(rewind_attempt_index)
-                        .unwrap_or(to_height);
-                    *current_rewinds += 1;
-                    // `truncate_to_height` does NOT silently clamp to the
-                    // nearest checkpoint. If the requested height is below
-                    // the earliest available checkpoint it returns
-                    // `SqliteClientError::RequestedRewindInvalid` with
-                    // `safe_rewind_height: Option<BlockHeight>`. When
-                    // `safe_rewind_height` is `Some(h)` the library is
-                    // telling us the deepest checkpoint it can land on;
-                    // retry at that height so a reorg near genesis (or
-                    // right after a birthday-bounded import) still
-                    // recovers. When it's `None` there is genuinely
-                    // nowhere safe to rewind to, and we surface the
-                    // failure as fatal.
-                    let target = BlockHeight::from_u32(requested_rewind_height as u32);
-                    let actual_rewind_height = with_wallet_db_write_lock(
-                        "sync_engine.truncate_to_height",
-                        || -> Result<BlockHeight, SyncError> {
-                            match db.truncate_to_height(target) {
-                                Ok(h) => Ok(h),
-                                Err(SqliteClientError::RequestedRewindInvalid {
-                                    safe_rewind_height: Some(safe),
-                                    requested_height,
-                                }) => {
-                                    log::warn!(
-                                        "sync: {phase_name} rewind target {requested_height} \
-                                         below earliest checkpoint; retrying at safe_rewind_height={safe}",
-                                    );
-                                    db.truncate_to_height(safe).map_err(|e| {
-                                        if is_sqlite_lock_contention(&e) {
-                                            SyncError::other(format!(
-                                                "truncate_to_height({safe}) retry: SQLite lock contention: {e}"
-                                            ))
-                                        } else {
-                                            SyncError::db(format!(
-                                                "truncate_to_height({safe}) retry after RequestedRewindInvalid: {e}"
-                                            ))
-                                        }
-                                    })
-                                }
-                                Err(SqliteClientError::RequestedRewindInvalid {
-                                    safe_rewind_height: None,
-                                    requested_height,
-                                }) => {
-                                    log::error!(
-                                        "sync: {phase_name} rewind to {requested_height} \
-                                         rejected and no safe_rewind_height is available; \
-                                         cannot recover from this reorg in-place",
-                                    );
-                                    Err(SyncError::db(format!(
-                                        "truncate_to_height({requested_height}): no safe rewind height"
-                                    )))
-                                }
-                                Err(e) if is_sqlite_lock_contention(&e) => {
-                                    // Transient lock contention on the rewind. The
-                                    // outer retry wrapper will re-invoke run_sync_impl
-                                    // after a backoff, which re-detects the continuity
-                                    // error and triggers the rewind again. If the
-                                    // lock has cleared by then, the retry succeeds.
-                                    Err(SyncError::other(format!(
-                                        "truncate_to_height({requested_rewind_height}): SQLite lock contention: {e}"
-                                    )))
-                                }
-                                Err(e) => Err(SyncError::db(format!(
-                                    "truncate_to_height({requested_rewind_height}): {e}"
-                                ))),
-                            }
-                        },
-                    )?;
-                    let current_tip = BlockHeight::from_u32(current_tip_height as u32);
-                    let post_rewind_ranges = with_wallet_db_write_lock(
-                        "sync_engine.update_chain_tip.after_rewind",
-                        || -> Result<Vec<ScanRange>, SyncError> {
-                            db.update_chain_tip(current_tip).map_err(|e| {
-                                SyncError::db(format!(
-                                    "update_chain_tip({current_tip_height}) after rewind: {e}"
-                                ))
-                            })?;
-                            db.suggest_scan_ranges().map_err(|e| {
-                                SyncError::db(format!("suggest_scan_ranges after rewind: {e}"))
-                            })
-                        },
-                    )?;
-                    let post_rewind_pending = pending_scan_blocks(&post_rewind_ranges);
-                    let first_pending = first_pending_scan_range(&post_rewind_ranges)
-                        .unwrap_or_else(|| "none".into());
-                    let summary = sync::wallet_scan_heights(&db).map_err(SyncError::db)?;
-                    let actual_rewind_height_u64 = u32::from(actual_rewind_height) as u64;
-                    log::info!(
-                        "sync: {phase_name} rewound to {actual_rewind_height} \
-                         after reorg (requested={requested_rewind_height}, \
-                         distance={rewind_distance}, attempt {}/{}); \
-                         post_rewind_pending={post_rewind_pending}, first_pending={first_pending}, \
-                         summary={summary:?}; restarting scan loop",
+            Err(sync_err @ SyncError::Continuity { at_height, .. }) => {
+                let (phase_name, current_rewinds) = if is_verify_phase {
+                    ("verify", &mut verify_rewinds_this_run)
+                } else {
+                    ("main", &mut main_rewinds_this_run)
+                };
+                log::warn!("sync: {phase_name} {sync_err}");
+                if *current_rewinds >= MAX_REWINDS_PER_RUN {
+                    log::error!(
+                        "sync: {phase_name} rewind budget exhausted \
+                         ({}/{}); propagating error",
                         *current_rewinds,
                         MAX_REWINDS_PER_RUN,
                     );
-                    if actual_rewind_height_u64 < current_tip_height && post_rewind_pending == 0 {
-                        return Err(SyncError::continuity(
-                            current_tip_height,
-                            format!(
-                                "post-rewind scan queue empty after rewinding to \
-                                 {actual_rewind_height_u64}, but lightwalletd tip is \
-                                 {current_tip_height}"
-                            ),
-                        ));
-                    }
-                    prefetch = None;
-                    continue;
-                }
-                RecoveryStrategy::RetryWithBackoff | RecoveryStrategy::Fatal => {
                     return Err(sync_err);
                 }
-            },
+                let requested_rewind_height = at_height.saturating_sub(REWIND_DISTANCE);
+                *current_rewinds += 1;
+                // `truncate_to_height` does NOT silently clamp to the
+                // nearest checkpoint. If the requested height is below
+                // the earliest available checkpoint it returns
+                // `SqliteClientError::RequestedRewindInvalid` with
+                // `safe_rewind_height: Option<BlockHeight>`. When
+                // `safe_rewind_height` is `Some(h)` the library is
+                // telling us the deepest checkpoint it can land on;
+                // retry at that height so a reorg near genesis (or
+                // right after a birthday-bounded import) still
+                // recovers. When it's `None` there is genuinely
+                // nowhere safe to rewind to, and we surface the
+                // failure as fatal.
+                let target = BlockHeight::from_u32(requested_rewind_height as u32);
+                let actual_rewind_height = with_wallet_db_write_lock(
+                    "sync_engine.truncate_to_height",
+                    || -> Result<BlockHeight, SyncError> {
+                        match db.truncate_to_height(target) {
+                            Ok(h) => Ok(h),
+                            Err(SqliteClientError::RequestedRewindInvalid {
+                                safe_rewind_height: Some(safe),
+                                requested_height,
+                            }) => {
+                                log::warn!(
+                                    "sync: {phase_name} rewind target {requested_height} \
+                                     below earliest checkpoint; retrying at safe_rewind_height={safe}",
+                                );
+                                db.truncate_to_height(safe).map_err(|e| {
+                                    if is_sqlite_lock_contention(&e) {
+                                        SyncError::other(format!(
+                                            "truncate_to_height({safe}) retry: SQLite lock contention: {e}"
+                                        ))
+                                    } else {
+                                        SyncError::db(format!(
+                                            "truncate_to_height({safe}) retry after RequestedRewindInvalid: {e}"
+                                        ))
+                                    }
+                                })
+                            }
+                            Err(SqliteClientError::RequestedRewindInvalid {
+                                safe_rewind_height: None,
+                                requested_height,
+                            }) => {
+                                log::error!(
+                                    "sync: {phase_name} rewind to {requested_height} \
+                                     rejected and no safe_rewind_height is available; \
+                                     cannot recover from this reorg in-place",
+                                );
+                                Err(SyncError::db(format!(
+                                    "truncate_to_height({requested_height}): no safe rewind height"
+                                )))
+                            }
+                            Err(e) if is_sqlite_lock_contention(&e) => {
+                                // Transient lock contention on the rewind. The
+                                // outer retry wrapper will re-invoke run_sync_impl
+                                // after a backoff, which re-detects the continuity
+                                // error and triggers the rewind again. If the
+                                // lock has cleared by then, the retry succeeds.
+                                Err(SyncError::other(format!(
+                                    "truncate_to_height({requested_rewind_height}): SQLite lock contention: {e}"
+                                )))
+                            }
+                            Err(e) => Err(SyncError::db(format!(
+                                "truncate_to_height({requested_rewind_height}): {e}"
+                            ))),
+                        }
+                    },
+                )?;
+                let current_tip = BlockHeight::from_u32(current_tip_height as u32);
+                let post_rewind_ranges = with_wallet_db_write_lock(
+                    "sync_engine.update_chain_tip.after_rewind",
+                    || -> Result<Vec<ScanRange>, SyncError> {
+                        db.update_chain_tip(current_tip).map_err(|e| {
+                            SyncError::db(format!(
+                                "update_chain_tip({current_tip_height}) after rewind: {e}"
+                            ))
+                        })?;
+                        db.suggest_scan_ranges().map_err(|e| {
+                            SyncError::db(format!("suggest_scan_ranges after rewind: {e}"))
+                        })
+                    },
+                )?;
+                let post_rewind_pending = pending_scan_blocks(&post_rewind_ranges);
+                let first_pending =
+                    first_pending_scan_range(&post_rewind_ranges).unwrap_or_else(|| "none".into());
+                let summary = sync::wallet_scan_heights(&db).map_err(SyncError::db)?;
+                let actual_rewind_height_u64 = u32::from(actual_rewind_height) as u64;
+                log::info!(
+                    "sync: {phase_name} rewound to {actual_rewind_height} \
+                     after reorg (requested={requested_rewind_height}, \
+                     distance={REWIND_DISTANCE}, attempt {}/{}); \
+                     post_rewind_pending={post_rewind_pending}, first_pending={first_pending}, \
+                     summary={summary:?}; restarting scan loop",
+                    *current_rewinds,
+                    MAX_REWINDS_PER_RUN,
+                );
+                if actual_rewind_height_u64 < current_tip_height && post_rewind_pending == 0 {
+                    return Err(SyncError::continuity(
+                        current_tip_height,
+                        format!(
+                            "post-rewind scan queue empty after rewinding to \
+                             {actual_rewind_height_u64}, but lightwalletd tip is \
+                             {current_tip_height}"
+                        ),
+                    ));
+                }
+                prefetch = None;
+                continue;
+            }
+            Err(sync_err) => return Err(sync_err),
         };
 
         let post_scan_ranges = db
