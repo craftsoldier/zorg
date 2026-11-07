@@ -483,68 +483,106 @@ async fn execute_stored<N: std::fmt::Display>(
 /// The least transparent value worth shielding, 0.001 ZEC, in zatoshis.
 pub const SHIELDING_THRESHOLD: u64 = 100_000;
 
+/// A proposal moving `account_id`'s transparent funds into its shielded balance,
+/// locking its inputs under `lock_inputs` when given. All external and change
+/// addresses are shielded together; ephemeral addresses are shielded one per
+/// transaction, so they are never linked.
+fn shielding_proposal(
+    db: &mut WalletDatabase,
+    network: WalletNetwork,
+    account_id: AccountUuid,
+    lock_inputs: Option<LockRequest>,
+) -> Result<zcash_client_backend::proposal::Proposal<WalletFeeRule, Infallible>, String> {
+    let tip = db
+        .chain_height()
+        .map_err(|e| format!("Read chain height: {e}"))?
+        .ok_or("Sync this account before shielding")?;
+    let balances = db
+        .get_transparent_balances(account_id, (tip + 1).into(), ConfirmationsPolicy::MIN)
+        .map_err(|e| format!("Read transparent balances: {e}"))?;
+    let (ephemeral, regular): (Vec<_>, Vec<_>) = balances
+        .into_iter()
+        .map(|(address, (origin, balance))| (address, origin, balance.spendable_value()))
+        .filter(|(_, _, value)| *value > Zatoshis::ZERO)
+        .partition(|(_, origin, _)| {
+            matches!(
+                origin,
+                TransparentKeyOrigin::Derived {
+                    scope: TransparentKeyScope::EPHEMERAL
+                }
+            )
+        });
+    let from_addrs: Vec<TransparentAddress> = if regular.is_empty() {
+        ephemeral
+            .into_iter()
+            .max_by_key(|(_, _, value)| u64::from(*value))
+            .map(|(address, _, _)| address)
+            .into_iter()
+            .collect()
+    } else {
+        regular.into_iter().map(|(address, _, _)| address).collect()
+    };
+    if from_addrs.is_empty() {
+        return Err("No transparent funds to shield".into());
+    }
+    let (change_strategy, input_selector) = zip317_helper();
+    wallet::propose_shielding::<
+        _,
+        _,
+        _,
+        _,
+        shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
+    >(
+        db,
+        &network,
+        &input_selector,
+        &change_strategy,
+        Zatoshis::const_from_u64(SHIELDING_THRESHOLD),
+        &from_addrs,
+        account_id,
+        ConfirmationsPolicy::MIN,
+        CoinbaseFilter::AllTransparentOutputs,
+        lock_inputs,
+    )
+    .map_err(|e| format!("Propose shielding: {e}"))
+}
+
+/// The amount and fee of shielding the account's transparent funds now,
+/// without locking anything.
+pub fn estimate_shield(account: &Account) -> Result<(u64, u64), String> {
+    let db_path = account.db_path.as_str();
+    let network = account.network;
+    let mut db = open_wallet_db(db_path, network)?;
+    let account_id = parse_account_uuid(&account.uuid)?;
+    let proposal = shielding_proposal(&mut db, network, account_id, None)?;
+    let fee: u64 = proposal
+        .steps()
+        .iter()
+        .map(|s| u64::from(s.balance().fee_required()))
+        .sum();
+    let inputs: u64 = proposal
+        .steps()
+        .iter()
+        .flat_map(|s| s.transparent_inputs())
+        .map(|utxo| u64::from(utxo.txout().value()))
+        .sum();
+    Ok((inputs.saturating_sub(fee), fee))
+}
+
 /// Proposes moving the account's transparent funds into its shielded balance.
-/// All external and change addresses are shielded together; ephemeral
-/// addresses are shielded one per transaction, so they are never linked.
 pub fn propose_shield(account: &Account) -> Result<ProposalResult<Infallible>, String> {
     let db_path = account.db_path.as_str();
     let network = account.network;
     with_wallet_db_write_lock("send.propose_shield", || {
         let mut db = open_wallet_db(db_path, network)?;
         let account_id = parse_account_uuid(&account.uuid)?;
-        let tip = db
-            .chain_height()
-            .map_err(|e| format!("Read chain height: {e}"))?
-            .ok_or("Sync this account before shielding")?;
-        let balances = db
-            .get_transparent_balances(account_id, (tip + 1).into(), ConfirmationsPolicy::MIN)
-            .map_err(|e| format!("Read transparent balances: {e}"))?;
-        let (ephemeral, regular): (Vec<_>, Vec<_>) = balances
-            .into_iter()
-            .map(|(address, (origin, balance))| (address, origin, balance.spendable_value()))
-            .filter(|(_, _, value)| *value > Zatoshis::ZERO)
-            .partition(|(_, origin, _)| {
-                matches!(
-                    origin,
-                    TransparentKeyOrigin::Derived {
-                        scope: TransparentKeyScope::EPHEMERAL
-                    }
-                )
-            });
-        let from_addrs: Vec<TransparentAddress> = if regular.is_empty() {
-            ephemeral
-                .into_iter()
-                .max_by_key(|(_, _, value)| u64::from(*value))
-                .map(|(address, _, _)| address)
-                .into_iter()
-                .collect()
-        } else {
-            regular.into_iter().map(|(address, _, _)| address).collect()
-        };
-        if from_addrs.is_empty() {
-            return Err("No transparent funds to shield".into());
-        }
-        let (change_strategy, input_selector) = zip317_helper();
         let owner = LockOwner::random(&mut UnwrapErr(SysRng));
-        let proposal = wallet::propose_shielding::<
-            _,
-            _,
-            _,
-            _,
-            shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
-        >(
+        let proposal = shielding_proposal(
             &mut db,
-            &network,
-            &input_selector,
-            &change_strategy,
-            Zatoshis::const_from_u64(SHIELDING_THRESHOLD),
-            &from_addrs,
+            network,
             account_id,
-            ConfirmationsPolicy::MIN,
-            CoinbaseFilter::AllTransparentOutputs,
             Some(LockRequest::new(owner, SEND_PROPOSAL_LOCK_BLOCKS)),
-        )
-        .map_err(|e| format!("Propose shielding: {e}"))?;
+        )?;
         let fee: u64 = proposal
             .steps()
             .iter()

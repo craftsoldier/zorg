@@ -100,7 +100,7 @@ pub(crate) use proposal_locks::recover_previous_process;
 // ======================== Re-exports from send.rs ========================
 pub(crate) use send::resubmit_pending_transactions;
 pub use send::{
-    estimate_fee, execute_proposal_with_seed_loader, propose_send, propose_shield,
+    estimate_fee, estimate_shield, execute_proposal_with_seed_loader, propose_send, propose_shield,
     ExecuteProposalResult, SHIELDING_THRESHOLD,
 };
 
