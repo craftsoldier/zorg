@@ -782,7 +782,7 @@ async fn run_sync_impl(
             .await;
 
     // 3. Download subtree roots (incremental)
-    download_subtree_roots(&mut client, &mut db, db_data_path).await?;
+    download_subtree_roots(&mut client, &mut db).await?;
 
     // 4. Calculate initial scan target (before any scanning)
     let initial_ranges = db
@@ -1227,7 +1227,7 @@ async fn run_sync_impl(
                     let post_rewind_pending = pending_scan_blocks(&post_rewind_ranges);
                     let first_pending = first_pending_scan_range(&post_rewind_ranges)
                         .unwrap_or_else(|| "none".into());
-                    let summary = sync::wallet_scan_heights(&mut db).map_err(SyncError::db)?;
+                    let summary = sync::wallet_scan_heights(&db).map_err(SyncError::db)?;
                     let actual_rewind_height_u64 = u32::from(actual_rewind_height) as u64;
                     log::info!(
                         "sync: {phase_name} rewound to {actual_rewind_height} \
