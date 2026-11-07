@@ -15,8 +15,8 @@
 //!
 //! Librustzcash signals these gaps by populating
 //! `db.transaction_data_requests()`. This module services the queue
-//! against lightwalletd via three gRPC calls (`GetTransaction`,
-//! `TransactionsInvolvingAddress`) and writes the results back into
+//! against lightwalletd via two gRPC calls (`GetTransaction`,
+//! `GetTaddressTxids`) and writes the results back into
 //! `db` using `decrypt_and_store_transaction` and
 //! `set_transaction_status`. The loop retries up to three times
 //! because servicing one request can legally populate new requests
