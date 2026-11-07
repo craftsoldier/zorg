@@ -1,3 +1,5 @@
+use std::fmt;
+
 use nonempty::NonEmpty;
 use rusqlite::{params, OptionalExtension};
 use shardtree::error::{InsertionError, ShardTreeError};
@@ -26,17 +28,188 @@ use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxS
 
 mod block_source;
 mod enhance;
-mod error;
 mod lwd;
 mod transparent;
 
 use enhance::run_enhancement;
-pub(crate) use error::SyncError;
-use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
 pub use lwd::{chain_tip, connect_endpoint, LwdClient};
 use lwd::{download_blocks, download_subtree_roots, get_tree_state};
 pub(crate) use lwd::{get_latest_block, send_transaction};
 use transparent::refresh_utxos;
+
+/// Classified sync-engine failure. Carries enough information for the retry
+/// wrapper to pick the right recovery strategy via `recovery_strategy`.
+#[derive(Debug, Clone)]
+pub(crate) enum SyncError {
+    /// `scan_cached_blocks` reported a `PrevHashMismatch` or
+    /// `BlockHeightDiscontinuity` at `at_height`, meaning the wallet's
+    /// stored chain state no longer agrees with the one lightwalletd is
+    /// serving. Recovery is to `truncate_to_height(at_height - REWIND_DISTANCE)`
+    /// and restart the scan loop from the rewound state.
+    Continuity { at_height: u64, detail: String },
+
+    /// Transient network or gRPC failure. The existing exponential-backoff
+    /// retry path is the right response.
+    Network(String),
+
+    /// Local SQLite / `WalletDb` failure. Usually non-retryable (permissions,
+    /// disk full, schema corruption) — propagate up and let the caller decide.
+    Db(String),
+
+    /// Serialization / deserialization failure for a compact block, tree
+    /// state, transaction, or similar on-wire structure. Non-retryable
+    /// because re-fetching the same bytes is unlikely to parse differently.
+    Parse(String),
+
+    /// The server serves a different network than the wallet. Another
+    /// attempt reaches the same server, so it is not retried.
+    WrongNetwork(String),
+
+    /// Unclassified error. Treated as transient by default (retry-with-backoff)
+    /// so we fail safe toward "try again" rather than "bail out".
+    Other(String),
+}
+
+/// Strategy the sync loop should apply when it encounters a `SyncError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecoveryStrategy {
+    /// Retry the failing operation after exponential backoff. The outer
+    /// `run_sync_inner` wrapper already implements this with a 3-retry,
+    /// 2s/4s/8s schedule.
+    RetryWithBackoff,
+
+    /// Rewind the wallet's chain state to `to_height` (via
+    /// `WalletDb::truncate_to_height`) and restart the scan loop. Used for
+    /// continuity errors.
+    Rewind { to_height: u64 },
+
+    /// No automatic recovery is safe. Propagate the error up to the caller.
+    Fatal,
+}
+
+/// Number of blocks the wallet rewinds past a detected reorg. Matches
+/// `CompactBlockProcessor.REWIND_DISTANCE` in zcash-android-wallet-sdk.
+///
+/// The actual rewind height may land earlier than `at_height - REWIND_DISTANCE`
+/// because `truncate_to_height` only accepts checkpoint boundaries; that's
+/// librustzcash's responsibility to enforce.
+pub(crate) const REWIND_DISTANCE: u64 = 10;
+
+/// Commitment-tree root conflicts can be produced by a stale local tree over a
+/// wider range than a normal one-block chain reorg. Escalate each retry inside
+/// a single sync run so we do not keep landing on the same bad shard boundary.
+pub(crate) const COMMITMENT_TREE_REWIND_DISTANCES: [u64; 3] = [10, 100, 1000];
+
+/// Maximum number of reorg-triggered rewinds allowed inside a single
+/// `run_sync_impl` invocation. Caps runaway rewind loops: if the chain is
+/// flapping fast enough to blow through this budget, `run_sync_impl` bails
+/// out so the outer `run_sync_inner` retry wrapper (and eventually the
+/// caller) can try again with a fresh budget. Without this the same
+/// sync run could keep rewinding backward indefinitely.
+pub(crate) const MAX_REWINDS_PER_RUN: u32 = 3;
+
+impl SyncError {
+    /// Log and construct a `Continuity` error in one step.
+    ///
+    /// Uses `log::warn!` rather than `log::error!` because a reorg is an
+    /// expected, recoverable event — the reorg-recovery path in the scan
+    /// loop will rewind the wallet and restart automatically.
+    pub(crate) fn continuity(at_height: u64, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        log::warn!("sync: chain continuity broken at height {at_height}: {detail}");
+        SyncError::Continuity { at_height, detail }
+    }
+
+    /// Log and construct a `Network` error in one step.
+    pub(crate) fn net(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        log::error!("sync: {msg}");
+        SyncError::Network(msg)
+    }
+
+    /// Log and construct a `Db` error in one step.
+    pub(crate) fn db(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        log::error!("sync: {msg}");
+        SyncError::Db(msg)
+    }
+
+    /// Log and construct a `Parse` error in one step.
+    pub(crate) fn parse(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        log::error!("sync: {msg}");
+        SyncError::Parse(msg)
+    }
+
+    /// Log and construct an `Other` error in one step. Used for call sites
+    /// that don't fit a specific category (and for `scan_cached_blocks`
+    /// fall-through cases that the scan branch didn't classify).
+    pub(crate) fn other(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        log::error!("sync: {msg}");
+        SyncError::Other(msg)
+    }
+
+    /// Map this error to the recovery action the sync loop should take.
+    pub(crate) fn recovery_strategy(&self) -> RecoveryStrategy {
+        match self {
+            SyncError::Continuity { at_height, .. } => RecoveryStrategy::Rewind {
+                to_height: at_height.saturating_sub(REWIND_DISTANCE),
+            },
+            SyncError::Network(_) | SyncError::Other(_) => RecoveryStrategy::RetryWithBackoff,
+            SyncError::Db(_) | SyncError::Parse(_) | SyncError::WrongNetwork(_) => {
+                RecoveryStrategy::Fatal
+            }
+        }
+    }
+
+    pub(crate) fn is_commitment_tree_root_conflict(&self) -> bool {
+        match self {
+            SyncError::Continuity { detail, .. } => detail
+                .to_ascii_lowercase()
+                .contains("commitment tree root conflict"),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn rewind_distance_for_attempt(&self, attempt_index: u32) -> u64 {
+        if self.is_commitment_tree_root_conflict() {
+            let idx = usize::try_from(attempt_index).unwrap_or(usize::MAX);
+            COMMITMENT_TREE_REWIND_DISTANCES
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| *COMMITMENT_TREE_REWIND_DISTANCES.last().unwrap())
+        } else {
+            REWIND_DISTANCE
+        }
+    }
+
+    pub(crate) fn rewind_target_for_attempt(&self, attempt_index: u32) -> Option<u64> {
+        match self {
+            SyncError::Continuity { at_height, .. } => {
+                Some(at_height.saturating_sub(self.rewind_distance_for_attempt(attempt_index)))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncError::Continuity { at_height, detail } => {
+                write!(f, "chain continuity broken at height {at_height}: {detail}")
+            }
+            SyncError::Network(msg) => write!(f, "network: {msg}"),
+            SyncError::Db(msg) => write!(f, "db: {msg}"),
+            SyncError::Parse(msg) => write!(f, "parse: {msg}"),
+            SyncError::WrongNetwork(msg) => write!(f, "{msg}"),
+            SyncError::Other(msg) => write!(f, "other: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
 
 /// Progress event sent to caller.
 #[derive(Clone, Debug)]
@@ -1363,17 +1536,142 @@ pub async fn fetch_birthday(
         .map_err(|e| format!("Could not read the tree state before birthday {height}: {e}"))
 }
 
-// ==================== Tests ====================
-//
-// Error-taxonomy tests now live alongside their types in `error.rs`. The
-// only test that has to stay here is `sqlite_lock_contention_is_recognised`,
-// because it exercises the `is_sqlite_lock_contention` helper that still
-// lives in this module. A follow-up refactor commit moves the helper (and
-// this test) into the lwd submodule.
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn db_and_parse_are_fatal() {
+        assert_eq!(
+            SyncError::Db("disk full".into()).recovery_strategy(),
+            RecoveryStrategy::Fatal,
+        );
+        assert_eq!(
+            SyncError::Parse("bad tree state".into()).recovery_strategy(),
+            RecoveryStrategy::Fatal,
+        );
+    }
+
+    #[test]
+    fn wrong_network_is_fatal_and_untagged() {
+        let e = SyncError::WrongNetwork("http://x serves the main network".into());
+        assert_eq!(e.recovery_strategy(), RecoveryStrategy::Fatal);
+        assert_eq!(format!("{e}"), "http://x serves the main network");
+    }
+
+    #[test]
+    fn network_and_other_recover_via_backoff() {
+        assert_eq!(
+            SyncError::Network("timeout".into()).recovery_strategy(),
+            RecoveryStrategy::RetryWithBackoff,
+        );
+        assert_eq!(
+            SyncError::Other("???".into()).recovery_strategy(),
+            RecoveryStrategy::RetryWithBackoff,
+        );
+    }
+
+    #[test]
+    fn continuity_recovery_rewinds_by_the_fixed_distance() {
+        let e = SyncError::Continuity {
+            at_height: 2_500_000,
+            detail: String::new(),
+        };
+        assert_eq!(
+            e.recovery_strategy(),
+            RecoveryStrategy::Rewind {
+                to_height: 2_500_000 - REWIND_DISTANCE,
+            },
+        );
+    }
+
+    #[test]
+    fn continuity_rewind_does_not_underflow_near_genesis() {
+        // Pathological: reorg detected at a height smaller than
+        // REWIND_DISTANCE. The target should clamp at 0 rather than panic
+        // or wrap around.
+        let e = SyncError::Continuity {
+            at_height: 5,
+            detail: String::new(),
+        };
+        assert_eq!(
+            e.recovery_strategy(),
+            RecoveryStrategy::Rewind { to_height: 0 },
+        );
+    }
+
+    #[test]
+    fn display_includes_height_and_detail_for_continuity() {
+        let e = SyncError::Continuity {
+            at_height: 2_500_000,
+            detail: "prev_hash mismatch".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("2500000"), "display should include height: {s}");
+        assert!(
+            s.contains("prev_hash mismatch"),
+            "display should include detail: {s}"
+        );
+    }
+
+    #[test]
+    fn display_tags_other_variants_distinctly() {
+        assert!(format!("{}", SyncError::Network("x".into())).starts_with("network: "));
+        assert!(format!("{}", SyncError::Db("x".into())).starts_with("db: "));
+        assert!(format!("{}", SyncError::Parse("x".into())).starts_with("parse: "));
+        assert!(format!("{}", SyncError::Other("x".into())).starts_with("other: "));
+    }
+
+    #[test]
+    fn continuity_constructor_records_height_and_detail() {
+        // Exercise the `SyncError::continuity` constructor the
+        // `scan_cached_blocks` call site uses. The recovery loop matches
+        // against this variant to decide whether to rewind.
+        let e = SyncError::continuity(2_500_000, "prev_hash mismatch at 2500000");
+        match &e {
+            SyncError::Continuity { at_height, detail } => {
+                assert_eq!(*at_height, 2_500_000);
+                assert_eq!(detail, "prev_hash mismatch at 2500000");
+            }
+            other => panic!("expected Continuity, got {other:?}"),
+        }
+        // And the recovery strategy should rewind 10 blocks back from the
+        // detected height.
+        assert_eq!(
+            e.recovery_strategy(),
+            RecoveryStrategy::Rewind {
+                to_height: 2_500_000 - REWIND_DISTANCE,
+            },
+        );
+    }
+
+    #[test]
+    fn commitment_tree_conflicts_escalate_rewind_distance() {
+        let e = SyncError::continuity(
+            2_500_000,
+            "commitment tree root conflict while scanning from 2500000",
+        );
+
+        assert!(e.is_commitment_tree_root_conflict());
+        assert_eq!(e.rewind_distance_for_attempt(0), 10);
+        assert_eq!(e.rewind_distance_for_attempt(1), 100);
+        assert_eq!(e.rewind_distance_for_attempt(2), 1000);
+        assert_eq!(e.rewind_distance_for_attempt(99), 1000);
+        assert_eq!(e.rewind_target_for_attempt(2), Some(2_499_000));
+    }
+
+    #[test]
+    fn ordinary_continuity_keeps_fixed_rewind_distance() {
+        let e = SyncError::continuity(2_500_000, "prev hash mismatch");
+
+        assert!(!e.is_commitment_tree_root_conflict());
+        assert_eq!(e.rewind_distance_for_attempt(0), REWIND_DISTANCE);
+        assert_eq!(e.rewind_distance_for_attempt(2), REWIND_DISTANCE);
+        assert_eq!(
+            e.rewind_target_for_attempt(2),
+            Some(2_500_000 - REWIND_DISTANCE)
+        );
+    }
 
     #[test]
     fn empty_chain_state_uses_network_activation_height() {
