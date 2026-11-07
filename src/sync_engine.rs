@@ -5,12 +5,15 @@ use tonic::transport::Channel;
 use zcash_client_backend::data_api::{
     chain::{self, error::Error as ChainError, scan_cached_blocks},
     scanning::{ScanPriority, ScanRange},
-    wallet::ConfirmationsPolicy,
+    wallet::{decrypt_and_store_transaction, ConfirmationsPolicy},
     AccountBirthday, WalletCommitmentTrees, WalletRead, WalletWrite,
 };
 use zcash_client_sqlite::error::SqliteClientError;
-use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_primitives::{block::BlockHash, transaction::Transaction};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters},
+    TxId,
+};
 
 use crate::{
     db::{
@@ -613,10 +616,12 @@ async fn refresh_utxos(
 
         while let Some(reply) = next_stream_message(&mut stream, "get_address_utxos_stream").await?
         {
-            let txid: [u8; 32] = reply
-                .txid
-                .try_into()
-                .map_err(|_| SyncError::parse("transparent UTXO txid was not 32 bytes"))?;
+            let txid = TxId::from_bytes(
+                reply
+                    .txid
+                    .try_into()
+                    .map_err(|_| SyncError::parse("transparent UTXO txid was not 32 bytes"))?,
+            );
             let index = u32::try_from(reply.index).map_err(|_| {
                 SyncError::parse(format!("invalid transparent UTXO index: {}", reply.index))
             })?;
@@ -633,7 +638,7 @@ async fn refresh_utxos(
             let mut script = Script::default();
             script.0 .0 = reply.script;
             let output = WalletTransparentOutput::from_parts(
-                OutPoint::new(txid, index),
+                OutPoint::new(*txid.as_ref(), index),
                 TxOut::new(value, script),
                 Some(BlockHeight::from_u32(height)),
                 None,
@@ -643,6 +648,29 @@ async fn refresh_utxos(
             .ok_or_else(|| {
                 SyncError::parse("transparent UTXO script did not decode to a wallet address")
             })?;
+
+            // Storing the full transaction tells the wallet whether the
+            // output is coinbase, which cannot be spent until it matures.
+            let known = db
+                .get_transaction(txid)
+                .map_err(|e| SyncError::db(format!("get_transaction: {e}")))?;
+            if known.is_none() {
+                let raw = lwd::get_transaction(client, txid.as_ref().to_vec())
+                    .await
+                    .map_err(|e| SyncError::net(format!("get_transaction {txid}: {e}")))?;
+                let tx = Transaction::read(&raw.data[..], BranchId::Sapling)
+                    .map_err(|e| SyncError::parse(format!("transaction {txid}: {e}")))?;
+                let network = *db.params();
+                with_wallet_db_write_lock("sync_engine.decrypt_and_store_transaction", || {
+                    decrypt_and_store_transaction(
+                        &network,
+                        db,
+                        &tx,
+                        Some(BlockHeight::from_u32(height)),
+                    )
+                    .map_err(|e| SyncError::db(format!("decrypt_and_store_transaction: {e}")))
+                })?;
+            }
 
             with_wallet_db_write_lock("sync_engine.put_received_transparent_utxo", || {
                 db.put_received_transparent_utxo(&output)
