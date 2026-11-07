@@ -84,20 +84,20 @@ pub(super) async fn run_enhancement(
                     }
 
                     match lwd::get_transaction(client, txid.as_ref().to_vec()).await {
+                        Ok(raw) if matches!(req, TransactionDataRequest::GetStatus(_)) => {
+                            let status = transaction_status_from_raw_height(raw.height)?;
+                            let txid = *txid;
+                            if let Err(e) = with_wallet_db_write_lock(
+                                "sync_engine.enhance.set_transaction_status",
+                                || db.set_transaction_status(txid, status),
+                            ) {
+                                log::error!("sync: set_transaction_status failed: {e}");
+                            }
+                        }
                         Ok(raw) => {
                             if !raw.data.is_empty() {
                                 if let Err(e) = store_transaction(db, &raw) {
                                     log::warn!("sync: could not store {txid}: {e}");
-                                }
-                            }
-                            if matches!(req, TransactionDataRequest::GetStatus(_)) {
-                                let status = transaction_status_from_raw_height(raw.height)?;
-                                let txid = *txid;
-                                if let Err(e) = with_wallet_db_write_lock(
-                                    "sync_engine.enhance.set_transaction_status",
-                                    || db.set_transaction_status(txid, status),
-                                ) {
-                                    log::error!("sync: set_transaction_status failed: {e}");
                                 }
                             }
                         }
