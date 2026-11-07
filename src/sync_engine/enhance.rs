@@ -34,7 +34,10 @@ use zcash_client_backend::{
     proto::service::{compact_tx_streamer_client::CompactTxStreamerClient, RawTransaction},
 };
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId},
+    TxId,
+};
 
 use crate::db::with_wallet_db_write_lock;
 
@@ -53,7 +56,7 @@ pub(super) async fn run_enhancement(
     db: &mut WalletDatabase,
 ) -> Result<(), SyncError> {
     let network = *db.params();
-    let mut failed_txids: HashSet<String> = HashSet::new();
+    let mut failed_txids: HashSet<TxId> = HashSet::new();
 
     for _ in 0..3 {
         let requests = db
@@ -76,8 +79,7 @@ pub(super) async fn run_enhancement(
             match req {
                 TransactionDataRequest::GetStatus(txid)
                 | TransactionDataRequest::Enhancement(txid) => {
-                    let txid_str = format!("{txid}");
-                    if failed_txids.contains(&txid_str) {
+                    if failed_txids.contains(txid) {
                         continue;
                     }
 
@@ -85,7 +87,7 @@ pub(super) async fn run_enhancement(
                         Ok(raw) => {
                             if !raw.data.is_empty() {
                                 if let Err(e) = store_transaction(db, &raw) {
-                                    log::warn!("sync: could not store {txid_str}: {e}");
+                                    log::warn!("sync: could not store {txid}: {e}");
                                 }
                             }
                             if matches!(req, TransactionDataRequest::GetStatus(_)) {
@@ -101,10 +103,8 @@ pub(super) async fn run_enhancement(
                         }
                         Err(e) => match classify_get_transaction_error(&e) {
                             GetTransactionErrorAction::MarkTxidNotRecognized => {
-                                log::warn!(
-                                    "sync: get_transaction did not recognize {txid_str}: {e}"
-                                );
-                                failed_txids.insert(txid_str);
+                                log::warn!("sync: get_transaction did not recognize {txid}: {e}");
+                                failed_txids.insert(*txid);
                                 let txid = *txid;
                                 if let Err(e) = with_wallet_db_write_lock(
                                     "sync_engine.enhance.set_transaction_status",
@@ -120,7 +120,7 @@ pub(super) async fn run_enhancement(
                             }
                             GetTransactionErrorAction::RetryAsNetwork => {
                                 return Err(SyncError::net(format!(
-                                    "get_transaction failed for {txid_str}: {e}"
+                                    "get_transaction failed for {txid}: {e}"
                                 )));
                             }
                         },
