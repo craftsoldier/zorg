@@ -31,7 +31,7 @@ use zcash_client_backend::{
         wallet::decrypt_and_store_transaction, TransactionDataRequest, TransactionStatus,
         WalletRead, WalletWrite,
     },
-    proto::service::compact_tx_streamer_client::CompactTxStreamerClient,
+    proto::service::{compact_tx_streamer_client::CompactTxStreamerClient, RawTransaction},
 };
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
@@ -83,29 +83,9 @@ pub(super) async fn run_enhancement(
 
                     match lwd::get_transaction(client, txid.as_ref().to_vec()).await {
                         Ok(raw) => {
-                            let mined_height = mined_height_from_raw_height(raw.height)?;
                             if !raw.data.is_empty() {
-                                match Transaction::read(&raw.data[..], BranchId::Sapling) {
-                                    Ok(tx) => {
-                                        if let Err(e) = with_wallet_db_write_lock(
-                                            "sync_engine.enhance.decrypt_and_store_transaction",
-                                            || {
-                                                decrypt_and_store_transaction(
-                                                    &network,
-                                                    db,
-                                                    &tx,
-                                                    mined_height,
-                                                )
-                                            },
-                                        ) {
-                                            log::error!(
-                                                "sync: decrypt_and_store_transaction failed: {e}"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => log::warn!(
-                                        "sync: Transaction::read failed for {txid_str}: {e}"
-                                    ),
+                                if let Err(e) = store_transaction(db, &raw) {
+                                    log::warn!("sync: could not store {txid_str}: {e}");
                                 }
                             }
                             if matches!(req, TransactionDataRequest::GetStatus(_)) {
@@ -167,31 +147,8 @@ pub(super) async fn run_enhancement(
                             {
                                 Ok(Some(raw)) => {
                                     if !raw.data.is_empty() {
-                                        let mined_height =
-                                            mined_height_from_raw_height(raw.height)?;
-                                        match Transaction::read(&raw.data[..], BranchId::Sapling) {
-                                            Ok(tx) => {
-                                                if let Err(e) = with_wallet_db_write_lock(
-                                                        "sync_engine.enhance.decrypt_and_store_transaction",
-                                                        || {
-                                                            decrypt_and_store_transaction(
-                                                                &network,
-                                                                db,
-                                                                &tx,
-                                                                mined_height,
-                                                            )
-                                                        },
-                                                    ) {
-                                                        log::error!(
-                                                            "sync: decrypt_and_store_transaction (addr) failed: {e}"
-                                                        );
-                                                    }
-                                            }
-                                            Err(e) => {
-                                                log::warn!(
-                                                    "sync: Transaction::read (addr) failed: {e}"
-                                                )
-                                            }
+                                        if let Err(e) = store_transaction(db, &raw) {
+                                            log::warn!("sync: could not store transaction: {e}");
                                         }
                                     }
                                 }
@@ -206,6 +163,22 @@ pub(super) async fn run_enhancement(
         }
     }
     Ok(())
+}
+
+/// Stores the transaction in `raw` with the wallet, at the height lightwalletd
+/// reports for it.
+pub(super) fn store_transaction(
+    db: &mut WalletDatabase,
+    raw: &RawTransaction,
+) -> Result<(), SyncError> {
+    let tx = Transaction::read(&raw.data[..], BranchId::Sapling)
+        .map_err(|e| SyncError::parse(format!("read transaction: {e}")))?;
+    let mined_height = mined_height_from_raw_height(raw.height)?;
+    let network = *db.params();
+    with_wallet_db_write_lock("sync_engine.decrypt_and_store_transaction", || {
+        decrypt_and_store_transaction(&network, db, &tx, mined_height)
+            .map_err(|e| SyncError::db(format!("decrypt_and_store_transaction: {e}")))
+    })
 }
 
 /// Whether servicing `request` can make progress right now. Transaction

@@ -1,16 +1,11 @@
 use tonic::transport::Channel;
 use zcash_client_backend::{
-    data_api::{wallet::decrypt_and_store_transaction, WalletRead, WalletWrite},
+    data_api::{WalletRead, WalletWrite},
     proto::service::compact_tx_streamer_client::CompactTxStreamerClient,
     wallet::WalletTransparentOutput,
 };
 use zcash_keys::encoding::AddressCodec as _;
-use zcash_primitives::transaction::Transaction;
-use zcash_protocol::{
-    consensus::{BlockHeight, BranchId},
-    value::Zatoshis,
-    TxId,
-};
+use zcash_protocol::{consensus::BlockHeight, value::Zatoshis, TxId};
 
 use ::transparent::{
     address::Script,
@@ -19,6 +14,7 @@ use ::transparent::{
 
 use crate::db::with_wallet_db_write_lock;
 
+use super::enhance::store_transaction;
 use super::lwd::{self, get_address_utxos_stream, next_stream_message};
 use super::{SyncError, WalletDatabase};
 
@@ -97,18 +93,7 @@ pub(super) async fn refresh_utxos(
                 let raw = lwd::get_transaction(client, txid.as_ref().to_vec())
                     .await
                     .map_err(|e| SyncError::net(format!("get_transaction {txid}: {e}")))?;
-                let tx = Transaction::read(&raw.data[..], BranchId::Sapling)
-                    .map_err(|e| SyncError::parse(format!("transaction {txid}: {e}")))?;
-                let network = *db.params();
-                with_wallet_db_write_lock("sync_engine.decrypt_and_store_transaction", || {
-                    decrypt_and_store_transaction(
-                        &network,
-                        db,
-                        &tx,
-                        Some(BlockHeight::from_u32(height)),
-                    )
-                    .map_err(|e| SyncError::db(format!("decrypt_and_store_transaction: {e}")))
-                })?;
+                store_transaction(db, &raw)?;
             }
 
             with_wallet_db_write_lock("sync_engine.put_received_transparent_utxo", || {
