@@ -33,7 +33,7 @@ use zcash_protocol::{
     PoolType, ShieldedPool,
 };
 
-use crate::account::parse_account_uuid;
+use crate::account::{parse_account_uuid, Account};
 use crate::db::{with_wallet_db_write_lock, WalletDatabase};
 use crate::network::WalletNetwork;
 use crate::sync::{open_readonly_conn, open_wallet_db, proposal_locks};
@@ -222,16 +222,16 @@ fn ordinary_send_spend_policy() -> SpendPolicy {
 // ======================== Send ========================
 
 pub fn propose_send(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
+    account: &Account,
     to_address: &str,
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<ProposalResult, String> {
+    let db_path = account.db_path.as_str();
+    let network = account.network;
     with_wallet_db_write_lock("send.propose_send", || {
         let mut db = open_wallet_db(db_path, network)?;
-        let account_id = parse_account_uuid(account_uuid)?;
+        let account_id = parse_account_uuid(&account.uuid)?;
         let request = build_send_request(to_address, amount_zatoshi, memo_str)?;
         let (change_strategy, input_selector) = zip317_helper();
         let spend_policy = ordinary_send_spend_policy();
@@ -283,15 +283,15 @@ pub fn propose_send(
 }
 
 pub fn estimate_fee(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
+    account: &Account,
     to_address: &str,
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<u64, String> {
+    let db_path = account.db_path.as_str();
+    let network = account.network;
     let mut db = open_wallet_db(db_path, network)?;
-    let account_id = parse_account_uuid(account_uuid)?;
+    let account_id = parse_account_uuid(&account.uuid)?;
     let request = build_send_request(to_address, amount_zatoshi, memo_str)?;
     let (change_strategy, input_selector) = zip317_helper();
     let proposal = wallet::propose_transfer::<
@@ -487,14 +487,12 @@ pub const SHIELDING_THRESHOLD: u64 = 100_000;
 /// Proposes moving the account's transparent funds into its shielded balance.
 /// All external and change addresses are shielded together; ephemeral
 /// addresses are shielded one per transaction, so they are never linked.
-pub fn propose_shield(
-    db_path: &str,
-    network: WalletNetwork,
-    account_uuid: &str,
-) -> Result<ProposalResult<Infallible>, String> {
+pub fn propose_shield(account: &Account) -> Result<ProposalResult<Infallible>, String> {
+    let db_path = account.db_path.as_str();
+    let network = account.network;
     with_wallet_db_write_lock("send.propose_shield", || {
         let mut db = open_wallet_db(db_path, network)?;
-        let account_id = parse_account_uuid(account_uuid)?;
+        let account_id = parse_account_uuid(&account.uuid)?;
         let tip = db
             .chain_height()
             .map_err(|e| format!("Read chain height: {e}"))?

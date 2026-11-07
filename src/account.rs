@@ -630,7 +630,6 @@ mod tests {
         let created =
             init_db_and_create_account(db_path_str, WalletNetwork::Main, &seed, None, "Account 1")
                 .unwrap();
-        let uuid = created.uuid.clone();
         let default_address = created.unified_address;
         let account = Account {
             uuid: created.uuid,
@@ -647,9 +646,7 @@ mod tests {
         .unwrap()
         .update_chain_tip(zcash_protocol::consensus::BlockHeight::from_u32(2_500_000))
         .unwrap();
-        let renewed_address =
-            crate::sync::get_next_available_address(db_path_str, WalletNetwork::Main, &uuid)
-                .unwrap();
+        let renewed_address = crate::sync::get_next_available_address(&account).unwrap();
 
         assert_ne!(default_address, renewed_address);
         assert_eq!(renewed_address, current_address(&account).unwrap());
