@@ -17,7 +17,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    ops::Range,
     rc::Rc,
 };
 
@@ -26,7 +25,7 @@ use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{Balance, WalletWrite};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
-    consensus::{BlockHeight, BranchId},
+    consensus::BranchId,
     memo::{Memo, MemoBytes},
     value::Zatoshis,
 };
@@ -121,73 +120,6 @@ pub fn get_next_available_address(account: &Account) -> Result<String, String> {
     Ok(ua.encode(&account.network))
 }
 
-/// Returns unmined transactions that the wallet previously discovered in a
-/// compact block and that a pending scan range could still restore as mined.
-/// A shielded note only receives a commitment-tree position when it is scanned
-/// as mined; truncation retains that position even after it clears the
-/// transaction's mined height.
-pub(crate) fn get_unmined_txids_with_mined_output_evidence(
-    db_path: &str,
-    pending_ranges: &[Range<BlockHeight>],
-) -> Result<HashSet<Vec<u8>>, String> {
-    if pending_ranges.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let conn = open_readonly_conn(db_path)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT t.txid, t.min_observed_height, t.expiry_height
-             FROM transactions t
-             WHERE t.mined_height IS NULL
-               AND (
-                 EXISTS (
-                   SELECT 1 FROM sapling_received_notes n
-                   WHERE n.transaction_id = t.id_tx
-                     AND n.commitment_tree_position IS NOT NULL
-                 )
-                 OR EXISTS (
-                   SELECT 1 FROM orchard_received_notes n
-                   WHERE n.transaction_id = t.id_tx
-                     AND n.commitment_tree_position IS NOT NULL
-                 )
-                 OR EXISTS (
-                   SELECT 1 FROM ironwood_received_notes n
-                   WHERE n.transaction_id = t.id_tx
-                     AND n.commitment_tree_position IS NOT NULL
-                 )
-               )",
-        )
-        .map_err(|e| format!("SQL error: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, u32>(1)?,
-                row.get::<_, Option<u32>>(2)?,
-            ))
-        })
-        .map_err(|e| format!("Query error: {e}"))?;
-
-    rows.filter_map(|row| match row {
-        Ok((txid, min_observed_height, expiry_height))
-            if pending_ranges.iter().any(|range| {
-                let range_start = u32::from(range.start);
-                let range_end = u32::from(range.end);
-                let known_expiry = expiry_height.filter(|height| *height > 0);
-                range_end > min_observed_height
-                    && known_expiry.is_none_or(|height| range_start < height)
-            }) =>
-        {
-            Some(Ok(txid))
-        }
-        Ok(_) => None,
-        Err(error) => Some(Err(error)),
-    })
-    .collect::<Result<HashSet<_>, _>>()
-    .map_err(|e| format!("Row error: {e}"))
-}
-
 // ======================== Transaction History ========================
 
 pub struct TransactionInfo {
@@ -217,6 +149,7 @@ struct TxBase {
     txid: Vec<u8>,
     mined_height: Option<u32>,
     expired_unmined: bool,
+    expiry_height: Option<u32>,
     account_balance_delta: i64,
     fee: u64,
     block_time: u64,
@@ -224,7 +157,6 @@ struct TxBase {
     total_received: u64,
     is_shielding: bool,
     tx_index: i64,
-    created_time: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,39 +167,9 @@ struct TxOutput {
     from_account_uuid: Option<Vec<u8>>,
     to_account_uuid: Option<Vec<u8>>,
     to_address: Option<String>,
-    sent_to_address: Option<String>,
-    transparent_receiver_address: Option<String>,
     to_key_scope: Option<i64>,
     value: u64,
     memo: Option<Vec<u8>>,
-}
-
-impl TxOutput {
-    fn detail_address(&self, tx_kind: &str) -> Option<String> {
-        if tx_kind == "sent" {
-            if self.output_pool == 0 {
-                return self
-                    .transparent_receiver_address
-                    .clone()
-                    .or_else(|| self.sent_to_address.clone())
-                    .or_else(|| self.to_address.clone());
-            }
-
-            self.sent_to_address
-                .clone()
-                .or_else(|| self.to_address.clone())
-        } else if self.output_pool == 0 {
-            // Received transparent outputs: surface the bare t-address. The
-            // wallet stores the account UA in `to_address`, so without this
-            // recovery the UA leaks into the receiving-address line.
-            // Mirrors the `sent` pool-0 branch above.
-            self.transparent_receiver_address
-                .clone()
-                .or_else(|| self.to_address.clone())
-        } else {
-            self.to_address.clone()
-        }
-    }
 }
 
 #[derive(Default, Clone)]
@@ -310,8 +212,7 @@ struct ActivitySummary {
 struct ClassifiedTx {
     info: TransactionInfo,
     sort_pending_rank: u8,
-    sort_timestamp: u64,
-    sort_mined_height: u64,
+    sort_height: u64,
     tx_index: i64,
     row_order: u8,
 }
@@ -377,8 +278,7 @@ fn assemble_history(
     visible.sort_by(|a, b| {
         b.sort_pending_rank
             .cmp(&a.sort_pending_rank)
-            .then_with(|| b.sort_timestamp.cmp(&a.sort_timestamp))
-            .then_with(|| b.sort_mined_height.cmp(&a.sort_mined_height))
+            .then_with(|| b.sort_height.cmp(&a.sort_height))
             .then_with(|| b.tx_index.cmp(&a.tx_index))
             .then_with(|| b.info.txid.cmp(&a.info.txid))
             .then_with(|| a.row_order.cmp(&b.row_order))
@@ -430,7 +330,7 @@ pub fn get_transaction_detail(
     let outputs = visible_outputs
         .into_iter()
         .map(|output| TransactionDetailOutput {
-            address: output.detail_address(tx_kind),
+            address: output.to_address.clone(),
             amount_zatoshi: output.value,
             memo: decode_text_memo(output.memo.as_deref()),
         })
@@ -525,13 +425,12 @@ fn read_history_bases(
 ) -> Result<Vec<TxBase>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT vt.txid, vt.mined_height, vt.expired_unmined, vt.account_balance_delta,
+            "SELECT vt.txid, vt.mined_height, vt.expired_unmined, vt.expiry_height,
+                    vt.account_balance_delta,
                     COALESCE(vt.fee_paid, 0), COALESCE(vt.block_time, 0),
                     COALESCE(vt.total_spent, 0), COALESCE(vt.total_received, 0),
-                    COALESCE(vt.is_shielding, 0), COALESCE(vt.tx_index, -1),
-                    CAST(COALESCE(strftime('%s', tx.created), 0) AS INTEGER)
+                    COALESCE(vt.is_shielding, 0), COALESCE(vt.tx_index, -1)
              FROM v_transactions vt
-             LEFT JOIN transactions tx ON tx.txid = vt.txid
              WHERE vt.account_uuid = ?1 AND (?2 IS NULL OR vt.txid = ?2)",
         )
         .map_err(|e| format!("SQL error: {e}"))?;
@@ -541,14 +440,14 @@ fn read_history_bases(
                 txid: row.get(0)?,
                 mined_height: row.get(1)?,
                 expired_unmined: row.get(2)?,
-                account_balance_delta: row.get(3)?,
-                fee: row.get::<_, i64>(4)?.unsigned_abs(),
-                block_time: row.get::<_, i64>(5)?.unsigned_abs(),
-                total_spent: row.get::<_, i64>(6)?.unsigned_abs(),
-                total_received: row.get::<_, i64>(7)?.unsigned_abs(),
-                is_shielding: row.get(8)?,
-                tx_index: row.get(9)?,
-                created_time: row.get::<_, i64>(10)?.unsigned_abs(),
+                expiry_height: row.get(3)?,
+                account_balance_delta: row.get(4)?,
+                fee: row.get::<_, i64>(5)?.unsigned_abs(),
+                block_time: row.get::<_, i64>(6)?.unsigned_abs(),
+                total_spent: row.get::<_, i64>(7)?.unsigned_abs(),
+                total_received: row.get::<_, i64>(8)?.unsigned_abs(),
+                is_shielding: row.get(9)?,
+                tx_index: row.get(10)?,
             })
         })
         .map_err(|e| format!("Query error: {e}"))?;
@@ -583,42 +482,7 @@ fn read_history_outputs<'a>(
             txo.from_account_uuid,
             txo.to_account_uuid,
             txo.to_address,
-            (
-                SELECT sn.to_address
-                FROM sent_notes sn
-                JOIN transactions st ON st.id_tx = sn.transaction_id
-                JOIN accounts from_acc ON from_acc.id = sn.from_account_id
-                WHERE st.txid = txo.txid
-                  AND from_acc.uuid = ?1
-                  AND sn.output_pool = txo.output_pool
-                  AND sn.output_index = txo.output_index
-                  AND sn.to_address IS NOT NULL
-                LIMIT 1
-            ) AS sent_to_address,
-            (
-                SELECT a.cached_transparent_receiver_address
-                FROM accounts acc
-                JOIN addresses a ON a.account_id = acc.id
-                WHERE acc.uuid = txo.to_account_uuid
-                  AND txo.output_pool = 0
-                  AND (
-                      a.address = txo.to_address
-                      OR a.cached_transparent_receiver_address = txo.to_address
-                  )
-                  AND a.cached_transparent_receiver_address IS NOT NULL
-                LIMIT 1
-            ) AS transparent_receiver_address,
-            (
-                SELECT a.key_scope
-                FROM accounts acc
-                JOIN addresses a ON a.account_id = acc.id
-                WHERE acc.uuid = txo.to_account_uuid
-                  AND (
-                      a.address = txo.to_address
-                      OR a.cached_transparent_receiver_address = txo.to_address
-                  )
-                LIMIT 1
-            ) AS to_key_scope,
+            txo.recipient_key_scope,
             txo.value,
             txo.memo
         FROM v_tx_outputs txo
@@ -638,11 +502,9 @@ fn read_history_outputs<'a>(
                 from_account_uuid: row.get(3)?,
                 to_account_uuid: row.get(4)?,
                 to_address: row.get(5)?,
-                sent_to_address: row.get(6)?,
-                transparent_receiver_address: row.get(7)?,
-                to_key_scope: row.get(8)?,
-                value: row.get::<_, i64>(9)?.unsigned_abs(),
-                memo: row.get(10)?,
+                to_key_scope: row.get(6)?,
+                value: row.get::<_, i64>(7)?.unsigned_abs(),
+                memo: row.get(8)?,
             })
         })
         .map_err(|e| format!("Query error: {e}"))?;
@@ -713,22 +575,13 @@ fn is_shielded_pool(output_pool: i64) -> bool {
     matches!(output_pool, SAPLING_POOL | ORCHARD_POOL | IRONWOOD_POOL)
 }
 
+/// Self outputs are user-visible only when received at an external or foreign
+/// address; internal and ephemeral receivers are change and funding mechanics.
 fn is_user_visible_self_output(output: &TxOutput) -> bool {
-    let has_external_or_foreign_scope = matches!(output.to_key_scope, Some(0) | Some(-1));
-
-    match output.output_pool {
-        // Transparent self outputs are user-visible only when they land on a
-        // normal external/foreign receiver. Internal and ephemeral receivers
-        // are change/funding mechanics.
-        TRANSPARENT_POOL => has_external_or_foreign_scope,
-        // `is_change` is best-effort for wallet-owned outputs and can also be
-        // set on explicit self-transfers. Treat external/foreign receivers and
-        // sent-note recipients as visible; keep internal change hidden.
-        SAPLING_POOL | ORCHARD_POOL | IRONWOOD_POOL => {
-            has_external_or_foreign_scope || output.sent_to_address.is_some()
-        }
-        _ => false,
-    }
+    matches!(
+        output.output_pool,
+        TRANSPARENT_POOL | SAPLING_POOL | ORCHARD_POOL | IRONWOOD_POOL
+    ) && matches!(output.to_key_scope, Some(0) | Some(-1))
 }
 
 fn decode_text_memo(memo: Option<&[u8]>) -> Option<String> {
@@ -822,7 +675,6 @@ fn build_classified_tx(
     display_pool: &str,
     row_order: u8,
 ) -> ClassifiedTx {
-    let sort_timestamp = base.display_timestamp();
     ClassifiedTx {
         info: TransactionInfo {
             txid: TxId::from_bytes(
@@ -840,20 +692,12 @@ fn build_classified_tx(
             display_pool: display_pool.to_string(),
         },
         sort_pending_rank: u8::from(base.mined_height.is_none() && !base.expired_unmined),
-        sort_timestamp,
-        sort_mined_height: base.mined_height.unwrap_or(0) as u64,
+        sort_height: base
+            .mined_height
+            .or(base.expiry_height.filter(|_| base.expired_unmined))
+            .unwrap_or(0) as u64,
         tx_index: base.tx_index,
         row_order,
-    }
-}
-
-impl TxBase {
-    fn display_timestamp(&self) -> u64 {
-        if self.block_time > 0 {
-            self.block_time
-        } else {
-            self.created_time
-        }
     }
 }
 
@@ -870,48 +714,32 @@ pub(crate) struct ResubmittableTx {
     pub raw_tx: Vec<u8>,
 }
 
-/// Returns resubmittable transactions after filtering `excluded_txids` before
-/// loading raw transaction bytes.
+/// Returns resubmittable transactions.
 pub(crate) fn get_resubmittable_txs(
     db_path: &str,
     current_height: u32,
-    excluded_txids: &HashSet<Vec<u8>>,
 ) -> Result<Vec<ResubmittableTx>, String> {
     let conn = open_readonly_conn(db_path)?;
-    let candidate_metadata = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT DISTINCT txid \
-                 FROM v_transactions \
-                 WHERE mined_height IS NULL \
-                   AND (expiry_height = 0 OR expiry_height > ?1) \
-                   AND account_balance_delta < 0 \
-                   AND raw IS NOT NULL",
-            )
-            .map_err(|e| format!("SQL error: {e}"))?;
-        let rows = stmt
-            .query_map([current_height], |row| row.get::<_, [u8; 32]>(0))
-            .map_err(|e| format!("Query error: {e}"))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Row error: {e}"))?
-    };
-
-    let mut raw_stmt = conn
-        .prepare("SELECT raw FROM transactions WHERE txid = ?1 AND raw IS NOT NULL")
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT txid, raw \
+             FROM v_transactions \
+             WHERE mined_height IS NULL \
+               AND (expiry_height = 0 OR expiry_height > ?1) \
+               AND account_balance_delta < 0 \
+               AND raw IS NOT NULL",
+        )
         .map_err(|e| format!("SQL error: {e}"))?;
-    candidate_metadata
-        .into_iter()
-        .filter(|txid| !excluded_txids.contains(txid.as_slice()))
-        .map(|txid| {
-            let raw_tx = raw_stmt
-                .query_row([&txid], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(|e| format!("Raw transaction query error: {e}"))?;
+    let rows = stmt
+        .query_map([current_height], |row| {
             Ok(ResubmittableTx {
-                txid: TxId::from_bytes(txid),
-                raw_tx,
+                txid: TxId::from_bytes(row.get(0)?),
+                raw_tx: row.get(1)?,
             })
         })
-        .collect()
+        .map_err(|e| format!("Query error: {e}"))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| format!("Row error: {e}"))
 }
 
 #[cfg(test)]
@@ -945,44 +773,12 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let conn = rusqlite::Connection::open(file.path()).unwrap();
         conn.execute_batch(
-            "CREATE TABLE transactions (
-                 txid BLOB PRIMARY KEY,
-                 raw BLOB
-             );
-             CREATE TABLE v_transactions (
+            "CREATE TABLE v_transactions (
                  txid BLOB NOT NULL,
                  raw BLOB,
                  mined_height INTEGER,
                  expiry_height INTEGER,
                  account_balance_delta INTEGER NOT NULL
-             );",
-        )
-        .unwrap();
-        file
-    }
-
-    fn mined_output_evidence_db() -> NamedTempFile {
-        let file = NamedTempFile::new().unwrap();
-        let conn = rusqlite::Connection::open(file.path()).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE transactions (
-                 id_tx INTEGER PRIMARY KEY,
-                 txid BLOB NOT NULL,
-                 mined_height INTEGER,
-                 min_observed_height INTEGER NOT NULL,
-                 expiry_height INTEGER
-             );
-             CREATE TABLE sapling_received_notes (
-                 transaction_id INTEGER NOT NULL,
-                 commitment_tree_position INTEGER
-             );
-             CREATE TABLE orchard_received_notes (
-                 transaction_id INTEGER NOT NULL,
-                 commitment_tree_position INTEGER
-             );
-             CREATE TABLE ironwood_received_notes (
-                 transaction_id INTEGER NOT NULL,
-                 commitment_tree_position INTEGER
              );",
         )
         .unwrap();
@@ -1000,12 +796,6 @@ mod tests {
     ) {
         let conn = rusqlite::Connection::open(db.path()).unwrap();
         conn.execute(
-            "INSERT INTO transactions (txid, raw) VALUES (?1, ?2)
-             ON CONFLICT(txid) DO UPDATE SET raw = excluded.raw",
-            rusqlite::params![txid, raw],
-        )
-        .unwrap();
-        conn.execute(
             "INSERT INTO v_transactions (txid, raw, mined_height, expiry_height, account_balance_delta)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![txid, raw, mined_height, expiry_height, account_balance_delta],
@@ -1015,105 +805,6 @@ mod tests {
 
     fn fake_txid(byte: u8) -> [u8; 32] {
         [byte; 32]
-    }
-
-    #[test]
-    fn mined_output_evidence_requires_an_unmined_tx_with_a_positioned_note() {
-        let db = mined_output_evidence_db();
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        for (id, mined_height) in [
-            (1, None),
-            (2, None),
-            (3, None),
-            (4, None),
-            (5, Some(1_000_000)),
-            (6, None),
-        ] {
-            conn.execute(
-                "INSERT INTO transactions
-                    (id_tx, txid, mined_height, min_observed_height, expiry_height)
-                 VALUES (?1, ?2, ?3, 900, 1_100)",
-                rusqlite::params![id, fake_txid(id as u8), mined_height],
-            )
-            .unwrap();
-        }
-        conn.execute(
-            "INSERT INTO sapling_received_notes VALUES (1, 10), (4, NULL), (5, 20)",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO orchard_received_notes VALUES (2, 30)", [])
-            .unwrap();
-        conn.execute("INSERT INTO ironwood_received_notes VALUES (3, 40)", [])
-            .unwrap();
-        drop(conn);
-
-        let pending_ranges = [BlockHeight::from_u32(900)..BlockHeight::from_u32(1_100)];
-        let got = get_unmined_txids_with_mined_output_evidence(
-            db.path().to_str().unwrap(),
-            &pending_ranges,
-        )
-        .unwrap();
-        assert_eq!(
-            got,
-            HashSet::from([
-                fake_txid(1).to_vec(),
-                fake_txid(2).to_vec(),
-                fake_txid(3).to_vec(),
-            ])
-        );
-    }
-
-    #[test]
-    fn mined_output_evidence_stops_deferring_after_restoring_ranges_pass() {
-        let db = mined_output_evidence_db();
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        for (id, expiry_height) in [(1, 600), (2, 0)] {
-            conn.execute(
-                "INSERT INTO transactions
-                    (id_tx, txid, mined_height, min_observed_height, expiry_height)
-                 VALUES (?1, ?2, NULL, 500, ?3)",
-                rusqlite::params![id, fake_txid(id as u8), expiry_height],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO orchard_received_notes VALUES (?1, ?2)",
-                rusqlite::params![id, id * 10],
-            )
-            .unwrap();
-        }
-        drop(conn);
-
-        let recovery_and_older = [
-            BlockHeight::from_u32(500)..BlockHeight::from_u32(600),
-            BlockHeight::from_u32(100)..BlockHeight::from_u32(400),
-        ];
-        assert_eq!(
-            get_unmined_txids_with_mined_output_evidence(
-                db.path().to_str().unwrap(),
-                &recovery_and_older,
-            )
-            .unwrap(),
-            HashSet::from([fake_txid(1).to_vec(), fake_txid(2).to_vec()])
-        );
-
-        let older_only = [BlockHeight::from_u32(100)..BlockHeight::from_u32(400)];
-        assert!(get_unmined_txids_with_mined_output_evidence(
-            db.path().to_str().unwrap(),
-            &older_only,
-        )
-        .unwrap()
-        .is_empty());
-
-        let after_expiry = [BlockHeight::from_u32(600)..BlockHeight::from_u32(700)];
-        assert_eq!(
-            get_unmined_txids_with_mined_output_evidence(
-                db.path().to_str().unwrap(),
-                &after_expiry,
-            )
-            .unwrap(),
-            HashSet::from([fake_txid(2).to_vec()])
-        );
     }
 
     fn fake_raw() -> Vec<u8> {
@@ -1143,56 +834,6 @@ mod tests {
         uuid::Uuid::from_u128(0x3eb4ded306b74bf2a5393f1b78d792a6)
     }
 
-    #[test]
-    fn received_transparent_output_detail_returns_bare_t_address() {
-        // The wallet stores the account UA in `to_address` for a received
-        // transparent output; `transparent_receiver_address` holds the bare
-        // t-address recovered from the addresses table. The received detail
-        // must surface the t-address, not the UA — otherwise the desktop
-        // receipt mislabels a transparent->transparent receive as shielded
-        // (crimson shield + u1 address). Regression for that bug.
-        let t_addr = transparent_source_test_address();
-        let ua = "u1qexampleunifiedaddressexampleunifiedaddress".to_string();
-
-        let transparent_received = TxOutput {
-            txid: vec![0u8; 32],
-            output_pool: 0,
-            output_index: 0,
-            from_account_uuid: None,
-            to_account_uuid: Some(test_account_uuid().as_bytes().to_vec()),
-            to_address: Some(ua.clone()),
-            sent_to_address: None,
-            transparent_receiver_address: Some(t_addr.clone()),
-            to_key_scope: Some(0),
-            value: 1_000_000,
-            memo: None,
-        };
-        assert_eq!(
-            transparent_received.detail_address("received"),
-            Some(t_addr.clone()),
-        );
-        assert_eq!(
-            transparent_received.detail_address("receiving"),
-            Some(t_addr),
-        );
-
-        // Shielded receives (pool 2) still surface their stored address.
-        let shielded_received = TxOutput {
-            txid: vec![0u8; 32],
-            output_pool: 2,
-            output_index: 0,
-            from_account_uuid: None,
-            to_account_uuid: Some(test_account_uuid().as_bytes().to_vec()),
-            to_address: Some(ua.clone()),
-            sent_to_address: None,
-            transparent_receiver_address: None,
-            to_key_scope: Some(0),
-            value: 1_000_000,
-            memo: None,
-        };
-        assert_eq!(shielded_received.detail_address("received"), Some(ua));
-    }
-
     fn me() -> Vec<u8> {
         test_account_uuid().as_bytes().to_vec()
     }
@@ -1206,6 +847,7 @@ mod tests {
             txid: fake_txid(id).to_vec(),
             mined_height: Some(100),
             expired_unmined: false,
+            expiry_height: None,
             account_balance_delta: 0,
             fee: 0,
             block_time: 1_000,
@@ -1213,7 +855,6 @@ mod tests {
             total_received: 0,
             is_shielding: false,
             tx_index: 1,
-            created_time: 0,
         }
     }
 
@@ -1231,8 +872,6 @@ mod tests {
             from_account_uuid: from,
             to_account_uuid: to,
             to_address: None,
-            sent_to_address: None,
-            transparent_receiver_address: None,
             to_key_scope: None,
             value,
             memo: None,
@@ -1284,20 +923,6 @@ mod tests {
                 rows(&got),
                 [("sent", 1_000_000, name), ("received", 1_000_000, name)]
             );
-        }
-    }
-
-    #[test]
-    fn a_self_send_with_an_unresolved_scope_is_recognized_by_its_sent_note() {
-        let hidden = own(1, 3, 1_000_000, 1);
-        let unresolved = TxOutput {
-            to_key_scope: None,
-            sent_to_address: Some("u-self".into()),
-            ..hidden.clone()
-        };
-        for (output, expected) in [(hidden, 0), (unresolved, 2)] {
-            let tx = spend(1, -15_000, 1_015_000, 1_000_000);
-            assert_eq!(history(vec![(tx, vec![output])], None).len(), expected);
         }
     }
 
@@ -1418,18 +1043,17 @@ mod tests {
     }
 
     #[test]
-    fn rows_sort_by_display_time_and_an_expired_send_stays_visible() {
+    fn rows_sort_by_height_and_an_expired_send_stays_at_its_expiry_height() {
         let expired = TxBase {
             mined_height: None,
             expired_unmined: true,
+            expiry_height: Some(150),
             block_time: 0,
-            created_time: 1_000,
             ..spend(1, -10_010_000, 10_010_000, 0)
         };
         let expired = (expired, vec![output(1, 0, Some(me()), None, 10_000_000)]);
         let newer = TxBase {
             block_time: 0,
-            created_time: 2_000,
             ..spend(2, -40_000, 17_040_000, 17_000_000)
         };
         let newer = (newer, vec![own(2, 0, 17_000_000, 0)]);
@@ -1440,12 +1064,12 @@ mod tests {
                 .map(|tx| (tx.txid, tx.tx_kind.as_str()))
                 .collect::<Vec<_>>(),
             [
+                (TxId::from_bytes(fake_txid(1)), "sent"),
                 (TxId::from_bytes(fake_txid(2)), "sent"),
                 (TxId::from_bytes(fake_txid(2)), "received"),
-                (TxId::from_bytes(fake_txid(1)), "sent"),
             ]
         );
-        assert!(all[2].expired_unmined);
+        assert!(all[0].expired_unmined);
         assert_eq!(rows(&history(vec![expired, newer], Some(1))).len(), 1);
     }
 
@@ -1457,7 +1081,7 @@ mod tests {
         let included = |o: &&TxOutput| detail_includes_output(base, o, &me(), kind);
         let row = |o: &TxOutput| {
             (
-                o.detail_address(kind),
+                o.to_address.clone(),
                 o.value,
                 decode_text_memo(o.memo.as_deref()),
             )
@@ -1488,18 +1112,6 @@ mod tests {
             detail_of(&tx, &outputs, "sent"),
             [(Some("u-recipient".into()), 1_000_000, Some("hello".into()))]
         );
-    }
-
-    #[test]
-    fn a_transparent_recipient_is_the_receiver_t_address_then_the_sent_note_then_the_stored_address(
-    ) {
-        let mut out = output(1, 0, Some(me()), None, 1);
-        out.to_address = Some("u-stored".into());
-        assert_eq!(out.detail_address("sent").as_deref(), Some("u-stored"));
-        out.sent_to_address = Some("t-sent-note".into());
-        assert_eq!(out.detail_address("sent").as_deref(), Some("t-sent-note"));
-        out.transparent_receiver_address = Some("t-receiver".into());
-        assert_eq!(out.detail_address("sent").as_deref(), Some("t-receiver"));
     }
 
     #[test]
@@ -1606,13 +1218,7 @@ mod tests {
             .is_none());
         let missing = get_transaction_detail(&wallet_account, &TxId::from_bytes(txid), "sent");
         assert_eq!(missing.err().as_deref(), Some("Transaction not found"));
-        assert!(get_resubmittable_txs(db, 1, &HashSet::new())
-            .unwrap()
-            .is_empty());
-        let pending = [BlockHeight::from(1)..BlockHeight::from(10)];
-        assert!(get_unmined_txids_with_mined_output_evidence(db, &pending)
-            .unwrap()
-            .is_empty());
+        assert!(get_resubmittable_txs(db, 1).unwrap().is_empty());
     }
 
     #[test]
@@ -1629,8 +1235,7 @@ mod tests {
             Some(1_000_100),
             -5_000,
         );
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 900_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 900_000).unwrap();
         assert!(
             got.is_empty(),
             "mined tx must not be a resubmit candidate, got {got:?}",
@@ -1652,8 +1257,7 @@ mod tests {
             Some(1_000_000), // expiry == current → expired
             -5_000,
         );
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got.is_empty(), "tx with expiry==current must be excluded");
 
         // Walk the boundary: one block below current is definitely expired.
@@ -1666,8 +1270,7 @@ mod tests {
             Some(999_999),
             -5_000,
         );
-        let got2 = get_resubmittable_txs(db2.path().to_str().unwrap(), 1_000_000, &HashSet::new())
-            .unwrap();
+        let got2 = get_resubmittable_txs(db2.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got2.is_empty(), "tx with expiry<current must be excluded");
     }
 
@@ -1687,8 +1290,7 @@ mod tests {
             Some(1_000_100),
             5_000, // positive delta → inbound
         );
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got.is_empty(), "received-only tx must be excluded");
 
         // Also the zero case: a break-even tx shouldn't show up either
@@ -1702,8 +1304,7 @@ mod tests {
             Some(1_000_100),
             0,
         );
-        let got2 = get_resubmittable_txs(db2.path().to_str().unwrap(), 1_000_000, &HashSet::new())
-            .unwrap();
+        let got2 = get_resubmittable_txs(db2.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got2.is_empty(), "zero-delta tx must be excluded");
     }
 
@@ -1721,8 +1322,7 @@ mod tests {
             Some(1_000_100),
             -5_000,
         );
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got.is_empty(), "raw-null tx must be excluded");
     }
 
@@ -1733,50 +1333,10 @@ mod tests {
         let txid = fake_txid(0x05);
         let raw = fake_raw();
         insert_row(&db, &txid, Some(&raw), None, Some(1_000_100), -5_000);
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert_eq!(got.len(), 1, "outbound pending tx must appear exactly once");
         assert_eq!(got[0].txid, TxId::from_bytes(txid));
         assert_eq!(got[0].raw_tx, raw);
-    }
-
-    #[test]
-    fn resubmit_excludes_only_deferred_txids() {
-        let db = fresh_db();
-        let deferred_txid = fake_txid(0x15);
-        let pending_txid = fake_txid(0x16);
-        let raw = fake_raw();
-        insert_row(
-            &db,
-            &deferred_txid,
-            Some(&raw),
-            None,
-            Some(1_000_100),
-            -5_000,
-        );
-        insert_row(
-            &db,
-            &pending_txid,
-            Some(&raw),
-            None,
-            Some(1_000_100),
-            -5_000,
-        );
-        // The metadata query's stand-in view still reports raw bytes, but the
-        // backing lookup cannot return them. Exclusion must happen before the
-        // raw transaction query.
-        rusqlite::Connection::open(db.path())
-            .unwrap()
-            .execute(
-                "UPDATE transactions SET raw = NULL WHERE txid = ?1",
-                [&deferred_txid],
-            )
-            .unwrap();
-
-        let excluded = HashSet::from([deferred_txid.to_vec()]);
-        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &excluded).unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].txid, TxId::from_bytes(pending_txid));
     }
 
     #[test]
@@ -1789,8 +1349,7 @@ mod tests {
         let raw = fake_raw();
         insert_row(&db, &txid, Some(&raw), None, Some(0), -5_000);
 
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert_eq!(
             got.len(),
             1,
@@ -1816,8 +1375,7 @@ mod tests {
         insert_row(&db, &txid, Some(&raw), None, Some(1_000_100), -3_000);
         insert_row(&db, &txid, Some(&raw), None, Some(1_000_100), -2_000);
 
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert_eq!(
             got.len(),
             1,
@@ -1831,8 +1389,7 @@ mod tests {
         // error. `resubmit_pending_transactions` relies on this to
         // decide the "nothing to do" case.
         let db = fresh_db();
-        let got =
-            get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000, &HashSet::new()).unwrap();
+        let got = get_resubmittable_txs(db.path().to_str().unwrap(), 1_000_000).unwrap();
         assert!(got.is_empty());
     }
 }

@@ -13,7 +13,6 @@ mod proposal_locks;
 mod send;
 mod transactions;
 
-pub(crate) use transactions::get_unmined_txids_with_mined_output_evidence;
 pub use transactions::{
     get_next_available_address, get_transaction_detail, get_transaction_history,
     get_wallet_balance, WalletBalance,
