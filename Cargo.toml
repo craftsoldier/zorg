@@ -51,9 +51,6 @@ rusqlite = { version = "0.37", features = ["array"] }
 # Logging
 log = "0.4"
 
-# Hex encoding
-hex = "0.4"
-
 # Terminal interface
 console = "0.16.6"
 indicatif = "0.18.6"
@@ -95,6 +92,7 @@ features = ["orchard", "transparent-inputs"]
 version = "0.16.0"
 
 [dev-dependencies]
+hex = "0.4"
 tempfile = "3"
 incrementalmerkletree = "0.9"
 

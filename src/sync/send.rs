@@ -69,19 +69,12 @@ pub struct ExecuteProposalResult {
 /// The file at `path`, opened and rewound, if its BLAKE2b-512 hash is `expected`.
 fn open_verified(path: &std::path::Path, expected: &str) -> Option<std::fs::File> {
     use blake2b_simd::Params;
-    use std::io::{Read, Seek};
+    use std::io::Seek;
 
     let mut file = std::fs::File::open(path).ok()?;
     let mut state = Params::new().hash_length(64).to_state();
-    let mut buffer = [0; 8192];
-    loop {
-        let n = file.read(&mut buffer).ok()?;
-        if n == 0 {
-            break;
-        }
-        state.update(&buffer[..n]);
-    }
-    if hex::encode(state.finalize().as_bytes()) != expected {
+    std::io::copy(&mut file, &mut state).ok()?;
+    if state.finalize().to_hex().as_str() != expected {
         return None;
     }
     file.rewind().ok()?;
