@@ -26,10 +26,7 @@ use zcash_client_sqlite::{util::SystemClock, AccountUuid, ReceivedNoteId};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
-    consensus::BlockHeight,
-    memo::{Memo, MemoBytes},
-    value::Zatoshis,
-    PoolType, ShieldedPool,
+    consensus::BlockHeight, memo::MemoBytes, value::Zatoshis, PoolType, ShieldedPool,
 };
 
 use crate::account::{parse_account_uuid, Account};
@@ -146,12 +143,10 @@ fn build_send_request(
         .parse()
         .map_err(|e| format!("Bad address: {e}"))?;
     let value = Zatoshis::from_u64(amount_zatoshi).map_err(|_| "Bad amount")?;
-    let memo_bytes = match memo_str {
-        Some(m) => Some(MemoBytes::from(
-            Memo::from_bytes(m.as_bytes()).map_err(|e| format!("Bad memo: {e}"))?,
-        )),
-        None => None,
-    };
+    let memo_bytes = memo_str
+        .map(|m| MemoBytes::from_bytes(m.as_bytes()))
+        .transpose()
+        .map_err(|e| format!("Bad memo: {e}"))?;
     let payment = Payment::new(to, Some(value), memo_bytes, None, None, vec![])
         .map_err(|e| format!("Cannot create payment: {e:?}"))?;
     TransactionRequest::new(vec![payment]).map_err(|e| format!("{e:?}"))
