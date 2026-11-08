@@ -78,10 +78,9 @@ pub fn get_wallet_balance(account: &Account) -> Result<WalletBalance, String> {
     let sum =
         |value: fn(&Balance) -> Zatoshis| pools.iter().map(|p| u64::from(value(p))).sum::<u64>();
     let [transparent, sapling, orchard, ironwood] = pools.map(|p| u64::from(p.spendable_value()));
-    let (change, pending, locked) = (
+    let (change, pending) = (
         sum(Balance::change_pending_confirmation),
         sum(Balance::value_pending_spendability),
-        sum(Balance::locked_value),
     );
     let unshielded = pools[0];
     Ok(WalletBalance {
@@ -94,9 +93,9 @@ pub fn get_wallet_balance(account: &Account) -> Result<WalletBalance, String> {
             + u64::from(unshielded.value_pending_spendability()),
         change_pending_confirmation: change,
         value_pending_spendability: pending,
-        spendable: sapling + orchard + ironwood,
-        locked,
-        total: transparent + sapling + orchard + ironwood + locked + change + pending,
+        spendable: u64::from(b.spendable_value()),
+        locked: u64::from(b.locked_value()),
+        total: u64::from(b.total()),
     })
 }
 
