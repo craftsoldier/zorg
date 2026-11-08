@@ -83,8 +83,12 @@ fn open_verified(path: &std::path::Path, expected: &str) -> Option<std::fs::File
 
 /// The Sapling parameter file `filename`, opened from ZcashParams if its hash
 /// matches, otherwise from zorg.app/Contents/Resources.
-fn open_param(home: &str, filename: &str, expected_hash: &str) -> Result<std::fs::File, String> {
-    let user = std::path::Path::new(home)
+fn open_param(
+    home: &std::path::Path,
+    filename: &str,
+    expected_hash: &str,
+) -> Result<std::fs::File, String> {
+    let user = home
         .join("Library/Application Support/ZcashParams")
         .join(filename);
     if let Some(file) = open_verified(&user, expected_hash) {
@@ -382,7 +386,7 @@ async fn execute_stored<N: std::fmt::Display>(
             .map_err(|e| format!("USK: {e:?}"))?;
         drop(seed);
 
-        let home = std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
+        let home = std::env::home_dir().ok_or("Could not find your home directory")?;
         let spend_file = open_param(
             &home,
             "sapling-spend.params",
