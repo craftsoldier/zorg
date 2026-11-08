@@ -131,6 +131,25 @@ pub struct TransactionInfo {
     pub display_pool: String,
 }
 
+impl TransactionInfo {
+    /// The kind and state together: "Sending", "Sent" or "Send failed", and
+    /// likewise for receives and shields.
+    pub fn label(&self) -> &'static str {
+        let (unmined, mined, expired) = match self.tx_kind.as_str() {
+            "sent" => ("Sending", "Sent", "Send failed"),
+            "received" => ("Receiving", "Received", "Receive failed"),
+            _ => ("Shielding", "Shielded", "Shield failed"),
+        };
+        if self.mined_height > 0 {
+            mined
+        } else if self.expired_unmined {
+            expired
+        } else {
+            unmined
+        }
+    }
+}
+
 pub struct TransactionDetail {
     pub source_address: Option<String>,
     pub outputs: Vec<TransactionDetailOutput>,
@@ -194,7 +213,7 @@ impl ActivityAmounts {
             (true, false, false) => "transparent",
             (false, true, false) => "shielded",
             (false, false, true) => "ironwood",
-            (false, false, false) => "unknown",
+            (false, false, false) => "",
             _ => "mixed",
         }
     }
@@ -269,9 +288,7 @@ fn assemble_history(
         })
         .collect();
 
-    visible.retain(|tx| {
-        tx.info.display_amount > 0 || tx.info.tx_kind == "unknown" || tx.info.tx_kind == "shielded"
-    });
+    visible.retain(|tx| tx.info.display_amount > 0 || tx.info.tx_kind == "shielded");
 
     visible.sort_by(|a, b| {
         b.sort_pending_rank
@@ -318,13 +335,12 @@ pub fn get_transaction_detail(
         .iter()
         .filter(|output| detail_includes_output(&base, output, uuid_bytes.as_slice(), tx_kind))
         .collect::<Vec<_>>();
-    let source_address =
-        if matches!(tx_kind, "received" | "receiving") && !visible_outputs.is_empty() {
-            let raw_tx = read_raw_transaction_for_tx(&read_tx, &uuid_bytes, txid.as_ref())?;
-            received_source_from_raw_transaction(account.network, raw_tx.as_deref())
-        } else {
-            None
-        };
+    let source_address = if tx_kind == "received" && !visible_outputs.is_empty() {
+        let raw_tx = read_raw_transaction_for_tx(&read_tx, &uuid_bytes, txid.as_ref())?;
+        received_source_from_raw_transaction(account.network, raw_tx.as_deref())
+    } else {
+        None
+    };
     let outputs = visible_outputs
         .into_iter()
         .map(|output| TransactionDetailOutput {
@@ -523,7 +539,7 @@ fn detail_includes_output(
         "sent" => {
             !base.is_shielding && from_own && (!to_own || is_user_visible_self_output(output))
         }
-        "received" | "receiving" => {
+        "received" => {
             !base.is_shielding && to_own && (!from_own || is_user_visible_self_output(output))
         }
         _ => false,
@@ -580,7 +596,7 @@ fn classify_history_tx(base: &TxBase, summary: &ActivitySummary) -> Vec<Classifi
     if summary.received.amount > 0 {
         rows.push(build_classified_tx(
             base,
-            receiving_tx_kind(base),
+            "received",
             summary.received.amount,
             summary.received.display_pool(),
             2,
@@ -594,7 +610,7 @@ fn classify_history_tx(base: &TxBase, summary: &ActivitySummary) -> Vec<Classifi
                 .unsigned_abs()
                 .saturating_sub(base.fee);
             if sent_amount > 0 {
-                rows.push(build_classified_tx(base, "sent", sent_amount, "unknown", 1));
+                rows.push(build_classified_tx(base, "sent", sent_amount, "", 1));
                 return rows;
             }
         }
@@ -604,25 +620,23 @@ fn classify_history_tx(base: &TxBase, summary: &ActivitySummary) -> Vec<Classifi
         if base.account_balance_delta > 0 {
             rows.push(build_classified_tx(
                 base,
-                receiving_tx_kind(base),
+                "received",
                 base.account_balance_delta as u64,
-                "unknown",
+                "",
                 2,
             ));
-        } else {
-            rows.push(build_classified_tx(base, "unknown", 0, "unknown", 3));
+        } else if base.account_balance_delta < 0 {
+            rows.push(build_classified_tx(
+                base,
+                "sent",
+                base.account_balance_delta.unsigned_abs(),
+                "",
+                1,
+            ));
         }
     }
 
     rows
-}
-
-fn receiving_tx_kind(base: &TxBase) -> &'static str {
-    if base.mined_height.is_none() && !base.expired_unmined {
-        "receiving"
-    } else {
-        "received"
-    }
 }
 
 fn build_classified_tx(
@@ -962,7 +976,7 @@ mod tests {
         };
         assert_eq!(
             rows(&history(vec![(tx, vec![own(1, 3, 9_000_000, 1)])], None)),
-            [("sent", 10_000_000, "unknown")]
+            [("sent", 10_000_000, "")]
         );
     }
 
@@ -991,7 +1005,7 @@ mod tests {
         assert_eq!(all[2].tx_kind, "received");
         assert_eq!(
             rows(&history(vec![confirmed, receiving], Some(1))),
-            [("receiving", 2_000_000, "shielded")]
+            [("received", 2_000_000, "shielded")]
         );
         assert_eq!(
             rows(&history(vec![sending], Some(1))),
@@ -1086,16 +1100,14 @@ mod tests {
                 b"other memo",
             ),
         ];
-        for kind in ["received", "receiving"] {
-            let memos: Vec<_> = detail_of(&tx, &outputs, kind)
-                .into_iter()
-                .map(|row| row.2)
-                .collect();
-            assert_eq!(
-                memos,
-                [Some("first memo".into()), Some("other memo".into())]
-            );
-        }
+        let memos: Vec<_> = detail_of(&tx, &outputs, "received")
+            .into_iter()
+            .map(|row| row.2)
+            .collect();
+        assert_eq!(
+            memos,
+            [Some("first memo".into()), Some("other memo".into())]
+        );
 
         let expected = transparent_source_test_address();
         let raw = transparent_source_raw_tx();
