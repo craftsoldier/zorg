@@ -774,7 +774,6 @@ async fn run_sync_impl(
         })
     })?;
 
-    // Retained send-lock expiry requires a usable target height.
     crate::sync::recover_previous_process(db_data_path, network).map_err(SyncError::db)?;
 
     refresh_utxos(&mut client, &mut db).await?;

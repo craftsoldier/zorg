@@ -254,10 +254,8 @@ pub fn propose_send(
             .map(|s| u64::from(s.balance().fee_required()))
             .sum();
 
-        let lock_expiry =
-            send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs, lock_expiry) {
+        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs) {
             let _ = wallet::unlock_proposal_inputs(&mut db, &proposal, owner);
             return Err(e);
         }
@@ -371,7 +369,6 @@ async fn execute_stored<N: std::fmt::Display>(
             live_expiry,
         )
         .map_err(|e| format!("Relock: {e:?}"))?;
-        proposal_locks::update_expiry(db_path, stored.owner, live_expiry)?;
 
         let account = db
             .get_account(stored.account_id)
@@ -580,10 +577,8 @@ pub fn propose_shield(account: &Account) -> Result<ProposalResult<Infallible>, S
             .iter()
             .map(|s| u64::from(s.balance().fee_required()))
             .sum();
-        let lock_expiry =
-            send_proposal_lock_expiry(BlockHeight::from(proposal.min_target_height()));
         let input_refs = proposal_input_refs(&proposal);
-        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs, lock_expiry) {
+        if let Err(e) = proposal_locks::persist(db_path, owner, &input_refs) {
             let _ = wallet::unlock_proposal_inputs(&mut db, &proposal, owner);
             return Err(e);
         }

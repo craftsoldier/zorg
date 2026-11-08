@@ -11,11 +11,11 @@ use std::sync::LazyLock;
 use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use rusqlite::{params, Connection};
 use zcash_client_backend::{
-    data_api::{OutputLockStore, WalletRead},
+    data_api::OutputLockStore,
     wallet::{LockOwner, OutputRef},
 };
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{consensus::BlockHeight, PoolType, ShieldedPool};
+use zcash_protocol::{PoolType, ShieldedPool};
 
 use crate::{
     db::{open_wallet_raw_conn_with_timeout, with_wallet_db_write_lock, READ_DB_BUSY_TIMEOUT},
@@ -26,7 +26,7 @@ use super::open_wallet_db;
 
 const TABLE: &str = "zorg_send_proposal_locks";
 
-type PreviousSessionLocks = BTreeMap<LockOwner, (u32, bool, Vec<OutputRef>)>;
+type PreviousSessionLocks = BTreeMap<LockOwner, Vec<OutputRef>>;
 
 static PROCESS_SESSION_ID: LazyLock<[u8; 16]> = LazyLock::new(|| {
     let mut bytes = [0; 16];
@@ -61,12 +61,10 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
             txid BLOB NOT NULL,
             pool INTEGER NOT NULL,
             output_index INTEGER NOT NULL,
-            expiry_height INTEGER NOT NULL,
-            retain_until_expiry INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (owner, txid, pool, output_index)
         );
         CREATE INDEX IF NOT EXISTS idx_zorg_send_proposal_locks_session
-            ON {TABLE}(session_id, retain_until_expiry);"
+            ON {TABLE}(session_id);"
     ))
     .map_err(|e| format!("Initialize send proposal lock recovery schema: {e}"))
 }
@@ -75,7 +73,6 @@ pub(super) fn persist(
     db_path: &str,
     owner: LockOwner,
     outputs: &[OutputRef],
-    expiry_height: BlockHeight,
 ) -> Result<(), String> {
     let mut conn = open_wallet_raw_conn_with_timeout(db_path, READ_DB_BUSY_TIMEOUT)?;
     ensure_schema(&conn)?;
@@ -86,9 +83,8 @@ pub(super) fn persist(
         tx.execute(
             &format!(
                 "INSERT OR REPLACE INTO {TABLE}
-                    (owner, session_id, txid, pool, output_index, expiry_height,
-                     retain_until_expiry)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)"
+                    (owner, session_id, txid, pool, output_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
             ),
             params![
                 owner.as_bytes().as_slice(),
@@ -96,7 +92,6 @@ pub(super) fn persist(
                 output.txid().as_ref(),
                 pool_code(output.pool()),
                 output.output_index(),
-                u32::from(expiry_height),
             ],
         )
         .map_err(|e| format!("Persist send proposal input lock: {e}"))?;
@@ -116,55 +111,11 @@ pub(super) fn remove(db_path: &str, owner: LockOwner) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-pub(super) fn mark_retain_until_expiry(db_path: &str, owner: LockOwner) -> Result<(), String> {
-    let conn = open_wallet_raw_conn_with_timeout(db_path, READ_DB_BUSY_TIMEOUT)?;
-    ensure_schema(&conn)?;
-    let updated = conn
-        .execute(
-            &format!(
-                "UPDATE {TABLE}
-             SET retain_until_expiry = 1
-             WHERE owner = ?1"
-            ),
-            params![owner.as_bytes().as_slice()],
-        )
-        .map_err(|e| format!("Retain send proposal lock until expiry: {e}"))?;
-    if updated == 0 {
-        return Err("Send proposal lock recovery row no longer exists".to_string());
-    }
-    Ok(())
-}
-
-pub(super) fn update_expiry(
-    db_path: &str,
-    owner: LockOwner,
-    expiry_height: BlockHeight,
-) -> Result<(), String> {
-    let conn = open_wallet_raw_conn_with_timeout(db_path, READ_DB_BUSY_TIMEOUT)?;
-    ensure_schema(&conn)?;
-    let updated = conn
-        .execute(
-            &format!(
-                "UPDATE {TABLE}
-                 SET expiry_height = ?2
-                 WHERE owner = ?1"
-            ),
-            params![owner.as_bytes().as_slice(), u32::from(expiry_height),],
-        )
-        .map_err(|e| format!("Update persisted send proposal lock expiry: {e}"))?;
-    if updated == 0 {
-        return Err("Send proposal lock recovery row no longer exists".to_string());
-    }
-    Ok(())
-}
-
 fn read_previous_session_locks(conn: &Connection) -> Result<PreviousSessionLocks, String> {
     ensure_schema(conn)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT owner, txid, pool, output_index, expiry_height,
-                    retain_until_expiry
+            "SELECT owner, txid, pool, output_index
              FROM {TABLE}
              WHERE session_id <> ?1
              ORDER BY owner, txid, pool, output_index"
@@ -177,15 +128,13 @@ fn read_previous_session_locks(conn: &Connection) -> Result<PreviousSessionLocks
                 row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, u32>(3)?,
-                row.get::<_, u32>(4)?,
-                row.get::<_, bool>(5)?,
             ))
         })
         .map_err(|e| format!("Query orphan send locks: {e}"))?;
 
-    let mut locks = BTreeMap::new();
+    let mut locks = PreviousSessionLocks::new();
     for row in rows {
-        let (owner_bytes, txid_bytes, pool, output_index, expiry, retain) =
+        let (owner_bytes, txid_bytes, pool, output_index) =
             row.map_err(|e| format!("Read orphan send lock: {e}"))?;
         let owner = LockOwner::new(
             owner_bytes
@@ -197,31 +146,18 @@ fn read_previous_session_locks(conn: &Connection) -> Result<PreviousSessionLocks
                 .try_into()
                 .map_err(|_| "Persisted send lock txid is not 32 bytes")?,
         );
-        let entry = locks
-            .entry(owner)
-            .or_insert_with(|| (expiry, retain, Vec::new()));
-        if entry.0 != expiry || entry.1 != retain {
-            return Err("Persisted send lock owner has inconsistent metadata".to_string());
-        }
-        entry
-            .2
-            .push(OutputRef::new(txid, pool_from_code(pool)?, output_index));
+        locks.entry(owner).or_default().push(OutputRef::new(
+            txid,
+            pool_from_code(pool)?,
+            output_index,
+        ));
     }
     Ok(locks)
 }
 
-fn should_release_after_restart(
-    retain_until_expiry: bool,
-    target_height: Option<u32>,
-    expiry_height: u32,
-) -> bool {
-    !retain_until_expiry || target_height.is_some_and(|height| height >= expiry_height)
-}
-
-/// Releases only recoverable send locks left by an earlier process. Migration
-/// locks are never registered in this table and therefore cannot be cleared by
-/// this recovery pass. Ambiguous-broadcast locks remain until their recorded
-/// expiry height has passed.
+/// Releases the send locks left by an earlier process. Migration locks are
+/// never registered in this table and therefore cannot be cleared by this
+/// recovery pass.
 pub(crate) fn recover_previous_process(
     db_path: &str,
     network: WalletNetwork,
@@ -235,23 +171,11 @@ pub(crate) fn recover_previous_process(
         drop(conn);
 
         let mut db = open_wallet_db(db_path, network)?;
-        let target_height = db
-            .get_target_and_anchor_heights(
-                zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default().trusted(),
-            )
-            .map_err(|e| format!("Read target height for send lock recovery: {e}"))?
-            .map(|(height, _)| u32::from(height));
-
-        let mut owners_to_remove = Vec::new();
-        for (owner, (expiry, retain, outputs)) in locks {
-            if !should_release_after_restart(retain, target_height, expiry) {
-                continue;
-            }
-            for output in &outputs {
-                db.unlock_output(output, owner)
+        for (owner, outputs) in &locks {
+            for output in outputs {
+                db.unlock_output(output, *owner)
                     .map_err(|e| format!("Release orphan send proposal input: {e}"))?;
             }
-            owners_to_remove.push(owner);
         }
         drop(db);
 
@@ -260,7 +184,7 @@ pub(crate) fn recover_previous_process(
         let tx = conn
             .transaction()
             .map_err(|e| format!("Begin orphan send lock cleanup: {e}"))?;
-        for owner in owners_to_remove {
+        for owner in locks.keys() {
             tx.execute(
                 &format!("DELETE FROM {TABLE} WHERE owner = ?1"),
                 params![owner.as_bytes().as_slice()],
@@ -296,8 +220,8 @@ mod tests {
         conn.execute(
             &format!(
                 "INSERT INTO {TABLE}
-                    (owner, session_id, txid, pool, output_index, expiry_height)
-                 VALUES (?1, ?2, ?3, 3, 0, 100)"
+                    (owner, session_id, txid, pool, output_index)
+                 VALUES (?1, ?2, ?3, 3, 0)"
             ),
             params![
                 [1u8; 32].as_slice(),
@@ -307,66 +231,5 @@ mod tests {
         )
         .unwrap();
         assert!(read_previous_session_locks(&conn).unwrap().is_empty());
-    }
-
-    #[test]
-    fn restart_releases_only_recoverable_or_expired_locks() {
-        assert!(should_release_after_restart(false, None, 100));
-        assert!(should_release_after_restart(false, Some(50), 100));
-        assert!(!should_release_after_restart(true, None, 100));
-        assert!(!should_release_after_restart(true, Some(99), 100));
-        assert!(should_release_after_restart(true, Some(100), 100));
-        assert!(should_release_after_restart(true, Some(101), 100));
-    }
-
-    #[test]
-    fn hardware_handoff_policy_is_persisted_durably() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let owner = LockOwner::new([7; 32]);
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            ensure_schema(&conn).unwrap();
-            conn.execute(
-                &format!(
-                    "INSERT INTO {TABLE}
-                        (owner, session_id, txid, pool, output_index, expiry_height)
-                     VALUES (?1, ?2, ?3, 3, 0, 100)"
-                ),
-                params![
-                    owner.as_bytes().as_slice(),
-                    PROCESS_SESSION_ID.as_slice(),
-                    [9u8; 32].as_slice(),
-                ],
-            )
-            .unwrap();
-        }
-
-        mark_retain_until_expiry(db_path.to_str().unwrap(), owner).unwrap();
-
-        let conn = Connection::open(db_path).unwrap();
-        let retain: bool = conn
-            .query_row(
-                &format!("SELECT retain_until_expiry FROM {TABLE} WHERE owner = ?1"),
-                params![owner.as_bytes().as_slice()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(retain);
-    }
-
-    #[test]
-    fn durable_updates_reject_missing_owner() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("wallet.db");
-        let db_path = db_path.to_str().unwrap();
-        let owner = LockOwner::new([7; 32]);
-
-        assert!(mark_retain_until_expiry(db_path, owner)
-            .unwrap_err()
-            .contains("no longer exists"));
-        assert!(update_expiry(db_path, owner, BlockHeight::from_u32(100))
-            .unwrap_err()
-            .contains("no longer exists"));
     }
 }
