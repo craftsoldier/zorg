@@ -26,10 +26,7 @@ use zcash_client_sqlite::{util::SystemClock, AccountUuid, ReceivedNoteId};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
-    consensus::BlockHeight,
-    memo::{Memo, MemoBytes},
-    value::Zatoshis,
-    PoolType, ShieldedPool,
+    consensus::BlockHeight, memo::MemoBytes, value::Zatoshis, PoolType, ShieldedPool,
 };
 
 use crate::account::{parse_account_uuid, Account};
@@ -72,19 +69,12 @@ pub struct ExecuteProposalResult {
 /// The file at `path`, opened and rewound, if its BLAKE2b-512 hash is `expected`.
 fn open_verified(path: &std::path::Path, expected: &str) -> Option<std::fs::File> {
     use blake2b_simd::Params;
-    use std::io::{Read, Seek};
+    use std::io::Seek;
 
     let mut file = std::fs::File::open(path).ok()?;
     let mut state = Params::new().hash_length(64).to_state();
-    let mut buffer = [0; 8192];
-    loop {
-        let n = file.read(&mut buffer).ok()?;
-        if n == 0 {
-            break;
-        }
-        state.update(&buffer[..n]);
-    }
-    if hex::encode(state.finalize().as_bytes()) != expected {
+    std::io::copy(&mut file, &mut state).ok()?;
+    if state.finalize().to_hex().as_str() != expected {
         return None;
     }
     file.rewind().ok()?;
@@ -93,8 +83,12 @@ fn open_verified(path: &std::path::Path, expected: &str) -> Option<std::fs::File
 
 /// The Sapling parameter file `filename`, opened from ZcashParams if its hash
 /// matches, otherwise from zorg.app/Contents/Resources.
-fn open_param(home: &str, filename: &str, expected_hash: &str) -> Result<std::fs::File, String> {
-    let user = std::path::Path::new(home)
+fn open_param(
+    home: &std::path::Path,
+    filename: &str,
+    expected_hash: &str,
+) -> Result<std::fs::File, String> {
+    let user = home
         .join("Library/Application Support/ZcashParams")
         .join(filename);
     if let Some(file) = open_verified(&user, expected_hash) {
@@ -146,12 +140,10 @@ fn build_send_request(
         .parse()
         .map_err(|e| format!("Bad address: {e}"))?;
     let value = Zatoshis::from_u64(amount_zatoshi).map_err(|_| "Bad amount")?;
-    let memo_bytes = match memo_str {
-        Some(m) => Some(MemoBytes::from(
-            Memo::from_bytes(m.as_bytes()).map_err(|e| format!("Bad memo: {e}"))?,
-        )),
-        None => None,
-    };
+    let memo_bytes = memo_str
+        .map(|m| MemoBytes::from_bytes(m.as_bytes()))
+        .transpose()
+        .map_err(|e| format!("Bad memo: {e}"))?;
     let payment = Payment::new(to, Some(value), memo_bytes, None, None, vec![])
         .map_err(|e| format!("Cannot create payment: {e:?}"))?;
     TransactionRequest::new(vec![payment]).map_err(|e| format!("{e:?}"))
@@ -394,7 +386,7 @@ async fn execute_stored<N: std::fmt::Display>(
             .map_err(|e| format!("USK: {e:?}"))?;
         drop(seed);
 
-        let home = std::env::var("HOME").map_err(|_| "HOME environment variable not set")?;
+        let home = std::env::home_dir().ok_or("Could not find your home directory")?;
         let spend_file = open_param(
             &home,
             "sapling-spend.params",
