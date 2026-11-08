@@ -25,6 +25,7 @@ use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, Balance, WalletWrite};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{consensus::BranchId, memo::Memo, value::Zatoshis};
+use zcash_script::{opcode::PushValue, script::Sig};
 
 use crate::account::{parse_account_uuid, Account};
 use crate::db::with_wallet_db_write_lock;
@@ -346,57 +347,18 @@ fn received_source_from_raw_transaction(
 ) -> Option<String> {
     let tx = Transaction::read(raw_tx?, BranchId::Sapling).ok()?;
     tx.transparent_bundle()?.vin.iter().find_map(|input| {
-        transparent_source_address_from_script_sig(network, input.script_sig().0 .0.as_slice())
+        let pubkey = Sig::parse(&input.script_sig().0)
+            .ok()?
+            .0
+            .iter()
+            .rev()
+            .map(PushValue::value)
+            .find(|push| push.len() == 33 && matches!(push[0], 0x02 | 0x03))?;
+        let address = TransparentAddress::PublicKeyHash(transparent::util::hash160::hash(&pubkey));
+        Some(zcash_keys::encoding::encode_transparent_address_p(
+            &network, &address,
+        ))
     })
-}
-
-fn transparent_source_address_from_script_sig(
-    network: WalletNetwork,
-    script_sig: &[u8],
-) -> Option<String> {
-    let pubkey = parse_standard_p2pkh_pubkey_from_script_sig(script_sig)?;
-    let address = TransparentAddress::PublicKeyHash(transparent::util::hash160::hash(pubkey));
-    Some(zcash_keys::encoding::encode_transparent_address_p(
-        &network, &address,
-    ))
-}
-
-fn parse_standard_p2pkh_pubkey_from_script_sig(script_sig: &[u8]) -> Option<&[u8]> {
-    let pushes = parse_script_pushes(script_sig)?;
-    pushes
-        .into_iter()
-        .rev()
-        .find(|push| push.len() == 33 && matches!(push.first(), Some(0x02 | 0x03)))
-}
-
-fn parse_script_pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
-    let mut pushes = Vec::new();
-    let mut index = 0;
-    while index < script.len() {
-        let opcode = script[index];
-        index += 1;
-
-        let len = match opcode {
-            0x01..=0x4b => opcode as usize,
-            0x4c => {
-                let len = *script.get(index)? as usize;
-                index += 1;
-                len
-            }
-            0x4d => {
-                let bytes = script.get(index..index + 2)?;
-                index += 2;
-                u16::from_le_bytes([bytes[0], bytes[1]]) as usize
-            }
-            _ => return None,
-        };
-
-        let data = script.get(index..index + len)?;
-        pushes.push(data);
-        index += len;
-    }
-
-    Some(pushes)
 }
 
 fn read_raw_transaction_for_tx(

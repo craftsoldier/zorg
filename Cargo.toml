@@ -74,6 +74,10 @@ version = "0.11.0"
 package = "zcash_transparent"
 version = "0.11.0"
 
+[dependencies.zcash_script]
+version = "0.6.0"
+default-features = false
+
 [dependencies.zcash_client_backend]
 version = "0.25.0"
 features = [
