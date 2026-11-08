@@ -1,5 +1,5 @@
 use std::{
-    sync::{Mutex, OnceLock},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -101,11 +101,10 @@ pub(crate) fn with_wallet_db_write_lock<T>(
     // Serializes wallet-DB writes across foreground
     // calls and Rust sync tasks inside this process. This
     // does not coordinate with a separate OS process that opens the same DB.
-    static WALLET_DB_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static WALLET_DB_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-    let lock = WALLET_DB_WRITE_LOCK.get_or_init(|| Mutex::new(()));
     let wait_start = Instant::now();
-    let guard = match lock.lock() {
+    let guard = match WALLET_DB_WRITE_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             log::error!("wallet DB write lock poisoned while entering {operation}; continuing");
