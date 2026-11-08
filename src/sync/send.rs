@@ -189,7 +189,7 @@ pub(super) fn proposal_input_refs<N>(
                 .chain(step.transparent_inputs().iter().map(|utxo| {
                     let op = utxo.outpoint();
                     zcash_client_backend::wallet::OutputRef::new(
-                        TxId::from_bytes(*op.hash()),
+                        *op.txid(),
                         PoolType::TRANSPARENT,
                         op.n(),
                     )
