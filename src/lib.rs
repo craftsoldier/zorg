@@ -42,26 +42,13 @@ pub fn init() {
             let level = value
                 .rsplit_once('=')
                 .map_or(value.as_str(), |(_, level)| level);
-            parse_log_level(level)
+            level.trim().parse().ok()
         })
         .unwrap_or(log::LevelFilter::Warn);
     #[cfg(not(debug_assertions))]
     let configured_level = log::LevelFilter::Warn;
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(configured_level);
-    }
-}
-
-#[cfg(debug_assertions)]
-fn parse_log_level(value: &str) -> Option<log::LevelFilter> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" => Some(log::LevelFilter::Off),
-        "error" => Some(log::LevelFilter::Error),
-        "warn" | "warning" => Some(log::LevelFilter::Warn),
-        "info" => Some(log::LevelFilter::Info),
-        "debug" => Some(log::LevelFilter::Debug),
-        "trace" => Some(log::LevelFilter::Trace),
-        _ => None,
     }
 }
 
