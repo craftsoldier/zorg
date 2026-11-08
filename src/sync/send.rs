@@ -145,7 +145,7 @@ fn build_send_request(
         .transpose()
         .map_err(|e| format!("Bad memo: {e}"))?;
     let payment = Payment::new(to, Some(value), memo_bytes, None, None, vec![])
-        .map_err(|e| format!("Cannot create payment: {e:?}"))?;
+        .map_err(|e| format!("Cannot create payment: {e}"))?;
     TransactionRequest::new(vec![payment]).map_err(|e| format!("{e:?}"))
 }
 
