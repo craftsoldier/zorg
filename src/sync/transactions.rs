@@ -24,11 +24,7 @@ use rusqlite::{types::Value, vtab::array::Array, OptionalExtension};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, Balance, WalletWrite};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::{
-    consensus::BranchId,
-    memo::{Memo, MemoBytes},
-    value::Zatoshis,
-};
+use zcash_protocol::{consensus::BranchId, memo::Memo, value::Zatoshis};
 
 use crate::account::{parse_account_uuid, Account};
 use crate::db::with_wallet_db_write_lock;
@@ -587,9 +583,7 @@ fn is_user_visible_self_output(output: &TxOutput) -> bool {
 }
 
 fn decode_text_memo(memo: Option<&[u8]>) -> Option<String> {
-    let memo = memo?;
-    let memo_bytes = MemoBytes::from_bytes(memo).ok()?;
-    match Memo::try_from(&memo_bytes).ok()? {
+    match Memo::from_bytes(memo?).ok()? {
         Memo::Text(text) => {
             let text = String::from(text);
             if text.trim().is_empty() {
