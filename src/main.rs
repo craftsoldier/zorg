@@ -1706,10 +1706,10 @@ fn cmd_history(account: &zorg::account::Account, limit: Option<u32>) -> Result<(
         println!("No transactions yet.");
     }
     for tx in txs {
-        let height = if tx.mined_height > 0 {
-            tx.mined_height.to_string()
-        } else {
-            "pending".into()
+        let height = match tx.mined_height {
+            0 if tx.expired_unmined => "expired".to_string(),
+            0 => "pending".to_string(),
+            h => h.to_string(),
         };
         println!(
             "  {:<10} {:<10} {:>16}  {:<8}  {}",
