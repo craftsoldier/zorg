@@ -6,6 +6,7 @@ mod terminal;
 use zcash_client_backend::data_api::AccountBirthday;
 use zcash_protocol::{
     consensus::{NetworkUpgrade, Parameters},
+    memo::MemoBytes,
     value::{COIN, MAX_MONEY},
     TxId,
 };
@@ -1479,11 +1480,16 @@ fn cmd_send(
     let asked_memo;
     let memo = match memo {
         None if guided && to_address.can_receive_memo() => {
-            asked_memo = terminal::ask("Memo (optional)", true, |_| Ok(()))?;
-            (!asked_memo.is_empty()).then_some(asked_memo.as_str())
+            asked_memo = terminal::ask("Memo (optional)", true, |memo| {
+                MemoBytes::from_bytes(memo.as_bytes())
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            })?;
+            Some(asked_memo.as_str())
         }
         memo => memo,
-    };
+    }
+    .filter(|memo| !memo.trim().is_empty());
     // The card and summary show an estimate, so nothing is locked while they wait.
     let fee = sync::estimate_fee(account, to, amount_zat, memo)?;
     let card = |full: bool| {
@@ -1761,7 +1767,7 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
                     terminal::row("to", 4, format!("{to}  {amount} {unit}"))
                 );
                 if let Some(memo) = &output.memo {
-                    println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+                    println!("{}", terminal::row("memo", 4, memo));
                 }
             } else {
                 println!("{}", terminal::row("to", 4, to));
@@ -1776,7 +1782,7 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
         }
         if let [output] = detail.outputs.as_slice() {
             if let Some(memo) = &output.memo {
-                println!("{}", terminal::row("memo", 4, format!("{memo:?}")));
+                println!("{}", terminal::row("memo", 4, memo));
             }
         }
     }

@@ -346,7 +346,7 @@ pub fn get_transaction_detail(
         .map(|output| TransactionDetailOutput {
             address: output.to_address.clone(),
             amount_zatoshi: output.value,
-            memo: decode_text_memo(output.memo.as_deref()),
+            memo: display_memo(output.memo.as_deref()),
         })
         .collect();
 
@@ -559,17 +559,13 @@ fn is_user_visible_self_output(output: &TxOutput) -> bool {
     ) && matches!(output.to_key_scope, Some(0) | Some(-1))
 }
 
-fn decode_text_memo(memo: Option<&[u8]>) -> Option<String> {
-    match Memo::from_bytes(memo?).ok()? {
-        Memo::Text(text) => {
-            let text = String::from(text);
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        Memo::Empty | Memo::Future(_) | Memo::Arbitrary(_) => None,
+fn display_memo(memo: Option<&[u8]>) -> Option<String> {
+    match Memo::from_bytes(memo?) {
+        Ok(Memo::Empty) => None,
+        Ok(Memo::Text(text)) if text.is_empty() => None,
+        Ok(Memo::Text(text)) => Some(format!("{:?}", &*text)),
+        Ok(Memo::Future(_) | Memo::Arbitrary(_)) => Some("(not text, not shown)".into()),
+        Err(_) => Some("(not valid text)".into()),
     }
 }
 
@@ -1054,7 +1050,7 @@ mod tests {
             (
                 o.to_address.clone(),
                 o.value,
-                decode_text_memo(o.memo.as_deref()),
+                display_memo(o.memo.as_deref()),
             )
         };
         outputs.iter().filter(included).map(row).collect()
@@ -1081,7 +1077,11 @@ mod tests {
         ];
         assert_eq!(
             detail_of(&tx, &outputs, "sent"),
-            [(Some("u-recipient".into()), 1_000_000, Some("hello".into()))]
+            [(
+                Some("u-recipient".into()),
+                1_000_000,
+                Some(r#""hello""#.into())
+            )]
         );
     }
 
@@ -1106,7 +1106,10 @@ mod tests {
             .collect();
         assert_eq!(
             memos,
-            [Some("first memo".into()), Some("other memo".into())]
+            [
+                Some(r#""first memo""#.into()),
+                Some(r#""other memo""#.into())
+            ]
         );
 
         let expected = transparent_source_test_address();
@@ -1131,7 +1134,11 @@ mod tests {
         for kind in ["sent", "received"] {
             assert_eq!(
                 detail_of(&tx, &outputs, kind),
-                [(Some("u-self".into()), 1_000_000, Some("self memo".into()))]
+                [(
+                    Some("u-self".into()),
+                    1_000_000,
+                    Some(r#""self memo""#.into())
+                )]
             );
         }
         assert!(detail_of(&tx, &outputs, "shielded").is_empty());
