@@ -1218,14 +1218,12 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
         let items: Vec<String> = txs
             .iter()
             .map(|tx| {
-                let (arrow, sign, kind) = match tx.tx_kind.as_str() {
-                    "received" | "receiving" => {
-                        (console::style("↓").green().to_string(), "+", "Received")
-                    }
-                    "sent" => ("↑".to_string(), "−", "Sent"),
-                    "shielded" => ("↔".to_string(), " ", "Shielding"),
-                    _ => ("↔".to_string(), " ", "Unknown"),
+                let (arrow, sign) = match tx.tx_kind.as_str() {
+                    "received" => (console::style("↓").green().to_string(), "+"),
+                    "sent" => ("↑".to_string(), "−"),
+                    _ => ("↔".to_string(), " "),
                 };
+                let kind = tx.label();
                 let amount = if hide {
                     "••••".to_string()
                 } else {
@@ -1233,12 +1231,11 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
                 };
                 let amount = format!("{sign}{amount} {}", net.unit());
                 let when = match tx.mined_height {
-                    0 if tx.expired_unmined => "expired".to_string(),
-                    0 => "pending".to_string(),
+                    0 => String::new(),
                     height if tx.block_time == 0 => format!("block {height}"),
                     _ => terminal::ago(now.saturating_sub(tx.block_time)),
                 };
-                let row = format!("{arrow} {kind:<10} {amount:>18}   {when}");
+                let row = format!("{arrow} {kind:<14} {amount:>18}   {when}");
                 console::truncate_str(&row, width, "…").into_owned()
             })
             .collect();
@@ -1707,13 +1704,12 @@ fn cmd_history(account: &zorg::account::Account, limit: Option<u32>) -> Result<(
     }
     for tx in txs {
         let height = match tx.mined_height {
-            0 if tx.expired_unmined => "expired".to_string(),
-            0 => "pending".to_string(),
+            0 => String::new(),
             h => h.to_string(),
         };
         println!(
-            "  {:<10} {:<10} {:>16}  {:<8}  {}",
-            tx.tx_kind,
+            "  {:<14} {:<10} {:>16}  {:<8}  {}",
+            tx.label(),
             tx.display_pool,
             terminal::fmt_zec(tx.display_amount, account.network),
             height,
@@ -1748,18 +1744,11 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
     };
     for tx in rows {
         let detail = sync::get_transaction_detail(account, &txid, &tx.tx_kind)?;
-        let status = if tx.mined_height > 0 {
-            format!("mined at block {}", tx.mined_height)
-        } else if tx.expired_unmined {
-            "expired, never mined".to_string()
-        } else {
-            "pending".to_string()
+        let status = match tx.mined_height {
+            0 => String::new(),
+            h => format!("   mined at block {h}"),
         };
-        let mut kind = tx.tx_kind.clone();
-        if let Some(first) = kind.get_mut(..1) {
-            first.make_ascii_uppercase();
-        }
-        println!("{kind} {} {unit}   {status}", zec(tx.display_amount));
+        println!("{} {} {unit}{status}", tx.label(), zec(tx.display_amount));
         if let Some(from) = &detail.source_address {
             println!("{}", terminal::row("from", 4, from));
         }
@@ -1778,8 +1767,10 @@ fn cmd_tx(account: &zorg::account::Account, txid: &str, hide: bool) -> Result<()
                 println!("{}", terminal::row("to", 4, to));
             }
         }
-        println!("{}", terminal::row("pool", 4, &tx.display_pool));
-        if tx.tx_kind != "received" && tx.tx_kind != "receiving" {
+        if !tx.display_pool.is_empty() {
+            println!("{}", terminal::row("pool", 4, &tx.display_pool));
+        }
+        if tx.tx_kind != "received" {
             let fee = zec(tx.fee);
             println!("{}", terminal::row("fee", 4, format!("{fee} {unit}")));
         }
