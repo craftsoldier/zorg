@@ -340,7 +340,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             } else {
                 actions[..3].to_vec()
             };
-            let choice = terminal::menu_with_keys("q quit", &items, 0, &keys, &mut repaint);
+            let choice = terminal::menu_with_keys("q quit", &items, &mut 0, &keys, &mut repaint);
             let choice = match choice? {
                 None if hidden == saved.hide_balances => return Ok(()),
                 None => return zorg::account::set_hide_balances(&root, hidden),
@@ -690,8 +690,13 @@ fn create_account(
             let ways = ["Import an existing account", "Start a new account"].map(String::from);
             loop {
                 let key = format!("network: {}", net.display_name());
-                match terminal::menu_with_keys("Esc cancel", &ways, 0, &[('n', &key)], &mut || {})?
-                {
+                match terminal::menu_with_keys(
+                    "Esc cancel",
+                    &ways,
+                    &mut 0,
+                    &[('n', &key)],
+                    &mut || {},
+                )? {
                     Some(i) if i == ways.len() => net = net.next(),
                     Some(choice) => {
                         terminal::chose("Create account", &ways[choice]);
@@ -990,7 +995,7 @@ fn receive(account: &zorg::account::Account) -> Result<(), String> {
                 ('t', "transparent"),
             ),
         };
-        let choice = terminal::menu_with_keys("Esc back", actions, 0, &[key], &mut || {})?;
+        let choice = terminal::menu_with_keys("Esc back", actions, &mut 0, &[key], &mut || {})?;
         status = match choice {
             None => return Ok(()),
             Some(i) if i == actions.len() => {
@@ -1084,9 +1089,8 @@ fn settings(
     }
 }
 
-/// Settings → Accounts: open another account, add one, or delete one other
-/// than the open `account`, with balances hidden as `saved` says. Returns
-/// whether anything changed.
+/// Settings → Accounts: open another account, add one, or delete any with d,
+/// with balances hidden as `saved` says. Returns whether anything changed.
 fn switch_account(
     root: &std::path::Path,
     account: &zorg::account::Account,
@@ -1109,14 +1113,25 @@ fn switch_account(
         })
         .collect();
     items.push("Add account".into());
-    let current = accounts
+    let mut current = accounts
         .iter()
         .position(|a| a.uuid == account.uuid)
         .unwrap_or(0);
-    let Some(choice) = terminal::menu("Esc back", &items, current)? else {
-        return Ok(false);
-    };
-    let Some(picked) = accounts.get(choice) else {
+    let keys = [('d', "delete")];
+    let (picked, delete) = loop {
+        let Some(choice) =
+            terminal::menu_with_keys("Esc back", &items, &mut current, &keys, &mut || {})?
+        else {
+            return Ok(false);
+        };
+        match accounts.get(choice) {
+            Some(picked) => break (picked, false),
+            None if choice == items.len() => match accounts.get(current) {
+                Some(picked) => break (picked, true),
+                None => continue,
+            },
+            None => {}
+        }
         terminal::clear()?;
         let lwd = options.get("--lwd").cloned();
         let server = |net| lwd.clone().or_else(|| saved.server(net));
@@ -1129,18 +1144,20 @@ fn switch_account(
         terminal::wait_for("Enter to open your account")?;
         return Ok(true);
     };
-    if picked.uuid == account.uuid {
-        return Ok(false);
-    }
-    let actions = ["Open account", "Delete account"].map(String::from);
-    terminal::clear()?;
-    println!("{}\n", console::style(&picked.name).bold());
-    let Some(action) = terminal::menu("Esc back", &actions, 0)? else {
-        return Ok(false);
-    };
-    if action == 0 {
-        zorg::account::set_default_account(root, &picked.uuid)?;
-        return Ok(true);
+    if !delete {
+        if picked.uuid == account.uuid {
+            return Ok(false);
+        }
+        let actions = ["Open account", "Delete account"].map(String::from);
+        terminal::clear()?;
+        println!("{}\n", console::style(&picked.name).bold());
+        let Some(action) = terminal::menu("Esc back", &actions, 0)? else {
+            return Ok(false);
+        };
+        if action == 0 {
+            zorg::account::set_default_account(root, &picked.uuid)?;
+            return Ok(true);
+        }
     }
     terminal::clear()?;
     cmd_delete(root, picked, hide)?;
@@ -1381,7 +1398,7 @@ fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> 
             Ok(message) => terminal::note(message),
             Err(error) => terminal::failure(error),
         }
-        let choice = terminal::menu_with_keys("Esc back", &copy, 0, &[], &mut || {});
+        let choice = terminal::menu_with_keys("Esc back", &copy, &mut 0, &[], &mut || {});
         terminal::clear()?;
         status = match choice? {
             None => return Ok(()),

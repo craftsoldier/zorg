@@ -435,14 +435,15 @@ pub fn menu(leave: &str, items: &[String], default: usize) -> Result<Option<usiz
 
 /// Shows `items` as a menu like [`menu`], with `leave` in the hint, where
 /// pressing the `i`th of `keys` answers `items.len() + i`, as if it were one
-/// more item, named in the hint.
+/// more item, named in the hint. The cursor starts at `current` and leaves it
+/// on the item last highlighted.
 /// While it waits for a key it calls `idle` about every 100 ms.
 /// q or Esc answers none; Ctrl-C is [`INTERRUPTED`]. Lines are cut to the
 /// terminal's width, and the menu is cleared after.
 pub fn menu_with_keys(
     leave: &str,
     items: &[String],
-    default: usize,
+    current: &mut usize,
     keys: &[(char, &str)],
     idle: &mut dyn FnMut(),
 ) -> Result<Option<usize>, String> {
@@ -466,20 +467,19 @@ pub fn menu_with_keys(
         }
         Ok(())
     };
-    let mut current = default;
     term.hide_cursor().map_err(|e| e.to_string())?;
-    draw(current).map_err(|e| e.to_string())?;
+    draw(*current).map_err(|e| e.to_string())?;
     let answer = loop {
         let answer = match read_key_while(idle)? {
             Key::ArrowUp => {
-                current = (current + items.len() - 1) % items.len();
+                *current = (*current + items.len() - 1) % items.len();
                 None
             }
             Key::ArrowDown => {
-                current = (current + 1) % items.len();
+                *current = (*current + 1) % items.len();
                 None
             }
-            Key::Enter => Some(Some(current)),
+            Key::Enter => Some(Some(*current)),
             Key::Escape | Key::Char('q') => Some(None),
             Key::Char(c) => keys
                 .iter()
@@ -495,7 +495,7 @@ pub fn menu_with_keys(
             .map_err(|e| e.to_string())?;
         match answer {
             Some(answer) => break answer,
-            None => draw(current).map_err(|e| e.to_string())?,
+            None => draw(*current).map_err(|e| e.to_string())?,
         }
     };
     term.show_cursor().map_err(|e| e.to_string())?;
