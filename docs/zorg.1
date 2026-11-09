@@ -34,7 +34,7 @@ or Esc quits; with no accounts it offers to create an
 account or import a recovery phrase. Outside a terminal it lists accounts.
 Names are case-sensitive and unique.
 An account whose database is missing is reported as unavailable until
-.B zorg delete
+.B zorg accounts \-\-delete
 removes it.
 .SH GLOBAL FLAGS
 Recognized before or after the command:
@@ -74,7 +74,19 @@ one the app opens.
 .TP
 .B zorg\ accounts
 List all accounts across known databases. Each line shows the account
-name, network, and unified address.
+name, network, and unified address;
+.B *
+marks the account the app opens.
+.TP
+.BI zorg\ accounts\ \-\-rename " name " \-\-account " name"
+Rename an account. The new name must be unique.
+.TP
+.BI zorg\ accounts\ \-\-default\ \-\-account " name"
+Make the account the one the app opens.
+.TP
+.BI zorg\ accounts\ \-\-delete\ \-\-account " name"
+Delete an account and its stored recovery phrase after a warning, Enter, and
+Touch ID or the login password. Deleting an account deletes its database.
 .TP
 .BI zorg\ balance " [\-\-account\ name]"
 Print spendable, pending, and locked balances for the account
@@ -123,10 +135,6 @@ phrase from the macOS Keychain asks for Touch ID or the login password.
 Check whether
 .I address
 is a valid Zcash address.
-.TP
-.BI zorg\ delete " \-\-account\ name"
-Delete an account and its Keychain entry after a warning, Enter, and Touch ID
-or the login password. Deleting an account deletes its database.
 .SH AUTHORS
 Julian Abraham (github.com/craftsoldier)
 .SH LICENSE
