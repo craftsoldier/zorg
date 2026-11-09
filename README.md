@@ -25,7 +25,7 @@ On first run, zorg helps you create an account or import a recovery phrase. With
 | **Send** | Enter a recipient, amount, and optional memo; review the fee before confirming. |
 | **Receive** | Show or copy your receiving address, generate a new shielded address, or show your transparent address. |
 | **Transactions** | Browse up to 10 entries per page, move between pages with Left/Right or h/l, and open transaction details. |
-| **Settings** | Switch accounts, choose a server, export a viewing key, or show and copy your recovery phrase. |
+| **Settings** | Switch accounts (press `r` to rename or `d` to delete the highlighted one), choose a server, export a viewing key, or show and copy your recovery phrase. |
 
 Press `b` on the home screen to hide or show balances, `s` for Settings, and `q` to quit. **Shield** appears when the account has enough transparent funds to offer shielding.
 
@@ -43,7 +43,10 @@ zorg balance --account Savings
 
 | Command | Purpose |
 |---|---|
-| `zorg accounts` | List named accounts. |
+| `zorg accounts` | List named accounts; `*` marks the one the app opens. |
+| `zorg accounts --rename <name> --account <name>` | Rename an account. |
+| `zorg accounts --default --account <name>` | Make an account the one the app opens. |
+| `zorg accounts --delete --account <name>` | Delete an account. |
 | `zorg create [name] --new [--network <net>]` | Create an account with a new recovery phrase. |
 | `zorg create [name] --import [--birthday <height>] [--network <net>]` | Import an existing recovery phrase. |
 | `zorg balance [--account <name>]` | Show spendable, pending, locked, and total balances. |
@@ -56,7 +59,6 @@ zorg balance --account Savings
 | `zorg history [--limit <n>] [--account <name>]` | Print transaction history. |
 | `zorg tx <txid> [--account <name>]` | Show a transaction in full. |
 | `zorg recovery [--account <name>]` | Show the numbered recovery phrase and wallet birthday. |
-| `zorg delete --account <name>` | Delete an account. |
 
 Account names are case-sensitive. Use `--account <name>` to select one; each account has its own database.
 

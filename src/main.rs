@@ -29,7 +29,10 @@ USAGE:
     zorg [command] [options]
 
 COMMANDS:
-    accounts                                                List named accounts
+    accounts                                                List named accounts; * marks the one the app opens
+    accounts --rename <name> --account <name>               Rename an account
+    accounts --default --account <name>                     Make an account the one the app opens
+    accounts --delete --account <name>                      Delete an account
     create [name] --new [--network <net>]                   Create an account with a new recovery phrase
     create [name] --import [--birthday <height>]            Create an account from an existing recovery phrase
     balance [--account <name>]                              Show balance
@@ -42,7 +45,6 @@ COMMANDS:
     history [--limit <n>] [--account <name>]                Show transaction history
     tx <txid> [--account <name>]                            Show one transaction in full
     recovery [--account <name>]                             Show the recovery phrase
-    delete --account <name>                                 Delete an account
 
 OPTIONS:
     --network <net>      main | test | regtest (create)
@@ -84,7 +86,7 @@ fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// Options that take a value. `--lwd` applies to every command.
-const VALUE_OPTIONS: [&str; 7] = [
+const VALUE_OPTIONS: [&str; 8] = [
     "--network",
     "--lwd",
     "--account",
@@ -92,10 +94,18 @@ const VALUE_OPTIONS: [&str; 7] = [
     "--limit",
     "--birthday",
     "--parse",
+    "--rename",
 ];
 
 /// Options that take no value.
-const FLAG_OPTIONS: [&str; 4] = ["--new", "--import", "--transparent", "--shield"];
+const FLAG_OPTIONS: [&str; 6] = [
+    "--new",
+    "--import",
+    "--transparent",
+    "--shield",
+    "--default",
+    "--delete",
+];
 
 /// A command line parsed by [`parse_args`].
 struct Args {
@@ -113,7 +123,11 @@ fn command_spec(
     cmd: &str,
 ) -> Option<(&'static str, &'static [&'static str], RangeInclusive<usize>)> {
     Some(match cmd {
-        "accounts" => ("", &[], 0..=0),
+        "accounts" => (
+            "[--rename <name> | --default | --delete] --account <name>",
+            &["--rename", "--default", "--delete", "--account"],
+            0..=0,
+        ),
         "create" => (
             "<name> (--new | --import [--birthday <height>]) [--network <net>]",
             &["--new", "--import", "--birthday", "--network"],
@@ -129,7 +143,6 @@ fn command_spec(
             &["--new", "--transparent", "--account", "--parse"],
             0..=0,
         ),
-        "delete" => ("--account <name>", &["--account"], 0..=0),
         "send" => (
             "<to> <amount> [--memo <text>] [--account <name>]",
             &["--account", "--memo", "--shield"],
@@ -183,6 +196,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let command = words.next();
     let positional: Vec<String> = words.collect();
     if !(help || version) {
+        if let Some(option) = options.keys().find(|o| command.is_none() && **o != "--lwd") {
+            return Err(format!("{option} needs a command; run zorg --help"));
+        }
         let command = command.as_deref().unwrap_or("accounts");
         let (usage, accepted, count) =
             command_spec(command).ok_or_else(|| format!("Unknown command: {command}"))?;
@@ -373,15 +389,30 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             terminal::wait_for("Esc back")?;
         }
     }
-    if cmd == "accounts" {
+    let actions = ["--rename", "--default", "--delete"]
+        .iter()
+        .filter(|o| args.options.contains_key(*o))
+        .count();
+    if cmd == "accounts" && actions > 1 {
+        return Err("Use only one of --rename, --default and --delete".into());
+    }
+    if cmd == "accounts" && actions == 0 {
+        if args.options.contains_key("--account") {
+            return Err("--account needs --rename, --default or --delete".into());
+        }
         if accounts.is_empty() {
             println!("No accounts found. Run `zorg create`.");
         }
         for account in &accounts {
             let address =
                 zorg::account::current_address(account).unwrap_or_else(|_| "(unavailable)".into());
+            let default = if saved.default_account.as_deref() == Some(account.uuid.as_str()) {
+                "*"
+            } else {
+                " "
+            };
             println!(
-                "  {:<20} {:<7} {address}",
+                "{default} {:<20} {:<7} {address}",
                 account.name,
                 account.network.as_str(),
             );
@@ -418,7 +449,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
     } else {
         Some(zorg::account::select(&accounts, name.as_deref())?)
     };
-    if let Some(account) = selected.filter(|_| cmd != "delete") {
+    if let Some(account) = selected.filter(|_| cmd != "accounts") {
         zorg::account::ensure_database_exists(account)?;
     }
     if matches!(cmd, "sync" | "status") {
@@ -496,11 +527,24 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         }
         "tx" => cmd_tx(selected, &args.positional[0], false),
         "recovery" => cmd_recovery(selected),
-        "delete" => {
+        "accounts" => {
             if name.is_none() && !terminal::interactive() {
-                return Err("Usage: zorg delete --account <name>".into());
+                return Err(
+                    "Usage: zorg accounts [--rename <name> | --default | --delete] --account <name>"
+                        .into(),
+                );
             }
-            cmd_delete(&root, selected, false)
+            if let Some(new) = option("--rename") {
+                zorg::account::rename_account(&root, selected, &new)?;
+                println!("Renamed {:?} to {new:?}.", selected.name);
+                Ok(())
+            } else if args.options.contains_key("--default") {
+                zorg::account::set_default_account(&root, &selected.uuid)?;
+                println!("The app now opens {:?}.", selected.name);
+                Ok(())
+            } else {
+                cmd_delete(&root, selected, false)
+            }
         }
         _ => unreachable!(),
     };
@@ -1089,8 +1133,9 @@ fn settings(
     }
 }
 
-/// Settings → Accounts: open another account, add one, or delete any with d,
-/// with balances hidden as `saved` says. Returns whether anything changed.
+/// Settings → Accounts: open another account, add one, rename any with r, or
+/// delete any with d, with balances hidden as `saved` says. Returns whether
+/// anything changed.
 fn switch_account(
     root: &std::path::Path,
     account: &zorg::account::Account,
@@ -1117,7 +1162,7 @@ fn switch_account(
         .iter()
         .position(|a| a.uuid == account.uuid)
         .unwrap_or(0);
-    let keys = [('d', "delete")];
+    let keys = [('r', "rename"), ('d', "delete")];
     let (picked, delete) = loop {
         let Some(choice) =
             terminal::menu_with_keys("Esc back", &items, &mut current, &keys, &mut || {})?
@@ -1127,6 +1172,10 @@ fn switch_account(
         match accounts.get(choice) {
             Some(picked) => break (picked, false),
             None if choice == items.len() => match accounts.get(current) {
+                Some(picked) => return rename_in_app(root, picked, accounts),
+                None => continue,
+            },
+            None if choice == items.len() + 1 => match accounts.get(current) {
                 Some(picked) => break (picked, true),
                 None => continue,
             },
@@ -1167,6 +1216,31 @@ fn switch_account(
         terminal::wait_for("Esc back")?;
     }
     Ok(deleted)
+}
+
+/// Settings → Accounts → r: asks for a new name for `picked`. Returns whether
+/// it was renamed.
+fn rename_in_app(
+    root: &std::path::Path,
+    picked: &zorg::account::Account,
+    accounts: &[zorg::account::Account],
+) -> Result<bool, String> {
+    terminal::clear()?;
+    println!("{}\n", console::style(&picked.name).bold());
+    let others: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.uuid != picked.uuid)
+        .cloned()
+        .collect();
+    let name = match terminal::ask("New name", false, |name| {
+        zorg::account::ensure_unique_name(&others, name)
+    }) {
+        Ok(name) => name,
+        Err(e) if e == terminal::CANCELLED => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    zorg::account::rename_account(root, picked, &name)?;
+    Ok(true)
 }
 
 /// Settings → a network's server: the built-in list, or a URL that serves
@@ -1366,7 +1440,7 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
     format!(
         "The recovery phrase for {name:?} isn't in this build's store on this Mac. \
          Restore it with your written-down phrase:\n  \
-         zorg delete --account {name:?}\n  \
+         zorg accounts --delete --account {name:?}\n  \
          zorg create {name:?} --import{network} --birthday {birthday}",
         name = account.name,
     )
@@ -2002,7 +2076,7 @@ mod tests {
         };
         let error = missing_phrase_error(&account, 2_345_600);
         assert!(
-            error.contains("zorg delete --account \"My Savings\""),
+            error.contains("zorg accounts --delete --account \"My Savings\""),
             "{error}"
         );
         assert!(

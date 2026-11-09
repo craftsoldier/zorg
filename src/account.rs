@@ -381,6 +381,25 @@ pub fn set_default_account(root: &Path, uuid: &str) -> Result<(), String> {
     update_settings(root, "UPDATE settings SET default_account = ?1", [uuid])
 }
 
+/// Renames `account` to `name`, which must be valid and unused by the other
+/// accounts.
+pub fn rename_account(root: &Path, account: &Account, name: &str) -> Result<(), String> {
+    let others: Vec<Account> = read_index(root)?
+        .into_iter()
+        .filter(|a| a.uuid != account.uuid)
+        .collect();
+    ensure_unique_name(&others, name)?;
+    let index = open_index_for_write(root)?;
+    index
+        .execute(
+            "UPDATE accounts SET name = ?1 WHERE uuid = ?2",
+            [name, account.uuid.as_str()],
+        )
+        .and_then(|_| index.execute_batch("COMMIT"))
+        .map(drop)
+        .map_err(|e| format!("Could not update database index: {e}"))
+}
+
 /// Sets whether the app shows balances as dots.
 pub fn set_hide_balances(root: &Path, hide: bool) -> Result<(), String> {
     update_settings(root, "UPDATE settings SET hide_balances = ?1", [hide])
@@ -542,7 +561,7 @@ pub fn select<'a>(accounts: &'a [Account], name: Option<&str>) -> Result<&'a Acc
         }
         None if accounts.len() == 1 => Ok(&accounts[0]),
         None if accounts.is_empty() => {
-            Err("No accounts found. Run `zorg create` or `zorg import`.".into())
+            Err("No accounts found. Run `zorg create` or `zorg create --import`.".into())
         }
         None => Err("Choose an account with --account <name>; run `zorg accounts`".into()),
     }
