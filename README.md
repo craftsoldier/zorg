@@ -1,16 +1,25 @@
 # zorg
 
 ```text
- ______   ______     ______      _____
-/\___  \ /\  __ \   /\  == \    / ____|
-\/_/  /__\ \ \/\ \  \ \  __<    | |  __
-  /\_____\\ \_____\  \ \_\ \_\  | | |_ |
-  \/_____/ \/_____/   \/_/ /_/   \_____|
+  ███████╗ ██████╗ ██████╗  ██████╗
+  ╚══███╔╝██╔═══██╗██╔══██╗██╔════╝
+    ███╔╝ ██║   ██║██████╔╝██║  ███╗
+   ███╔╝  ██║   ██║██╔══██╗██║   ██║
+  ███████╗╚██████╔╝██║  ██║╚██████╔╝
+  ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝
 ```
 
 **Zcash, in your terminal.**
 
 A macOS wallet for shielded payments, named accounts, and transaction history. Open the interactive wallet with `zorg`, or use explicit commands from your terminal and scripts.
+
+## Install
+
+```sh
+brew install craftsoldier/zorg/zorg
+```
+
+This installs the signed zorg app and puts `zorg` on your PATH. It needs an Apple Silicon Mac on macOS 14 or later, and keeps recovery phrases in this Mac’s Keychain.
 
 ## Open your wallet
 
