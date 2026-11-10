@@ -1370,12 +1370,25 @@ fn history(account: &zorg::account::Account, hide: bool) -> Result<(), String> {
             return Ok(());
         };
         current = choice;
-        terminal::clear()?;
-        if let Err(e) = cmd_tx(account, &txs[current].txid.to_string(), hide) {
-            terminal::failure(&e);
+        let txid = txs[current].txid.to_string();
+        let copy = ["Copy txid".to_string()];
+        let mut status: Result<String, String> = Ok(String::new());
+        loop {
+            terminal::clear()?;
+            if let Err(e) = cmd_tx(account, &txid, hide) {
+                terminal::failure(&e);
+            }
+            match &status {
+                Ok(message) if message.is_empty() => {}
+                Ok(message) => terminal::note(message),
+                Err(e) => terminal::failure(e),
+            }
+            println!();
+            status = match terminal::menu("Esc back", &copy, 0)? {
+                None => break,
+                Some(_) => terminal::copy(&txid).map(|()| "Copied.".into()),
+            };
         }
-        println!();
-        terminal::wait_for("Esc back")?;
     }
 }
 
@@ -1579,7 +1592,10 @@ fn cmd_send(
         None if max => sync::max_amount(account, to)?,
         None => {
             let fill = || sync::max_amount(account, to).map(|zat| terminal::zec(zat, 0));
-            let question = format!("Amount ({unit} · Tab max amount)");
+            let question = format!(
+                "Amount ({} {unit} available · Tab max amount)",
+                terminal::zec(balance, 2)
+            );
             let amount = terminal::ask(&question, false, Some(&fill), |amount| {
                 let max = sync::max_amount(account, to)?;
                 if parse_zatoshi_amount(amount)? > max {
