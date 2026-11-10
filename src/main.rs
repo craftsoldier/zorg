@@ -1581,11 +1581,11 @@ fn cmd_send(
             let fill = || sync::max_amount(account, to).map(|zat| terminal::zec(zat, 0));
             let question = format!("Amount ({unit} · Tab max amount)");
             let amount = terminal::ask(&question, false, Some(&fill), |amount| {
-                let zat = parse_zatoshi_amount(amount)?;
-                if zat > balance {
+                let max = sync::max_amount(account, to)?;
+                if parse_zatoshi_amount(amount)? > max {
                     return Err(format!(
-                        "You have {} {unit} available",
-                        terminal::zec(balance, 2)
+                        "You can send at most {} {unit} after the fee",
+                        terminal::zec(max, 0)
                     ));
                 }
                 Ok(())
@@ -1703,8 +1703,9 @@ fn cmd_send(
         Err(e) if interactive && e != terminal::INTERRUPTED => {
             if broadcasting.get() {
                 terminal::failure(&format!(
-                    "Broadcast failed: {e}. The transaction is saved and zorg retries it on \
-                     the next sync — check zorg history before sending again."
+                    "The server didn't confirm the send: {e}. The payment is saved and may already be \
+                     on its way; zorg resends it on every sync. Check your transactions before \
+                     sending again."
                 ));
             } else {
                 terminal::failure(&format!("Not sent: {e}"));
@@ -1807,8 +1808,9 @@ fn cmd_shield(account: &zorg::account::Account, server: Option<&str>) -> Result<
         Err(e) if interactive && e != terminal::INTERRUPTED => {
             if broadcasting.get() {
                 terminal::failure(&format!(
-                    "Broadcast failed: {e}. The transaction is saved and zorg retries it on \
-                     the next sync — check zorg history before shielding again."
+                    "The server didn't confirm the shield: {e}. It is saved and may already be \
+                     on its way; zorg resends it on every sync. Check your transactions before \
+                     shielding again."
                 ));
             } else {
                 terminal::failure(&format!("Not shielded: {e}"));
