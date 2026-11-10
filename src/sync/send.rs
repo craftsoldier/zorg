@@ -305,7 +305,12 @@ pub fn estimate_fee(
         None,
         None,
     )
-    .map_err(|e| format!("Propose: {e}"))?;
+    .map_err(|e| match e {
+        WalletError::InsufficientFunds { .. } => "Not enough spendable funds for this amount \
+             and its fee. Pending funds can be sent once they confirm."
+            .to_string(),
+        e => format!("Propose: {e}"),
+    })?;
     Ok(proposal
         .steps()
         .iter()
@@ -342,7 +347,9 @@ pub fn max_amount(account: &Account, to_address: &str) -> Result<u64, String> {
     )
     .map_err(|e| match e {
         WalletError::InsufficientFunds { .. } => {
-            "Not enough spendable funds to cover the fee".to_string()
+            "Not enough spendable funds to cover the fee. Pending funds can be sent once they \
+             confirm."
+                .to_string()
         }
         e => format!("Max amount: {e}"),
     })?;

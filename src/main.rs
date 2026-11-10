@@ -189,7 +189,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             help = true;
         } else if arg == "--version" || arg == "-V" {
             version = true;
-        } else if arg.starts_with('-') && arg != "-" {
+        } else if arg.starts_with('-') && arg != "-" && !arg[1..].starts_with(char::is_numeric) {
             return Err(format!("Unknown option: {arg}"));
         } else {
             words.push(arg.to_string());

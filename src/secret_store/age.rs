@@ -12,15 +12,12 @@ fn directory(root: &Path, service: &str, key: &str) -> PathBuf {
 }
 
 fn capture(command: &mut Command, name: &str) -> Result<Zeroizing<Vec<u8>>, String> {
-    let output = command
-        .stdin(Stdio::null())
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| {
-            format!("Could not run {name}: {e}. Install age and age-plugin-se with Homebrew.")
-        })?;
+    let output = command.stdin(Stdio::null()).output().map_err(|e| {
+        format!("Could not run {name}: {e}. Install age and age-plugin-se with Homebrew.")
+    })?;
     let bytes = Zeroizing::new(output.stdout);
     if !output.status.success() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
         return Err(format!(
             "{name} failed; authentication or decryption was not completed"
         ));

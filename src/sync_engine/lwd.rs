@@ -122,6 +122,11 @@ async fn connect(
     lightwalletd_url: &str,
 ) -> Result<CompactTxStreamerClient<Channel>, SyncError> {
     use zcash_client_backend::proto::service::Empty;
+    if !lightwalletd_url.starts_with("https://") && !lightwalletd_url.starts_with("http://") {
+        return Err(SyncError::net(format!(
+            "{lightwalletd_url} is not a server URL; it must start with https:// or http://"
+        )));
+    }
     let endpoint = Endpoint::from_shared(lightwalletd_url.to_string())
         .map_err(|e| SyncError::net(format!("invalid URL: {e}")))?
         .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT);
