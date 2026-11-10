@@ -1,4 +1,4 @@
-.TH ZORG 1 2026-10-05 "zorg 0.1.0" "User Commands"
+.TH ZORG 1 2026-11-10 "zorg 0.1.0" "User Commands"
 .SH NAME
 zorg \- a fast, lightweight, CLI-only Zcash wallet
 .SH SYNOPSIS
@@ -10,17 +10,20 @@ zorg \- a fast, lightweight, CLI-only Zcash wallet
 .B zorg
 is a command-line Zcash wallet. It manages accounts, keeps a local
 copy of the shielded blockchain state in a SQLite database, and builds
-and broadcasts shielded transfers natively from the terminal. The
-mnemonic is stored in the macOS Keychain; wallet state lives in a
-SQLite database. zorg_index.db and new databases live in
+and broadcasts shielded transfers natively from the terminal.
+zorg_index.db, each account's database, and the recovery phrases, encrypted
+with a Secure Enclave identity per account, live in
+.IR ~/.zorg/ .
+The signed zorg.app build instead keeps the phrases in the macOS Keychain
+and the databases in
 .IR ~/Library/Application\ Support/zorg/ .
+The two builds do not see each other's accounts.
 zorg_index.db is the record of which accounts exist: each account's name,
 network, and database path. It also holds the settings: the account the app
 opens, whether it hides balances, and a server for testnet and for mainnet
 that every command uses unless
 .B --lwd
-is given. Each account has its own database, and each account's phrase is
-stored in Keychain.
+is given. Each account has its own database.
 The database itself is not encrypted.
 Running zorg without a command in a terminal shows the default account's
 balance, syncing in the background, with a menu to send, receive, or see
@@ -92,7 +95,7 @@ Touch ID or the login password. Deleting an account deletes its database.
 Print spendable, pending, and locked balances for the account
 (the only account, if none given; otherwise a name is required).
 .TP
-.BI zorg\ address " [\-\-new] [\-\-account\ name]"
+.BI zorg\ address " [\-\-new | \-\-transparent] [\-\-account\ name]"
 Print the account's most recently used unified receiving address.
 After restoring an account from its recovery phrase, this can be an address
 that has already been paid; make a new one before handing it out.
@@ -101,6 +104,13 @@ With
 make a new address for the account and print it; the account must have been
 synced first.
 Every address the account has made keeps receiving.
+With
+.BR \-\-transparent ,
+print the account's transparent address; funds received there stay
+transparent until shielded.
+.TP
+.BI zorg\ address\ \-\-parse " address"
+Print the receivers of a Zcash address.
 .TP
 .BI zorg\ sync " [\-\-account\ name]"
 Sync every known database once, or the chosen account's database.
@@ -121,6 +131,9 @@ Send all spendable shielded funds to
 .IR to ,
 minus the fee.
 .TP
+.BI zorg\ send\ \-\-shield " [\-\-account\ name]"
+Move the account's transparent funds into its shielded balance.
+.TP
 .BI zorg\ history " [\-\-account\ name] [\-\-limit\ n]"
 Print recent transactions.
 .TP
@@ -134,12 +147,7 @@ and block explorers show it.
 .TP
 .BI zorg\ recovery " [\-\-account\ name]"
 Print the account's recovery phrase and wallet birthday. Reading the
-phrase from the macOS Keychain asks for Touch ID or the login password.
-.TP
-.BI zorg\ validate " address"
-Check whether
-.I address
-is a valid Zcash address.
+phrase asks for Touch ID or the login password.
 .SH AUTHORS
 Julian Abraham (github.com/craftsoldier)
 .SH LICENSE
