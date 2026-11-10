@@ -10,13 +10,17 @@ use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretVec};
 
 use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
-use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
+use zcash_client_backend::data_api::wallet::input_selection::{
+    GreedyInputSelector, LockedInputPolicy, SpendPolicy,
+};
 use zcash_client_backend::{
     data_api::{
+        error::Error as WalletError,
         wallet::{
             self, create_proposed_transactions, ConfirmationsPolicy, LockRequest, SpendingKeys,
         },
-        Account as _, CoinbaseFilter, OutputLockStore, TransparentKeyOrigin, WalletRead,
+        Account as _, CoinbaseFilter, MaxSpendMode, OutputLockStore, TransparentKeyOrigin,
+        WalletRead,
     },
     fees::{zip317::MultiOutputChangeStrategy, DustOutputPolicy, SplitPolicy, StandardFeeRule},
     wallet::{LockOwner, OvkPolicy},
@@ -306,6 +310,48 @@ pub fn estimate_fee(
         .steps()
         .iter()
         .map(|s| u64::from(s.balance().fee_required()))
+        .sum())
+}
+
+/// The most `account` can send to `to_address` in one transaction: its
+/// spendable shielded funds minus the fee. Locks nothing.
+pub fn max_amount(account: &Account, to_address: &str) -> Result<u64, String> {
+    let network = account.network;
+    let mut db = open_wallet_db(&account.db_path, network)?;
+    let account_id = parse_account_uuid(&account.uuid)?;
+    let to = to_address
+        .parse()
+        .map_err(|e| format!("Bad address: {e}"))?;
+    let proposal = wallet::propose_send_max_transfer::<
+        _,
+        _,
+        _,
+        shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
+    >(
+        &mut db,
+        &network,
+        account_id,
+        &ordinary_send_spend_pools(),
+        &StandardFeeRule::Zip317,
+        to,
+        None,
+        MaxSpendMode::MaxSpendable,
+        ConfirmationsPolicy::default(),
+        &LockedInputPolicy::Exclude,
+        None,
+    )
+    .map_err(|e| match e {
+        WalletError::InsufficientFunds { .. } => {
+            "Not enough spendable funds to cover the fee".to_string()
+        }
+        e => format!("Max amount: {e}"),
+    })?;
+    Ok(proposal
+        .steps()
+        .iter()
+        .flat_map(|s| s.transaction_request().payments().values())
+        .filter_map(|p| p.amount())
+        .map(u64::from)
         .sum())
 }
 

@@ -41,6 +41,8 @@ COMMANDS:
     sync [--account <name>]                                 Sync all accounts, or the chosen account's database
     status [--account <name>]                               Show sync progress
     send <to> <amount> [--memo <text>] [--account <name>]   Send ZEC
+    send <to> --max-amount [--memo <text>] [--account <name>]
+                                                            Send all spendable ZEC, minus the fee
     send --shield [--account <name>]                        Move transparent funds into the shielded balance
     history [--limit <n>] [--account <name>]                Show transaction history
     tx <txid> [--account <name>]                            Show one transaction in full
@@ -98,13 +100,14 @@ const VALUE_OPTIONS: [&str; 8] = [
 ];
 
 /// Options that take no value.
-const FLAG_OPTIONS: [&str; 6] = [
+const FLAG_OPTIONS: [&str; 7] = [
     "--new",
     "--import",
     "--transparent",
     "--shield",
     "--default",
     "--delete",
+    "--max-amount",
 ];
 
 /// A command line parsed by [`parse_args`].
@@ -144,8 +147,8 @@ fn command_spec(
             0..=0,
         ),
         "send" => (
-            "<to> <amount> [--memo <text>] [--account <name>]",
-            &["--account", "--memo", "--shield"],
+            "<to> (<amount> | --max-amount) [--memo <text>] [--account <name>]",
+            &["--account", "--memo", "--shield", "--max-amount"],
             if terminal::interactive() {
                 0..=2
             } else {
@@ -210,6 +213,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
         let count = if options.contains_key("--shield") {
             0..=0
+        } else if options.contains_key("--max-amount") {
+            count.start().saturating_sub(1)..=1
         } else {
             count
         };
@@ -371,7 +376,13 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             terminal::clear()?;
             println!("{}\n", console::style(&actions[choice]).bold());
             let result = match choice {
-                0 => cmd_send(account, server(account.network).as_deref(), &[], None),
+                0 => cmd_send(
+                    account,
+                    server(account.network).as_deref(),
+                    &[],
+                    None,
+                    false,
+                ),
                 1 => receive(account),
                 2 => history(account, hidden),
                 4 => cmd_shield(account, server(account.network).as_deref()),
@@ -504,6 +515,9 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
             if args.options.contains_key("--memo") {
                 return Err("--memo cannot be used with --shield".into());
             }
+            if args.options.contains_key("--max-amount") {
+                return Err("--max-amount cannot be used with --shield".into());
+            }
             cmd_shield(selected, server(net).as_deref())
         }
         "send" => {
@@ -513,6 +527,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 server(net).as_deref(),
                 &args.positional,
                 memo.as_deref(),
+                args.options.contains_key("--max-amount"),
             )
         }
         "history" => {
@@ -718,6 +733,9 @@ fn create_account(
     accounts: &[zorg::account::Account],
     server: &dyn Fn(WalletNetwork) -> Option<String>,
 ) -> Result<Option<zorg::account::Account>, String> {
+    if let Some(name) = name {
+        zorg::account::ensure_unique_name(accounts, name)?;
+    }
     let interactive = terminal::interactive();
     let mut net = options
         .get("--network")
@@ -789,6 +807,7 @@ fn create_account(
         let height = terminal::ask(
             "Birthday height (Enter to scan from the start)",
             true,
+            None,
             |h| {
                 let height = h
                     .parse::<u32>()
@@ -812,11 +831,10 @@ fn create_account(
     }
     let name = match name {
         Some(name) => name.to_string(),
-        None => terminal::ask("Account name", false, |name| {
+        None => terminal::ask("Account name", false, None, |name| {
             zorg::account::ensure_unique_name(accounts, name)
         })?,
     };
-    zorg::account::ensure_unique_name(accounts, &name)?;
     let estimate = tip.map(|tip| {
         let start = birthday.unwrap_or_else(|| {
             u64::from(u32::from(
@@ -1232,7 +1250,7 @@ fn rename_in_app(
         .filter(|a| a.uuid != picked.uuid)
         .cloned()
         .collect();
-    let name = match terminal::ask("New name", false, |name| {
+    let name = match terminal::ask("New name", false, None, |name| {
         zorg::account::ensure_unique_name(&others, name)
     }) {
         Ok(name) => name,
@@ -1257,7 +1275,7 @@ fn choose_server(root: &std::path::Path, network: WalletNetwork) -> Result<bool,
         zorg::account::set_server(root, network, None)?;
         return Ok(true);
     }
-    let url = terminal::ask("Server URL", false, |_| Ok(()))?;
+    let url = terminal::ask("Server URL", false, None, |_| Ok(()))?;
     RUNTIME.block_on(zorg::sync_engine::connect_endpoint(network, Some(&url)))?;
     zorg::account::set_server(root, network, Some(&url))?;
     Ok(true)
@@ -1533,26 +1551,36 @@ fn cmd_send(
     server: Option<&str>,
     positional: &[String],
     memo: Option<&str>,
+    max: bool,
 ) -> Result<(), String> {
     let net = account.network;
     let mut client = RUNTIME.block_on(zorg::sync_engine::connect_endpoint(net, server))?;
     let interactive = terminal::interactive();
     let unit = net.unit();
     let balance = sync::get_wallet_balance(account)?.spendable;
-    let guided = positional.len() < 2;
+    let guided = positional.is_empty() || (positional.len() < 2 && !max);
     let to = match positional.first() {
         Some(to) => to.clone(),
-        None => terminal::ask("To", false, |to| {
+        None => terminal::ask("To", false, None, |to| {
             zcash_keys::address::Address::decode(&net, to)
                 .map(|_| ())
                 .ok_or_else(|| format!("Not a valid {} address", net.as_str()))
         })?,
     };
     let to = to.as_str();
+    let to_address = to
+        .parse::<zcash_address::ZcashAddress>()
+        .map_err(|e| format!("Bad address: {e}"))?;
+    if memo.is_some_and(|memo| !memo.trim().is_empty()) && !to_address.can_receive_memo() {
+        return Err("Transparent addresses can't receive memos; leave out --memo".into());
+    }
     let amount_zat = match positional.get(1) {
         Some(amount) => parse_zatoshi_amount(amount)?,
+        None if max => sync::max_amount(account, to)?,
         None => {
-            let amount = terminal::ask(&format!("Amount ({unit})"), false, |amount| {
+            let fill = || sync::max_amount(account, to).map(|zat| terminal::zec(zat, 0));
+            let question = format!("Amount ({unit} · Tab max amount)");
+            let amount = terminal::ask(&question, false, Some(&fill), |amount| {
                 let zat = parse_zatoshi_amount(amount)?;
                 if zat > balance {
                     return Err(format!(
@@ -1565,13 +1593,10 @@ fn cmd_send(
             parse_zatoshi_amount(&amount)?
         }
     };
-    let to_address = to
-        .parse::<zcash_address::ZcashAddress>()
-        .map_err(|e| format!("Bad address: {e}"))?;
     let asked_memo;
     let memo = match memo {
         None if guided && to_address.can_receive_memo() => {
-            asked_memo = terminal::ask("Memo (optional)", true, |memo| {
+            asked_memo = terminal::ask("Memo (optional)", true, None, |memo| {
                 MemoBytes::from_bytes(memo.as_bytes())
                     .map(drop)
                     .map_err(|e| e.to_string())

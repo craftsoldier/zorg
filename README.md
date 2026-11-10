@@ -22,7 +22,7 @@ On first run, zorg helps you create an account or import a recovery phrase. With
 
 | Screen | What you can do |
 |---|---|
-| **Send** | Enter a recipient, amount, and optional memo; review the fee before confirming. |
+| **Send** | Enter a recipient, amount, and optional memo; review the fee before confirming. Press Tab at the amount to fill in the most you can send. |
 | **Receive** | Show or copy your receiving address, generate a new shielded address, or show your transparent address. |
 | **Transactions** | Browse up to 10 entries per page, move between pages with Left/Right or h/l, and open transaction details. |
 | **Settings** | Switch accounts (press `r` to rename or `d` to delete the highlighted one), choose a server, export a viewing key, or show and copy your recovery phrase. |
@@ -55,6 +55,7 @@ zorg balance --account Savings
 | `zorg sync [--account <name>]` | Sync all accounts, or one named account. |
 | `zorg status [--account <name>]` | Show account sync status. |
 | `zorg send <to> <amount> [--memo <text>] [--account <name>]` | Send a payment. |
+| `zorg send <to> --max-amount [--memo <text>] [--account <name>]` | Send all spendable funds, minus the fee. |
 | `zorg send --shield [--account <name>]` | Move transparent funds into the shielded balance. |
 | `zorg history [--limit <n>] [--account <name>]` | Print transaction history. |
 | `zorg tx <txid> [--account <name>]` | Show a transaction in full. |

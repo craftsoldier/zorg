@@ -153,11 +153,13 @@ pub fn confirm(
 
 /// Asks `question` and reads a typed answer, echoing it. Enter accepts the
 /// answer once `check` approves it; an empty answer is accepted only when
-/// `optional`. A rejected answer shows the reason and asks again. Esc fails with
+/// `optional`. A rejected answer shows the reason and asks again. Tab replaces
+/// the answer with what `tab` returns, or shows its error. Esc fails with
 /// [`CANCELLED`], and Ctrl-C with [`INTERRUPTED`].
 pub fn ask(
     question: &str,
     optional: bool,
+    tab: Option<&dyn Fn() -> Result<String, String>>,
     check: impl Fn(&str) -> Result<(), String>,
 ) -> Result<String, String> {
     let term = Term::stdout();
@@ -191,6 +193,18 @@ pub fn ask(
             Key::Backspace => {
                 answer.pop();
             }
+            Key::Tab => match tab.map(|fill| fill()) {
+                Some(Ok(text)) => answer = text,
+                Some(Err(reason)) => {
+                    erase(before)?;
+                    term.write_line(&format!("{} {reason}", style("✗").red().bold()))
+                        .map_err(io)?;
+                    answer.clear();
+                    term.write_str(&prompt).map_err(io)?;
+                    continue;
+                }
+                None => continue,
+            },
             Key::Enter => {
                 let text = answer.trim();
                 let verdict = match (text.is_empty(), optional) {
