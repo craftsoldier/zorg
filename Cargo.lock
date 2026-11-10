@@ -3268,7 +3268,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zorg"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bip0039",
  "blake2b_simd",
