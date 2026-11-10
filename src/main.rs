@@ -189,7 +189,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             help = true;
         } else if arg == "--version" || arg == "-V" {
             version = true;
-        } else if arg.starts_with('-') && arg != "-" && !arg[1..].starts_with(char::is_numeric) {
+        } else if arg.starts_with('-')
+            && arg != "-"
+            && !arg[1..].starts_with(|c: char| c.is_numeric() || c == '.')
+        {
             return Err(format!("Unknown option: {arg}"));
         } else {
             words.push(arg.to_string());
@@ -286,7 +289,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         .find(|a| saved.default_account.as_deref() == Some(a.uuid.as_str()))
         .or_else(|| accounts.iter().find(openable));
     if let Some(account) = first.filter(|_| args.command.is_none() && terminal::interactive()) {
-        if zorg::secret_store::mnemonic_if_present(account)?.is_none() {
+        if touch_id(|| zorg::secret_store::mnemonic_if_present(account))?.is_none() {
             terminal::failure(&format!(
                 "No recovery phrase for {:?} on this Mac, so zorg cannot open it. \
                  Delete the account, then import it again from your written phrase.",
@@ -417,7 +420,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
         for account in &accounts {
             let address =
                 zorg::account::current_address(account).unwrap_or_else(|_| "(unavailable)".into());
-            let default = if saved.default_account.as_deref() == Some(account.uuid.as_str()) {
+            let default = if first.is_some_and(|first| first.uuid == account.uuid) {
                 "*"
             } else {
                 " "
@@ -554,6 +557,7 @@ fn run_in(root: std::path::PathBuf, args: Args) -> Result<(), String> {
                 println!("Renamed {:?} to {new:?}.", selected.name);
                 Ok(())
             } else if args.options.contains_key("--default") {
+                zorg::account::ensure_database_exists(selected)?;
                 zorg::account::set_default_account(&root, &selected.uuid)?;
                 println!("The app now opens {:?}.", selected.name);
                 Ok(())
@@ -996,7 +1000,7 @@ fn store_and_verify_mnemonic(
 ) -> Result<(), String> {
     zorg::secret_store::store_mnemonic(account, mnemonic)
         .map_err(|e| format!("Failed to store mnemonic: {e}"))?;
-    let verified = zorg::secret_store::mnemonic(account)
+    let verified = touch_id(|| zorg::secret_store::mnemonic(account))
         .map_err(|e| format!("Failed to read the mnemonic back: {e}"))
         .and_then(|stored| {
             if stored.as_str() == mnemonic {
@@ -1459,7 +1463,7 @@ fn cmd_delete(
         }
         println!("Keep the written-down recovery phrase: zorg can't show it again.");
     }
-    zorg::secret_store::authenticate(account)?;
+    touch_id(|| zorg::secret_store::authenticate(account))?;
     zorg::account::delete_account(root, account, || {
         zorg::secret_store::delete_mnemonic(account)
     })?;
@@ -1487,6 +1491,18 @@ fn missing_phrase_error(account: &zorg::account::Account, birthday: u32) -> Stri
 }
 
 /// The account's recovery phrase, or the commands that restore it when this Mac has none.
+/// Runs `read`, which asks macOS for the recovery phrase, behind a
+/// "Waiting for Touch ID…" spinner in a terminal.
+fn touch_id<T>(read: impl FnOnce() -> T) -> T {
+    let progress = terminal::Progress::hidden();
+    if terminal::interactive() {
+        progress.show("Waiting for Touch ID…");
+    }
+    let result = read();
+    progress.clear();
+    result
+}
+
 fn phrase(account: &zorg::account::Account) -> Result<zeroize::Zeroizing<String>, String> {
     match zorg::secret_store::mnemonic_if_present(account)? {
         Some(phrase) => Ok(phrase),
@@ -1499,7 +1515,7 @@ fn phrase(account: &zorg::account::Account) -> Result<zeroize::Zeroizing<String>
 
 fn show_recovery_phrase(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
-    let mnemonic = phrase(account)?;
+    let mnemonic = touch_id(|| phrase(account))?;
     let copy = ["Copy phrase".to_string()];
     let mut status: Result<String, String> = Ok(String::new());
     terminal::clear()?;
@@ -1525,7 +1541,7 @@ fn cmd_recovery(account: &zorg::account::Account) -> Result<(), String> {
     let birthday = zorg::account::birthday_height(account)?;
     print!(
         "{}",
-        *terminal::recovery_phrase_text(&phrase(account)?, u64::from(birthday))
+        *terminal::recovery_phrase_text(&touch_id(|| phrase(account))?, u64::from(birthday))
     );
     Ok(())
 }
