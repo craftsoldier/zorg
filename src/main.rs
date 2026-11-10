@@ -603,19 +603,22 @@ fn sync_text(account: &zorg::account::Account) -> String {
 /// Keeps `account` synced while the app is open: checks the chain tip every
 /// 10 seconds and syncs when the wallet is behind, over one connection kept
 /// between checks. A failed check drops the connection, and the next one
-/// reconnects to the chosen server `lwd`, or to the first built-in server that
-/// answers. It never draws: after each step it sends `Ok`, or `Err` with the
-/// sync row's text when a sync fails. Runs until the process exits.
+/// reconnects to the chosen server `lwd`, or to the next built-in server after
+/// the one that failed. It never draws: after each step it sends `Ok`, or
+/// `Err` with the sync row's text when a sync fails. Runs until the process
+/// exits.
 async fn auto_sync(
     account: zorg::account::Account,
     lwd: Option<String>,
     updates: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     let mut client = None;
+    let mut failures = 0;
     loop {
-        let result = sync_pass(&account, lwd.as_deref(), &mut client, &updates).await;
+        let result = sync_pass(&account, lwd.as_deref(), failures, &mut client, &updates).await;
         if result.is_err() {
             client = None;
+            failures += 1;
         }
         let _ = updates.send(result.map_err(|e| {
             if e.starts_with("network:") {
@@ -629,16 +632,22 @@ async fn auto_sync(
 }
 
 /// One `auto_sync` check: connects when `client` is none, then syncs if the
-/// chain tip is ahead of the wallet.
+/// chain tip is ahead of the wallet. After `failures` failed checks it connects
+/// to the built-in server that many places down the list, wrapping around.
 async fn sync_pass(
     account: &zorg::account::Account,
     lwd: Option<&str>,
+    failures: usize,
     client: &mut Option<zorg::sync_engine::LwdClient>,
     updates: &std::sync::mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let client = match client {
         Some(client) => client,
-        None => client.insert(zorg::sync_engine::connect_endpoint(account.network, lwd).await?),
+        None => {
+            let servers = account.network.default_lightwalletd_urls();
+            let lwd = lwd.or_else(|| (failures > 0).then(|| servers[failures % servers.len()]));
+            client.insert(zorg::sync_engine::connect_endpoint(account.network, lwd).await?)
+        }
     };
     let tip = zorg::sync_engine::chain_tip(client).await?;
     let progress = sync::get_sync_progress(&account.db_path, account.network)?;
