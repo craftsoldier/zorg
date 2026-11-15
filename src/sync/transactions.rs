@@ -208,6 +208,10 @@ impl ActivityAmounts {
         }
     }
 
+    fn has_output(&self) -> bool {
+        self.has_transparent || self.has_shielded || self.has_ironwood
+    }
+
     fn display_pool(&self) -> &'static str {
         match (self.has_transparent, self.has_shielded, self.has_ironwood) {
             (true, false, false) => "transparent",
@@ -287,8 +291,6 @@ fn assemble_history(
             classify_history_tx(base, &summarize_activity_outputs(base, outputs, uuid_bytes))
         })
         .collect();
-
-    visible.retain(|tx| tx.info.display_amount > 0 || tx.info.tx_kind == "shielded");
 
     visible.sort_by(|a, b| {
         b.sort_pending_rank
@@ -589,7 +591,7 @@ fn classify_history_tx(base: &TxBase, summary: &ActivitySummary) -> Vec<Classifi
             1,
         ));
     }
-    if summary.received.amount > 0 {
+    if summary.received.has_output() {
         rows.push(build_classified_tx(
             base,
             "received",
@@ -915,6 +917,15 @@ mod tests {
         let tx = spend(1, -10_000, 17_252_102, 17_242_102);
         let outputs = vec![own(1, 3, 7_242_102, 1), own(1, 3, 10_000_000, 1)];
         assert!(history(vec![(tx, outputs)], None).is_empty());
+    }
+
+    #[test]
+    fn a_zero_value_receive_is_a_received_row() {
+        let note = output(1, IRONWOOD_POOL, None, Some(me()), 0);
+        assert_eq!(
+            rows(&history(vec![(base(1), vec![note])], None)),
+            [("received", 0, "ironwood")]
+        );
     }
 
     #[test]
